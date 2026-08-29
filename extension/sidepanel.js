@@ -3552,6 +3552,29 @@ async function resolveAttachedPanelOwnerTab() {
   }
 }
 
+function requireContextConsentForScope(nextScope) {
+  const requested = normalizeContextScope(nextScope);
+  if (requested.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return true;
+  const gate = effectiveContextGate(requested);
+  if (gate.allowed) return true;
+
+  openSettingsDialog();
+  const needsConnection = gate.reason === 'principal-unavailable';
+  showOperationToast({
+    kind: 'warn',
+    title: needsConnection ? 'Verify this connection first' : 'Approve page context sharing',
+    detail: needsConnection
+      ? 'Reconnect or test this connection, then approve page context sharing.'
+      : 'Enable “Share page context with this connection,” then choose the tab scope again.',
+    duration: 9000,
+  });
+  if (!needsConnection) {
+    els.browserContextConsentControl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    els.browserContextConsentInput?.focus({ preventScroll: true });
+  }
+  return false;
+}
+
 async function pinContextTab(tab) {
   if (!tab?.id) return false;
   const attachedOwner = await resolveAttachedPanelOwnerTab();
@@ -3566,6 +3589,7 @@ async function pinContextTab(tab) {
     attachedTabId: sidePanelParams.tabId,
   });
   if (action.kind === 'noop') return false;
+  if (!requireContextConsentForScope(action.scope)) return false;
   const applied = await applyContextScope(action.scope, { ensureSession: true });
   return applied;
 }
@@ -3590,12 +3614,14 @@ async function unlockContextScope() {
   if (isAttachedPanelResidency() && !attachedOwner) {
     throw new Error('The attached owner tab is closed or no longer available.');
   }
-  const applied = await applyContextScope(resetContextScope({
+  const nextScope = resetContextScope({
     panelMode: settings.panelResidencyMode,
     attachedTab: attachedOwner,
     attachedTabId: sidePanelParams.tabId,
     previousScope: contextScope,
-  }), { ensureSession: true });
+  });
+  if (!requireContextConsentForScope(nextScope)) return false;
+  const applied = await applyContextScope(nextScope, { ensureSession: true });
   return applied;
 }
 
