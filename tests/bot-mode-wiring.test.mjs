@@ -32,6 +32,24 @@ test('Profiles always load; cron and PetDex stay Bot-Mode-gated', () => {
 
 });
 
+test('Remote API-only connections do not probe or retry for a Dashboard roster', () => {
+  const retryStart = sidepanelSource.indexOf('function scheduleRosterRetry(');
+  const loaderStart = sidepanelSource.indexOf('async function loadProfiles(', retryStart);
+  const loaderEnd = sidepanelSource.indexOf('function profileSwitchDisplayName', loaderStart);
+  const retrySource = sidepanelSource.slice(retryStart, loaderStart);
+  const loaderSource = sidepanelSource.slice(loaderStart, loaderEnd);
+  const remoteApiGuard = 'if (isRemoteMode() && !isRemoteWsMode())';
+
+  assert.ok(retrySource.indexOf(remoteApiGuard) >= 0);
+  assert.ok(retrySource.indexOf(remoteApiGuard) < retrySource.indexOf('setTimeout('));
+  assert.ok(loaderSource.indexOf(remoteApiGuard) >= 0);
+  assert.ok(loaderSource.indexOf(remoteApiGuard) < loaderSource.indexOf('ensureProfileWsConnection('));
+  assert.match(loaderSource, /return \{ status: 'degraded', detail: botModeRosterNote \};/);
+  assert.match(loaderSource, /return \{ status: 'ready', detail: count === 1/);
+  assert.match(sidepanelSource, /loadProfiles: async \(\) => loadProfiles\(\{ quiet: true \}\)/);
+  assert.ok(sidepanelSource.includes('els.profileStatus.textContent = botModeRosterNote;'));
+});
+
 test('profile avatars hydrate from overrides and pet cache even when Bot Mode is off', () => {
   assert.match(sidepanelSource, /void loadBotProfileOverrides\(\)/);
   assert.match(sidepanelSource, /async function refreshPetAvatarCache\(\) \{\s*try \{/);

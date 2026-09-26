@@ -1073,6 +1073,7 @@ let activeConversationTransport = 'rest';
 let activeDashboardWsConnection = null;
 let activeGroupProjection = null;
 let activeGroupRuntime = null;
+let activeGroupGeneration = 0;
 let activeGroupMessages = [];
 let activeGroupAbortController = null;
 // Desktop-parity threading: the room log groups by `thread` id. The strip
@@ -8833,6 +8834,8 @@ function renderProfiles() {
         skills: active.skillCount ? ` · ${active.skillCount} ${translateUiText('skills')}` : '',
       })
       : t('profile.available', { count: availableProfiles.length });
+  } else if (botModeRosterNote) {
+    els.profileStatus.textContent = botModeRosterNote;
   } else if (isRemoteWsMode()) {
     els.profileStatus.textContent = 'Profile API unavailable from the extension origin. Open the Hermes dashboard and sign in to select a profile.';
   } else {
@@ -9676,6 +9679,10 @@ async function sendActiveGroupMessage(text = '', turnAttachments = []) {
   }
   const value = String(text || '').trim();
   if (!value) return false;
+  const groupProjection = activeGroupProjection;
+  const groupRuntime = activeGroupRuntime;
+  const groupMessages = activeGroupMessages;
+  const groupGeneration = activeGroupGeneration;
   const abortController = new AbortController();
   activeGroupAbortController = abortController;
   sending = true;
@@ -9693,15 +9700,21 @@ async function sendActiveGroupMessage(text = '', turnAttachments = []) {
     } else {
       targetThreadId = 'main';
     }
-    const result = await activeGroupRuntime.send({
-      roomId: activeGroupProjection.roomId || activeGroupProjection.id,
-      groupName: activeGroupProjection.displayName,
-      members: groupRuntimeMembers(),
-      messages: activeGroupMessages,
+    const result = await groupRuntime.send({
+      roomId: groupProjection.roomId || groupProjection.id,
+      groupName: groupProjection.displayName,
+      members: groupRuntimeMembers(groupProjection),
+      messages: groupMessages,
       text: value,
       signal: abortController.signal,
       thread: targetThreadId,
     });
+    if (
+      abortController.signal.aborted
+      || groupGeneration !== activeGroupGeneration
+      || activeGroupProjection !== groupProjection
+      || activeGroupRuntime !== groupRuntime
+    ) return false;
     if (isStartingNewThread) {
       activeGroupThreadId = targetThreadId;
       activeGroupExpandedThreads.add(targetThreadId);
@@ -9718,11 +9731,18 @@ async function sendActiveGroupMessage(text = '', turnAttachments = []) {
     if (result.failures.length) {
       setStatus('warn', 'Group message partially delivered', `${result.failures.length} member${result.failures.length === 1 ? '' : 's'} did not complete a reply.`, { translateDetail: false });
     } else {
-      setStatus('ok', 'Group message sent', `${activeGroupProjection.displayName} · ${result.messages.length} messages in the current room view.`, { translateDetail: false });
+      setStatus('ok', 'Group message sent', `${groupProjection.displayName} · ${result.messages.length} messages in the current room view.`, { translateDetail: false });
     }
     return result.ok;
   } catch (error) {
-    setStatus('error', 'Group message failed', String(error?.message || error), { translateDetail: false });
+    if (
+      !abortController.signal.aborted
+      && groupGeneration === activeGroupGeneration
+      && activeGroupProjection === groupProjection
+      && activeGroupRuntime === groupRuntime
+    ) {
+      setStatus('error', 'Group message failed', String(error?.message || error), { translateDetail: false });
+    }
     return false;
   } finally {
     if (activeGroupAbortController === abortController) activeGroupAbortController = null;
@@ -10088,14 +10108,19 @@ function renderGroupThreadStrip() {
 
 async function syncActiveGroupRoomFromGateway() {
   if (!activeGroupProjection || sending) return;
+  const groupProjection = activeGroupProjection;
+  const groupGeneration = activeGroupGeneration;
+  const isCurrentGroup = () => groupGeneration === activeGroupGeneration && activeGroupProjection === groupProjection;
   try {
     const connection = await ensureProfileWsConnection();
+    if (!isCurrentGroup()) return;
     const payload = await connection.client.request(WS_METHODS.profilesList, { include_sessions: true });
+    if (!isCurrentGroup()) return;
     const split = splitBotRosterRows(payload, { sourceId: normalizeGatewayUrl(settings.gatewayUrl) });
     if (split.groupChats.length) {
       adoptSyncedGroupChats(split.groupChats);
-      const targetId = activeGroupProjection.roomId || activeGroupProjection.id;
-      const updated = split.groupChats.find((g) => (g.roomId || g.id) === targetId || g.displayName === activeGroupProjection.displayName);
+      const targetId = groupProjection.roomId || groupProjection.id;
+      const updated = split.groupChats.find((g) => (g.roomId || g.id) === targetId || g.displayName === groupProjection.displayName);
       if (updated && Array.isArray(updated.messages)) {
         activeGroupProjection = updated;
         activeGroupMessages = groupProjectionMessagesForDisplay(updated);
@@ -10113,6 +10138,10 @@ async function syncActiveGroupRoomFromGateway() {
 
 async function openBotGroupChat(row) {
   if (!row) return false;
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    setStatus('warn', 'Group chat unavailable', 'Group chats require the connected Hermes Dashboard. Switch to Dashboard mode to open this room.', { translateDetail: false });
+    return false;
+  }
   if (sending) {
     setStatus('warn', 'Hermes is working…', 'Stop the active run before opening a group chat.');
     return false;
@@ -10122,6 +10151,7 @@ async function openBotGroupChat(row) {
   if (activeRunControl && activeRunControl.phase !== 'terminal') {
     activeRunControl = markRunTerminal(activeRunControl, 'failed');
   }
+  const groupGeneration = ++activeGroupGeneration;
   activeGroupProjection = row;
   activeGroupMessages = groupProjectionMessagesForDisplay(row);
   messages = activeGroupMessages;
@@ -10140,23 +10170,27 @@ async function openBotGroupChat(row) {
   renderGroupThreadStrip();
   renderMessagesFromStorage();
   updateSessionLabel();
+  let groupRuntime = null;
+  const isCurrentOpen = () => groupGeneration === activeGroupGeneration && activeGroupProjection === row;
+  const isCurrentRuntime = () => isCurrentOpen() && groupRuntime !== null && activeGroupRuntime === groupRuntime;
   try {
     const connection = await ensureActiveDashboardWsConnection();
-    activeGroupRuntime = createBotGroupRuntime({
+    if (!isCurrentOpen()) return false;
+    groupRuntime = createBotGroupRuntime({
       client: connection.client,
       onMessage: (message) => {
+        if (!isCurrentRuntime()) return;
         activeGroupMessages = [...activeGroupMessages, message];
         messages = activeGroupMessages;
-        if (activeGroupProjection) {
-          const entry = groupProjectionEntryFromDisplayMessage(message);
-          activeGroupProjection.messages = [...(activeGroupProjection.messages || []), entry];
-        }
+        const entry = groupProjectionEntryFromDisplayMessage(message);
+        row.messages = [...(row.messages || []), entry];
         renderGroupThreadStrip();
         renderMessagesFromStorage();
         updateSessionLabel();
         renderActiveProfileIndicator();
       },
       onActivity: (activity) => {
+        if (!isCurrentRuntime()) return;
         updateActiveGroupActivity(activity);
         if (activity.kind === 'working') {
           setStatus('ok', 'Group member responding', `${activity.roleLabel || activity.member} is working on the room message.`, { translateDetail: false });
@@ -10164,16 +10198,20 @@ async function openBotGroupChat(row) {
           captureTaskToolEvent({
             tool: activity.tool,
             data: activity.data || {},
-          }, activeGroupProjection?.roomId || activeGroupProjection?.id).catch(() => {});
+          }, row.roomId || row.id).catch(() => {});
           setStatus('ok', 'Tool running', `${activity.roleLabel || activity.member} is using ${activity.tool || 'a tool'}…`, { translateDetail: false });
         }
       },
-      persist: (displayMessages) => persistActiveGroupProjection(connection.client, displayMessages),
+      persist: (displayMessages) => isCurrentRuntime()
+        ? persistActiveGroupProjection(connection.client, displayMessages)
+        : undefined,
     });
-    const prepared = await activeGroupRuntime.prepare({
+    activeGroupRuntime = groupRuntime;
+    const prepared = await groupRuntime.prepare({
       roomId: row.roomId || row.id,
       members: groupRuntimeMembers(row),
     });
+    if (!isCurrentRuntime()) return false;
     if (!prepared.ok) {
       setStatus('warn', 'Group chat opened with missing member sessions', `${prepared.failures.length} member session${prepared.failures.length === 1 ? '' : 's'} will initialize when you send.`, { translateDetail: false });
     } else {
@@ -10182,6 +10220,7 @@ async function openBotGroupChat(row) {
     els.input.focus();
     return true;
   } catch {
+    if (groupRuntime ? !isCurrentRuntime() : !isCurrentOpen()) return false;
     activeGroupRuntime = null;
     setStatus('warn', 'Group chat transport unavailable', 'The connected Hermes runtime could not open the existing member sessions for this room.', { translateDetail: false });
     els.input.focus();
@@ -10201,6 +10240,10 @@ const CANONICAL_FALLBACK_GROUP_CHATS = [];
 let desktopDashboardUrl = '';
 
 function scheduleRosterRetry({ force = false } = {}) {
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    rosterRetryCount = 0;
+    return;
+  }
   if (botModeRoster.length && !force) {
     rosterRetryCount = 0;
     return;
@@ -10219,10 +10262,52 @@ async function loadProfiles({ quiet = false, allowDashboardTrust = !quiet } = {}
   // Public status and REST profile summaries are discovery, never roster data.
   const generation = ++botModeRosterGeneration;
   const gatewayUrl = normalizeGatewayUrl(settings.gatewayUrl);
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    availableProfiles = [];
+    botModeRoster = [];
+    botModeRosterNote = 'Profile roster unavailable in Remote API mode. Connect a Hermes Dashboard to use profile switching.';
+    rosterRetryCount = 0;
+    activeConversationTransport = 'rest';
+    activeDashboardWsConnection = null;
+    activeGroupGeneration += 1;
+    const clearedActiveGroup = Boolean(activeGroupProjection);
+    if (clearedActiveGroup) {
+      activeGroupAbortController?.abort?.();
+      activeGroupAbortController = null;
+      activeGroupProjection = null;
+      activeGroupRuntime = null;
+      activeGroupMessages = [];
+      activeGroupThreadId = '';
+      activeGroupPendingNewThread = false;
+      activeGroupExpandedThreads.clear();
+      resetActiveGroupTypingIndicator();
+      messages = [];
+      document.body.classList.remove('bot-mode-engaged');
+      if (els.botChatIntro) els.botChatIntro.hidden = true;
+      if (settings.botModeEnabled === true) {
+        setBotModeView('agents');
+        if (els.botModePanel) els.botModePanel.hidden = false;
+        els.botModeButton?.setAttribute('aria-expanded', 'true');
+      }
+      renderGroupThreadStrip();
+      renderMessagesFromStorage();
+      updateSessionLabel();
+    }
+    // The prior Dashboard roster is connection-scoped. Drop its synced rows,
+    // but preserve any local draft rooms owned by this browser session.
+    adoptSyncedGroupChats([], { authoritative: true, allowCanonicalFallback: false });
+    renderProfiles();
+    renderBotModeRoster(els.botModeSearch?.value);
+    renderActiveProfileIndicator();
+    if (!quiet || clearedActiveGroup) setStatus('warn', 'Profile roster unavailable', botModeRosterNote, { translateDetail: false });
+    return { status: 'degraded', detail: botModeRosterNote };
+  }
   try {
     const connection = await ensureProfileWsConnection({ readyTimeoutMs: 8_000, allowDashboardTrust });
     const payload = await connection.client.request(WS_METHODS.profilesList, { include_sessions: true });
-    if (generation !== botModeRosterGeneration || gatewayUrl !== normalizeGatewayUrl(settings.gatewayUrl)) return;
+    if (generation !== botModeRosterGeneration || gatewayUrl !== normalizeGatewayUrl(settings.gatewayUrl)) {
+      return { status: 'skipped', detail: 'Profile sync was superseded.' };
+    }
     if (!Array.isArray(payload?.profiles)) throw new Error('invalid-profile-roster');
     const sourceId = connection.baseUrl || gatewayUrl;
     const split = splitBotRosterRows(payload, { sourceId });
@@ -10231,24 +10316,33 @@ async function loadProfiles({ quiet = false, allowDashboardTrust = !quiet } = {}
     adoptSyncedGroupChats(split.groupChats, { allowCanonicalFallback: false });
     botModeRosterNote = '';
     rosterRetryCount = 0;
-        // Keep a successful avatar so refresh does not flash a generic face while the next fetch is in flight.
+    // Keep a successful avatar so refresh does not flash a generic face while the next fetch is in flight.
     await writeLastKnownRoster({ agents: split.agents, groupChats: split.groupChats, sourceId });
-    if (generation !== botModeRosterGeneration) return;
+    if (generation !== botModeRosterGeneration) {
+      return { status: 'skipped', detail: 'Profile sync was superseded.' };
+    }
     renderProfiles();
     renderBotModeRoster(els.botModeSearch?.value);
     renderBotModeGroupChats(els.botModeSearch?.value);
+    renderActiveProfileIndicator();
     void loadSessions({ quiet: true });
-    if (!quiet) setStatus('ok', 'Hermes profiles synced', `${availableProfiles.length} profile${availableProfiles.length === 1 ? '' : 's'} available`);
+    const count = botModeRoster.length;
+    if (!quiet) setStatus('ok', 'Hermes profiles synced', `${count} profile${count === 1 ? '' : 's'} available`);
+    return { status: 'ready', detail: count === 1 ? '1 PROFILE LOADED.' : `${count} PROFILES LOADED.` };
   } catch {
-    if (generation !== botModeRosterGeneration || gatewayUrl !== normalizeGatewayUrl(settings.gatewayUrl)) return;
+    if (generation !== botModeRosterGeneration || gatewayUrl !== normalizeGatewayUrl(settings.gatewayUrl)) {
+      return { status: 'skipped', detail: 'Profile sync was superseded.' };
+    }
     // Preserve live rich rows and groups. Do not restore legacy caches: earlier
     // versions persisted status-only rows without authority or connection scope.
     botModeRosterNote = 'Desktop profile sync unavailable. Existing bot details are preserved. Open the connected Dashboard and refresh profiles to reconnect.';
     renderProfiles();
     renderBotModeRoster(els.botModeSearch?.value);
     renderBotModeGroupChats(els.botModeSearch?.value);
+    renderActiveProfileIndicator();
     if (!quiet) setStatus('warn', 'Desktop profile sync unavailable', botModeRosterNote, { translateDetail: false });
     scheduleRosterRetry({ force: true });
+    return { status: 'degraded', detail: botModeRosterNote };
   }
 }
 
@@ -10723,6 +10817,7 @@ async function openBotProfile(row) {
         }
     els.botModeLoadingOverlay.hidden = false;
   }
+  activeGroupGeneration += 1;
   activeGroupAbortController?.abort?.();
   activeGroupAbortController = null;
   activeGroupProjection = null;
@@ -10843,6 +10938,7 @@ async function leaveBotModeForRegularSession() {
     );
     const nextProfile = returnProfile || String(settings.activeProfile || '').trim();
 
+    activeGroupGeneration += 1;
     activeGroupAbortController?.abort?.();
     activeGroupAbortController = null;
     activeGroupProjection = null;
@@ -10911,6 +11007,16 @@ async function leaveBotModeForRegularSession() {
 function renderActiveProfileIndicator() {
   if (!els.activeProfileIndicator) return;
   els.activeProfileIndicator.replaceChildren();
+  if (!botModeRoster.length) {
+    closeProfileSwitchMenu();
+    els.activeProfileIndicator.classList.remove('group-roster');
+    els.activeProfileIndicator.style.width = '';
+    els.activeProfileIndicator.style.maxWidth = '';
+    els.activeProfileIndicator.style.flexBasis = '';
+    els.activeProfileIndicator.removeAttribute('aria-disabled');
+    els.activeProfileIndicator.hidden = true;
+    return;
+  }
 
   // If inside a group chat, show all group bot members side-by-side (max 4, then +N)
   if (activeGroupProjection) {
@@ -10979,7 +11085,11 @@ function renderActiveProfileIndicator() {
     return;
   }
   const row = botModeRoster.find((entry) => entry.profileName === activeProfile);
-  const name = botProfileDisplayName(row || { profileName: activeProfile });
+  if (!row) {
+    els.activeProfileIndicator.hidden = true;
+    return;
+  }
+  const name = botProfileDisplayName(row);
   appendBotModeAvatar(els.activeProfileIndicator, name, activeProfile, row?.avatar);
   if (row?.hasAvatar && !remoteAvatarImageOf(row?.avatar)) {
     void hydrateBotModeRemoteAvatar(row, els.activeProfileIndicator);
@@ -13659,6 +13769,7 @@ function preferredModelOptionsForNewSession() {
 
 async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), focus = true, hidden = false, transport = '', source = '', scopeRevisionId = scopeRevision.current() } = {}) {
   if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  activeGroupGeneration += 1;
   activeGroupAbortController?.abort?.();
   activeGroupAbortController = null;
   activeGroupProjection = null;
@@ -13850,6 +13961,7 @@ async function openHermesSession(selectedSession) {
     setStatus('warn', 'Hermes is working…', 'Stop the active run before switching sessions.');
     return false;
   }
+  activeGroupGeneration += 1;
   activeGroupAbortController?.abort?.();
   activeGroupAbortController = null;
   activeGroupProjection = null;
@@ -20588,15 +20700,7 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
           ? { status: 'ready', detail: `${availableSkills.length} skills available.` }
           : { status: 'skipped', detail: 'Skills route unavailable on this runtime.' };
       },
-      loadProfiles: async () => {
-        await loadProfiles({ quiet: true });
-        const count = botModeRoster.length || availableProfiles.length;
-        // Startup diagnostic contract: exact count only, no name/role listing.
-        return {
-          status: 'ready',
-          detail: count === 1 ? '1 PROFILE LOADED.' : `${count} PROFILES LOADED.`,
-        };
-      },
+      loadProfiles: async () => loadProfiles({ quiet: true }),
       loadSessions: async () => {
         const outcome = await loadSessions({ quiet: true });
         return outcome?.ok && sessionRoutesAvailable !== false
