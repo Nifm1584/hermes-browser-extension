@@ -433,3 +433,192 @@ test('dashboard WebSocket bootstrap uses the same worker transport as discovery'
   assert.doesNotMatch(wsSource, /await fetch\((?:baseUrl|freshBase)/);
   assert.match(wsSource, /await dashboardFetch\(baseUrl/);
 });
+
+// A `sessions.changed` roster sync re-parses the room and therefore REPLACES
+// the activeGroupProjection object for the SAME open room. The room's runtime
+// callbacks are bound to the generation/runtime token, not to that object's
+// identity, so an in-place sync must not freeze the open room: member replies
+// still render and the Dashboard projection still persists.
+test('an in-place roster sync keeps the open room runtime callbacks live', async () => {
+  const start = source.indexOf('async function openBotGroupChat(');
+  const end = source.indexOf('\n// Group projections are read from the connected verified roster', start);
+  const openGroupSource = source.slice(start, end);
+  const row = {
+    id: 'room-1',
+    roomId: 'room-1',
+    displayName: 'Room One',
+    messages: [],
+    members: [{ name: 'alpha' }, { name: 'beta' }],
+  };
+  const renders = { messages: 0 };
+  const captured = [];
+  const persisted = [];
+  const context = {
+    isRemoteMode: () => false,
+    isRemoteWsMode: () => false,
+    sending: false,
+    activeRunControl: null,
+    markRunTerminal: (control) => control,
+    activeGroupGeneration: 0,
+    activeGroupProjection: null,
+    activeGroupRuntime: null,
+    activeGroupMessages: [],
+    activeGroupThreadId: '',
+    activeGroupPendingNewThread: false,
+    activeGroupExpandedThreads: new Set(),
+    activeGroupTypingMembers: new Map(),
+    activeGroupAbortController: null,
+    activeConversationTransport: 'rest',
+    botHistoryVisibleCount: 0,
+    BOT_HISTORY_PAGE_SIZE: 40,
+    messages: [],
+    document: { body: { classList: { add() {} } } },
+    els: { botModePanel: {}, botModeButton: { setAttribute() {} }, input: { focus() {} } },
+    ensureActiveDashboardWsConnection: async () => ({ baseUrl: 'http://dash', client: {} }),
+    persistActiveGroupProjection: async (_client, displayMessages) => { persisted.push(displayMessages); },
+    groupProjectionMessagesForDisplay: (target) => (target?.messages || []).map((entry) => ({ ...entry })),
+    groupRuntimeMembers: (target) => target?.members || [],
+    groupProjectionEntryFromDisplayMessage: (message) => ({ ...message }),
+    updateActiveGroupActivity() {},
+    captureTaskToolEvent: async () => {},
+    resetActiveGroupTypingIndicator() {},
+    renderGroupThreadStrip() {},
+    renderMessagesFromStorage() { renders.messages += 1; },
+    updateSessionLabel() {},
+    renderActiveProfileIndicator() {},
+    setStatus() {},
+    createBotGroupRuntime: (handlers) => {
+      captured.push(handlers);
+      return { prepare: async () => ({ ok: true, failures: [] }) };
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(`${openGroupSource}\nthis.open = openBotGroupChat;`, context);
+
+  const opened = await context.open(row);
+  assert.equal(opened, true);
+  assert.equal(captured.length, 1);
+  const runtime = captured[0];
+
+  // A real roster sync swaps the projection object for the same room.
+  context.activeGroupProjection = { ...row, messages: [] };
+  assert.notEqual(context.activeGroupProjection, row);
+  assert.equal(context.activeGroupGeneration, 1);
+  assert.ok(context.activeGroupRuntime);
+
+  renders.messages = 0;
+  await runtime.onMessage({ role: 'assistant', roleLabel: 'Alpha', content: 'reply after sync' });
+  assert.equal(renders.messages, 1, 'member replies must still render after an in-place roster sync');
+
+  await runtime.persist([{ role: 'user', content: 'turn' }]);
+  assert.equal(persisted.length, 1, 'the Dashboard group projection must still be written after a sync');
+
+  // The message entry must land on the CURRENT projection object, not the
+  // pre-sync captured one.
+  assert.equal(context.activeGroupProjection.messages.length, 1);
+  assert.equal(row.messages.length, 0);
+});
+
+// The same identity trap existed in the send path: a roster sync landing
+// mid-turn must not silently discard a completed group turn.
+test('an in-place roster sync mid-turn does not discard a completed group turn', async () => {
+  const start = source.indexOf('async function sendActiveGroupMessage(');
+  const end = source.indexOf('\n// Desktop-parity threads strip', start);
+  const sendSource = source.slice(start, end);
+  const statuses = [];
+  let resolveTurn;
+  const row = { id: 'room-1', roomId: 'room-1', displayName: 'Room One' };
+  const context = {
+    activeGroupProjection: row,
+    activeGroupRuntime: { send: () => new Promise((resolve) => { resolveTurn = resolve; }) },
+    activeGroupGeneration: 1,
+    activeGroupMessages: [],
+    activeGroupAbortController: null,
+    activeGroupThreadId: '',
+    activeGroupPendingNewThread: false,
+    activeGroupExpandedThreads: new Set(),
+    activeGroupTypingMembers: new Map(),
+    messages: [],
+    sending: false,
+    AbortController: class {
+      constructor() { this.signal = { aborted: false }; }
+      abort() { this.signal.aborted = true; }
+    },
+    els: { input: { value: '' } },
+    groupRuntimeMembers: () => [{ name: 'alpha' }, { name: 'beta' }],
+    groupProjectionEntryFromDisplayMessage: (message) => message,
+    renderAttachments() {},
+    updateComposerBusyState() {},
+    renderGroupThreadStrip() {},
+    renderMessagesFromStorage() {},
+    updateSessionLabel() {},
+    renderActiveProfileIndicator() {},
+    resetActiveGroupTypingIndicator() {},
+    setStatus: (...args) => statuses.push(args),
+  };
+  vm.createContext(context);
+  vm.runInContext(`${sendSource}\nthis.run = sendActiveGroupMessage;`, context);
+
+  const pending = context.run('room prompt');
+  for (let attempt = 0; attempt < 5 && !resolveTurn; attempt += 1) await Promise.resolve();
+  // `sessions.changed` fires while the turn is in flight.
+  context.activeGroupProjection = { ...row };
+  resolveTurn({ ok: true, failures: [], messages: [{ role: 'assistant', content: 'reply' }] });
+  const result = await pending;
+
+  assert.equal(result, true);
+  assert.equal(statuses.some((status) => status[1] === 'Group message sent'), true);
+});
+
+// Guard the fix itself: liveness must be the generation token, never the
+// projection object's identity, or an in-place sync silently freezes the room.
+test('group runtime liveness is tracked by generation, not projection identity', () => {
+  const start = source.indexOf('async function openBotGroupChat(');
+  const end = source.indexOf('\n// Group projections are read from the connected verified roster', start);
+  const openGroupSource = source.slice(start, end);
+  assert.match(
+    openGroupSource,
+    /const isCurrentOpen = \(\) => groupGeneration === activeGroupGeneration;/,
+    'isCurrentOpen must key on the generation token alone',
+  );
+  assert.doesNotMatch(
+    openGroupSource,
+    /const isCurrentOpen = \(\) =>[^;]*activeGroupProjection ===/,
+    'isCurrentOpen must not require projection object identity',
+  );
+
+  const sendStart = source.indexOf('async function sendActiveGroupMessage(');
+  const sendEnd = source.indexOf('\n// Desktop-parity threads strip', sendStart);
+  const sendSource = source.slice(sendStart, sendEnd);
+  assert.doesNotMatch(
+    sendSource,
+    /activeGroupProjection !== groupProjection/,
+    'the send path must not treat a re-parsed projection as stale',
+  );
+});
+
+// Every teardown path must still bump the generation, otherwise the
+// generation-based guard above would accept callbacks from a retired room.
+test('every group teardown path bumps the generation token', () => {
+  const teardownAnchors = [
+    'async function openBotProfile(',
+    'async function leaveBotModeForRegularSession(',
+    'async function createHermesBrowserSession(',
+    'async function openHermesSession(',
+  ];
+  for (const anchor of teardownAnchors) {
+    const start = source.indexOf(anchor);
+    assert.notEqual(start, -1, `missing ${anchor}`);
+    const body = source.slice(start, start + 4000);
+    const clearIndex = body.indexOf('activeGroupProjection = null;');
+    assert.notEqual(clearIndex, -1, `${anchor} does not clear the projection`);
+    const bump = body.lastIndexOf('activeGroupGeneration += 1;', clearIndex);
+    assert.notEqual(bump, -1, `${anchor} clears the projection without bumping activeGroupGeneration`);
+  }
+  // The Remote API-only cleanup path too.
+  const remoteCleanup = source.slice(
+    source.indexOf('async function loadProfiles('),
+    source.indexOf('\nfunction profileSwitchDisplayName('),
+  );
+  assert.match(remoteCleanup, /activeGroupGeneration \+= 1;[\s\S]{0,200}activeGroupProjection = null;/);
+});

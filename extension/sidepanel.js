@@ -9709,10 +9709,12 @@ async function sendActiveGroupMessage(text = '', turnAttachments = []) {
       signal: abortController.signal,
       thread: targetThreadId,
     });
+    // Staleness is the generation/runtime token only. An in-place roster sync
+    // replaces the projection object for the SAME open room, so identity here
+    // would silently discard a legitimate completed turn mid-send.
     if (
       abortController.signal.aborted
       || groupGeneration !== activeGroupGeneration
-      || activeGroupProjection !== groupProjection
       || activeGroupRuntime !== groupRuntime
     ) return false;
     if (isStartingNewThread) {
@@ -10171,8 +10173,18 @@ async function openBotGroupChat(row) {
   renderMessagesFromStorage();
   updateSessionLabel();
   let groupRuntime = null;
-  const isCurrentOpen = () => groupGeneration === activeGroupGeneration && activeGroupProjection === row;
+  // Liveness is the generation token, never the projection object's identity.
+  // Every teardown path (Remote API-only cleanup, profile switch, leaving Bot
+  // Mode, new/resumed session) bumps activeGroupGeneration, and a successful
+  // room sync bumps it too only when it retires the room. An in-place
+  // `sessions.changed` roster sync legitimately REPLACES activeGroupProjection
+  // with a freshly parsed object for the SAME room, so identity would reject
+  // the live runtime's own callbacks and silently freeze the open room.
+  const isCurrentOpen = () => groupGeneration === activeGroupGeneration;
   const isCurrentRuntime = () => isCurrentOpen() && groupRuntime !== null && activeGroupRuntime === groupRuntime;
+  // Read the live projection: a roster sync may have swapped the object since
+  // this runtime was created, and callbacks must land on the current room.
+  const liveProjection = () => activeGroupProjection;
   try {
     const connection = await ensureActiveDashboardWsConnection();
     if (!isCurrentOpen()) return false;
@@ -10183,7 +10195,10 @@ async function openBotGroupChat(row) {
         activeGroupMessages = [...activeGroupMessages, message];
         messages = activeGroupMessages;
         const entry = groupProjectionEntryFromDisplayMessage(message);
-        row.messages = [...(row.messages || []), entry];
+        const projection = liveProjection();
+        if (projection) {
+          projection.messages = [...(projection.messages || []), entry];
+        }
         renderGroupThreadStrip();
         renderMessagesFromStorage();
         updateSessionLabel();
@@ -10192,13 +10207,14 @@ async function openBotGroupChat(row) {
       onActivity: (activity) => {
         if (!isCurrentRuntime()) return;
         updateActiveGroupActivity(activity);
+        const projection = liveProjection();
         if (activity.kind === 'working') {
           setStatus('ok', 'Group member responding', `${activity.roleLabel || activity.member} is working on the room message.`, { translateDetail: false });
         } else if (activity.kind === 'tool_start') {
           captureTaskToolEvent({
             tool: activity.tool,
             data: activity.data || {},
-          }, row.roomId || row.id).catch(() => {});
+          }, (projection || row).roomId || (projection || row).id).catch(() => {});
           setStatus('ok', 'Tool running', `${activity.roleLabel || activity.member} is using ${activity.tool || 'a tool'}…`, { translateDetail: false });
         }
       },
