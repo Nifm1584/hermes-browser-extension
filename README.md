@@ -84,7 +84,8 @@ The old full-page Hermes Web workspace is retired. The side panel is the support
 - Connects to a configurable local or self-hosted remote Hermes API server. Default: `http://127.0.0.1:8642`.
 - Uses **Trusted Dashboard Attach** for Hermes Cloud: an explicitly selected, signed-in HTTPS agent tab mints a short-lived, single-use WebSocket ticket. Tickets stay memory-only and Cloud remains Chat-only.
 - Supports the same ticketed WebSocket path for a self-hosted remote dashboard when Remote gateway is selected with no API key.
-- Auto-syncs connected Hermes providers/models, profiles, skills, sessions, and capabilities.
+- Auto-syncs connected Hermes providers/models, skills, sessions, and capabilities over the API connection.
+- Profile switching and Bot Mode use the authenticated Hermes Dashboard `profiles.list` roster. A Remote API-only connection remains usable but cannot provide that roster; profile readiness is shown as degraded instead of implying the registry is empty. A successful empty roster response remains a valid `0 profiles` result. Dashboard-backed group rooms also require the Dashboard transport; preserved browser-local draft rooms cannot be opened until a Dashboard connection is available.
 - Keeps runtime plugins available in the same Hermes session. For example, a connected social or messaging plugin can add account, post, and trend context while the extension supplies browser-page context.
 - Shows a Hermes compatibility panel so older gateways degrade into explicit fallback/manual modes instead of broken route errors.
 - Adds **Copy Diagnostics** for v0.3.0 support reports: browser family, version/build, extension origin, gateway origin, capability flags, context mode, selected model/provider, and last visible error with tokens/page content stripped.
