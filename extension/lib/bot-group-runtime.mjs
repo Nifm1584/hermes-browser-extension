@@ -207,6 +207,111 @@ export async function persistGroupProjectionAppend(client, {
   throw new Error('Hermes group projection write could not be confirmed.');
 }
 
+export async function persistGroupProjectionCreate(client, {
+  roomId = '',
+  name = '',
+  members = [],
+  image = null,
+  profile = 'default',
+  now = Date.now(),
+} = {}) {
+  if (!client?.request) throw new TypeError('A Hermes dashboard client is required.');
+  const targetRoomId = clean(roomId).slice(0, 160);
+  if (!targetRoomId) throw new Error('A group room id is required.');
+  const roomName = clean(name).slice(0, 64) || targetRoomId;
+  const roster = [...new Set((Array.isArray(members) ? members : [])
+    .map((member) => clean(typeof member === 'string' ? member : member?.name))
+    .filter(Boolean))];
+  if (roster.length < GROUP_MEMBER_MIN || roster.length > GROUP_MEMBER_MAX) {
+    throw new Error('A group chat needs 2 to 6 bots.');
+  }
+  const key = `id:${targetRoomId}`;
+  const stamp = Math.floor(Number(now) || Date.now());
+
+  const readProjection = async () => {
+    const payload = await client.request('profiles.list', { include_sessions: false });
+    const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
+    const owner = profiles.find((row) => Number(asObject(asObject(row?.ui_meta)['hermes-bots-groups']).version) === 3)
+      || profiles.find((row) => clean(row?.name) === clean(profile))
+      || profiles.find((row) => clean(row?.name) === 'default')
+      || profiles[0];
+    const snapshot = asObject(asObject(owner?.ui_meta)['hermes-bots-groups']);
+    return {
+      ownerName: clean(owner?.name) || clean(profile) || 'default',
+      profiles,
+      snapshot: Number(snapshot.version) === 3 ? snapshot : { version: 3, updatedAt: stamp, rooms: {}, deleted: {} },
+      revision: Math.max(0, Number(asObject(owner?.ui_meta_revisions)['hermes-bots-groups']) || 0),
+    };
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const current = await readProjection();
+    const rooms = asObject(current.snapshot.rooms);
+    if (rooms[key]) return { ok: true, roomKey: key, revision: current.revision, ownerName: current.ownerName };
+    const room = {
+      roomId: targetRoomId,
+      name: roomName,
+      members: roster.map((memberName) => ({ name: memberName, handle: memberName })),
+      log: [],
+      revision: 1,
+      ...(typeof image === 'string' && image ? { image: image.slice(0, 500_000) } : {}),
+    };
+    const nextDeleted = { ...asObject(current.snapshot.deleted) };
+    delete nextDeleted[key];
+    const nextSnapshot = {
+      ...current.snapshot,
+      version: 3,
+      updatedAt: stamp,
+      rooms: { ...rooms, [key]: room },
+      deleted: nextDeleted,
+    };
+    let serializedSize = 0;
+    try {
+      serializedSize = JSON.stringify(nextSnapshot).length;
+    } catch {
+      serializedSize = GROUP_PROJECTION_MAX_CHARS + 1;
+    }
+    if (serializedSize > GROUP_PROJECTION_MAX_CHARS) throw new Error('The group projection reached its published size limit.');
+
+    const result = await client.request('profiles.configure', {
+      name: current.ownerName,
+      ui_meta: { 'hermes-bots-groups': nextSnapshot },
+      ui_meta_expected_revisions: { 'hermes-bots-groups': current.revision },
+    });
+    if (result?.applied?.ui_meta !== true) {
+      if (result?.applied?.ui_meta_conflicts && attempt === 0) continue;
+      throw new Error('Hermes rejected the new group room.');
+    }
+    const appliedRevision = Number(result?.applied?.ui_meta_revisions?.['hermes-bots-groups']);
+    const confirmed = await readProjection();
+    if (!asObject(confirmed.snapshot.rooms)[key]) {
+      if (attempt === 0) continue;
+      throw new Error('Hermes did not confirm the new group room.');
+    }
+    // Mirror membership onto each member profile, as rename does. Best-effort:
+    // the room itself is already durable in the projection.
+    for (const memberName of roster) {
+      if (memberName === current.ownerName) continue;
+      const memberProfile = confirmed.profiles.find((row) => clean(row?.name) === memberName);
+      if (!memberProfile) continue;
+      const currentGroups = Array.isArray(asObject(memberProfile.ui_meta).groups) ? asObject(memberProfile.ui_meta).groups : [];
+      const nextGroups = [...new Set([...currentGroups.map(clean).filter(Boolean), roomName])];
+      try {
+        await client.request('profiles.configure', { name: memberName, ui_meta: { groups: nextGroups, group: nextGroups[0] || null } });
+      } catch {
+        /* best-effort member sync */
+      }
+    }
+    return {
+      ok: true,
+      roomKey: key,
+      revision: Number.isFinite(appliedRevision) ? appliedRevision : confirmed.revision,
+      ownerName: current.ownerName,
+    };
+  }
+  throw new Error('Hermes group room creation could not be confirmed.');
+}
+
 export async function persistGroupProjectionUpdate(client, {
   roomId = '',
   roomKey = '',
@@ -598,8 +703,21 @@ export function createBotGroupRuntime({
       thread: turnThread,
     }];
     await onMessage(working.at(-1), { kind: 'user' });
-    await persist(working, { kind: 'user', roomId: clean(roomId) });
     const failures = [];
+    const syncFailures = [];
+    // The synced projection is a mirror of the room, never a gate on it: a
+    // failed write must not stop members from replying. Each failure is
+    // reported so the surface can show an honest sync state.
+    const mirror = async (meta) => {
+      try {
+        await persist(working, meta);
+      } catch (error) {
+        const failure = { stage: meta.kind, ...(meta.member ? { member: meta.member } : {}), error: safeFailure(error) };
+        syncFailures.push(failure);
+        await onActivity({ kind: 'sync_failed', ...failure });
+      }
+    };
+    await mirror({ kind: 'user', roomId: clean(roomId) });
 
     // Desktop-parity @mention routing: "@name" directs the turn at one member,
     // "@everyone" or no mention prompts all members.
@@ -627,7 +745,7 @@ export function createBotGroupRuntime({
           };
           working.push(message);
           await onMessage(message, { kind: 'reply', member: member.name, roleLabel: member.title || member.name });
-          await persist(working, { kind: 'reply', member: member.name, roomId: clean(roomId) });
+          await mirror({ kind: 'reply', member: member.name, roomId: clean(roomId) });
         } else {
           await onActivity({ kind: 'pass', member: member.name, roleLabel: member.title || member.name });
         }
@@ -639,7 +757,7 @@ export function createBotGroupRuntime({
     }
     await onActivity({ kind: 'idle' });
 
-    return { ok: true, messages: working, failures };
+    return { ok: true, messages: working, failures, syncFailures };
   }
 
   return Object.freeze({ prepare, send });

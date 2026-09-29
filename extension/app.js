@@ -1064,6 +1064,8 @@ async function sendActiveWebGroupMessage(text = '', turnAttachments = []) {
     renderMessages(activeGroupMessages);
     if (result.failures.length) {
       els.webBotModeStatus.textContent = `${result.failures.length} group member${result.failures.length === 1 ? '' : 's'} did not complete a reply.`;
+    } else if (Array.isArray(result.syncFailures) && result.syncFailures.length) {
+      els.webBotModeStatus.textContent = `Members replied, but ${result.syncFailures.length} message${result.syncFailures.length === 1 ? '' : 's'} could not be saved to the synced room.`;
     } else {
       els.webBotModeStatus.textContent = `${activeGroupProjection.displayName} · group message sent.`;
     }

@@ -264,6 +264,7 @@ import {
   createBotGroupRuntime,
   groupProjectionEntryFromDisplayMessage,
   persistGroupProjectionAppend,
+  persistGroupProjectionCreate,
   persistGroupProjectionRename,
   persistGroupProjectionUpdate,
 } from './lib/bot-group-runtime.mjs';
@@ -9520,7 +9521,8 @@ function renderBotModeGroupChats(query = '') {
     meta.textContent = row.title || `${row.members.length} member${row.members.length === 1 ? '' : 's'} · synced projection`;
     const preview = document.createElement('span');
     preview.className = 'bot-mode-row-preview';
-    preview.textContent = row.canonical?.preview || 'Synced group projection.';
+    const unsynced = row.syncState === 'local-only' || row.syncState === 'sync-failed';
+    preview.textContent = row.canonical?.preview || (unsynced ? 'Only on this device until it syncs.' : 'Synced group projection.');
     copy.append(name, meta, preview);
 
     const actions = document.createElement('span');
@@ -9537,7 +9539,12 @@ function renderBotModeGroupChats(query = '') {
     bottomRow.className = 'group-row-bottom';
     const pill = document.createElement('span');
     pill.className = 'room-pill';
-    pill.textContent = syntheticFallback ? 'Awaiting sync' : 'Synced room';
+    pill.textContent = syntheticFallback
+      ? 'Awaiting sync'
+      : row.syncState === 'local-only'
+        ? 'Not synced'
+        : row.syncState === 'sync-failed' ? 'Sync failed' : 'Synced room';
+    if (unsynced) pill.title = row.syncError || 'This room has not been saved to the connected Hermes instance yet.';
 
     const settingsBtn = document.createElement('button');
     settingsBtn.type = 'button';
@@ -9719,6 +9726,10 @@ async function sendActiveGroupMessage(text = '', turnAttachments = []) {
   els.input.value = '';
   renderAttachments();
   try {
+    if (groupProjection.syncState === 'local-only' || groupProjection.syncState === 'sync-failed') {
+      await syncLocalGroupRoom(groupProjection);
+      renderBotModeGroupChats(els.botModeSearch?.value);
+    }
     const isStartingNewThread = Boolean(activeGroupPendingNewThread);
     activeGroupPendingNewThread = false;
     let targetThreadId = '';
@@ -9759,8 +9770,17 @@ async function sendActiveGroupMessage(text = '', turnAttachments = []) {
     renderMessagesFromStorage();
     updateSessionLabel();
     renderActiveProfileIndicator();
+    const syncFailures = Array.isArray(result.syncFailures) ? result.syncFailures : [];
+    if (syncFailures.length) {
+      const live = activeGroupProjection || groupProjection;
+      if (live.syncState !== 'local-only') live.syncState = 'sync-failed';
+      live.syncError = syncFailures.at(-1)?.error || '';
+      renderBotModeGroupChats(els.botModeSearch?.value);
+    }
     if (result.failures.length) {
       setStatus('warn', 'Group message partially delivered', `${result.failures.length} member${result.failures.length === 1 ? '' : 's'} did not complete a reply.`, { translateDetail: false });
+    } else if (syncFailures.length) {
+      setStatus('warn', 'Group room not synced', `Members replied, but ${syncFailures.length} message${syncFailures.length === 1 ? '' : 's'} could not be saved to the synced room. ${syncFailures.at(-1)?.error || ''}`.trim(), { translateDetail: false });
     } else {
       setStatus('ok', 'Group message sent', `${groupProjection.displayName} · ${result.messages.length} messages in the current room view.`, { translateDetail: false });
     }
@@ -10037,12 +10057,50 @@ async function createNewGroupChat() {
     canonical: { durableId: '', resolvedRuntimeId: '', status: 'missing', preview: '' },
     activity: { activeNow: false, lastActive: Date.now(), unread: 0, attention: false },
     messages: [],
+    syncState: 'local-only',
   };
+  if (els.newGroupCreateButton) els.newGroupCreateButton.disabled = true;
+  await syncLocalGroupRoom(row);
   botModeGroupChats = mergeGroupChatLists([row], botModeGroupChats);
   renderBotModeGroupChats(els.botModeSearch?.value);
   closeNewGroupModal();
   els.botModePanel.hidden = true;
   await openBotGroupChat(row);
+  if (row.syncState !== 'synced') {
+    setStatus('warn', 'Group room not synced', `Bots can still reply, but this room is only on this device until it syncs. ${row.syncError || ''}`.trim(), { translateDetail: false });
+  }
+}
+
+// Writes a browser-created room to the synced group projection so members,
+// other clients, and later sessions can see it. Never throws: the outcome is
+// recorded on the row as syncState ('synced' | 'local-only').
+async function syncLocalGroupRoom(row) {
+  if (!row || row.syncState === 'synced') return true;
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    row.syncState = 'local-only';
+    row.syncError = 'Group rooms sync through the connected Hermes Dashboard.';
+    return false;
+  }
+  try {
+    const connection = await ensureActiveDashboardWsConnection();
+    const result = await persistGroupProjectionCreate(connection.client, {
+      roomId: row.roomId || row.id,
+      name: row.displayName,
+      members: row.members,
+      image: row.image || null,
+      now: Date.now(),
+    });
+    row.roomKey = result.roomKey;
+    row.revision = Math.max(Number(row.revision) || 0, 1);
+    row.syncState = 'synced';
+    row.syncError = '';
+    row.title = `${row.members.length} member${row.members.length === 1 ? '' : 's'} · synced projection`;
+    return true;
+  } catch (error) {
+    row.syncState = 'local-only';
+    row.syncError = String(error?.message || error || 'The room could not be synced.');
+    return false;
+  }
 }
 
 function startNewGroupThread() {
