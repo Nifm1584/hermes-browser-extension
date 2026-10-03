@@ -5151,6 +5151,10 @@
     "message": "يعرض الوقت على رسائلك عند التمرير أو اللمس.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "إظهار الحالة أو إخفاؤها",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "لوحة جانبية",
     "description": "Runtime interface message ui.side.panel"

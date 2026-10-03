@@ -5151,6 +5151,10 @@
     "message": "ホバーまたはタップしたときにメッセージの時刻を表示します。",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "ステータスを表示/非表示",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "サイドパネル",
     "description": "Runtime interface message ui.side.panel"

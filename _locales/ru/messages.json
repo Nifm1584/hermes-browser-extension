@@ -5151,6 +5151,10 @@
     "message": "Показывает время на ваших сообщениях при наведении или нажатии.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Показать или скрыть статус",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Боковая панель",
     "description": "Runtime interface message ui.side.panel"

@@ -5151,6 +5151,10 @@
     "message": "Toont de tijd op je berichten wanneer je eroverheen gaat of erop tikt.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Status tonen of verbergen",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Zijpaneel",
     "description": "Runtime interface message ui.side.panel"

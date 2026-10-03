@@ -5151,6 +5151,10 @@
     "message": "Vis tiden på dine beskeder, når du holder musen over eller trykker på dem.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Vis eller skjul status",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Sidepanel",
     "description": "Runtime interface message ui.side.panel"

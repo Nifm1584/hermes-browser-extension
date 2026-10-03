@@ -5151,6 +5151,10 @@
     "message": "Muestra la hora en tus mensajes al pasar el cursor o tocarlos.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Mostrar u ocultar estado",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Panel lateral",
     "description": "Runtime interface message ui.side.panel"

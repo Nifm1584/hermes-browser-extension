@@ -5151,6 +5151,10 @@
     "message": "Mesajlarınızın saatini üzerine gelince veya dokununca gösterir.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Durumu göster veya gizle",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Yan panel",
     "description": "Runtime interface message ui.side.panel"

@@ -5151,6 +5151,10 @@
     "message": "Показує час на ваших повідомленнях при наведенні чи дотику.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Показати або приховати статус",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Бічна панель",
     "description": "Runtime interface message ui.side.panel"

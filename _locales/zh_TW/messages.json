@@ -5151,6 +5151,10 @@
     "message": "滑鼠移入或輕觸訊息時顯示其時間。",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "顯示或隱藏狀態",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "側邊面板",
     "description": "Runtime interface message ui.side.panel"

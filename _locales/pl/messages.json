@@ -5151,6 +5151,10 @@
     "message": "Pokazuje godzinę na Twoich wiadomościach po najechaniu lub dotknięciu.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Pokaż lub ukryj status",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Panel boczny",
     "description": "Runtime interface message ui.side.panel"

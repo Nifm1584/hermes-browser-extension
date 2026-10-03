@@ -5151,6 +5151,10 @@
     "message": "Affiche l'heure de vos messages au survol ou au toucher.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Afficher ou masquer le statut",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Panneau latéral",
     "description": "Runtime interface message ui.side.panel"

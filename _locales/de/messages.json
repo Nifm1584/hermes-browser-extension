@@ -5151,6 +5151,10 @@
     "message": "Zeigt die Uhrzeit deiner Nachrichten beim Überfahren oder Antippen.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Status ein- oder ausblenden",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Seitenteil",
     "description": "Runtime interface message ui.side.panel"
