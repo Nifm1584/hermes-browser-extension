@@ -24,6 +24,14 @@ const PROFILE = path.join(ROOT, 'tmp', `qa-gateway-failure-${process.pid}`);
 const QA_DIR = path.join(ROOT, '.hermes', 'qa');
 const SCREENSHOT_INIT_FAILURE = path.join(QA_DIR, 'gateway-failure-init-failure.png');
 const SCREENSHOT_AMBIGUOUS = path.join(QA_DIR, 'gateway-failure-ambiguous.png');
+const SCREENSHOT_STALE_IDLE = path.join(QA_DIR, 'gateway-stale-restart-idle.png');
+const SCREENSHOT_STALE_ARMED = path.join(QA_DIR, 'gateway-stale-restart-armed.png');
+const SCREENSHOT_STALE_WORKING = path.join(QA_DIR, 'gateway-stale-restart-working.png');
+const SCREENSHOT_STALE_DONE = path.join(QA_DIR, 'gateway-stale-restart-done.png');
+const SCREENSHOT_STALE_STOPPING = path.join(QA_DIR, 'gateway-stale-restart-stopping.png');
+const SCREENSHOT_AUTO_DETECTED = path.join(QA_DIR, 'gateway-stale-restart-auto-detected.png');
+const SCREENSHOT_AUTO_DONE = path.join(QA_DIR, 'gateway-stale-restart-auto-done.png');
+const STALE_RUNTIME_BODY = "cannot import name 'AwakeIdleMeter' from 'agent.session_activity' (C:/Users/Jaybo/.hermes/hermes-agent/agent/session_activity.py)";
 const TEST_TOKEN = 'hermes-qa-token';
 
 const INIT_FAILURE_BODY = [
@@ -63,7 +71,7 @@ function json(res, status, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Hermes-Session-Id, X-Hermes-Session-Key',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Hermes-Session-Id, X-Hermes-Session-Key, X-Hermes-Session-Token',
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
   });
   res.end(body);
@@ -80,6 +88,20 @@ async function requestBody(req) {
 async function startStubGateway() {
   const requests = [];
   let chatMode = 'ok';
+  // Stub of the local Hermes dashboard for the restart flow: the old process
+  // answers briefly, goes dark, then a new boot id comes up "starting" before
+  // it is running, mirroring a real gateway restart.
+  const dash = { enabled: false, restartAt: 0, gen: 0 };
+  const dashStatus = () => {
+    const prev = `boot-${dash.gen - 1}`;
+    const next = `boot-${dash.gen}`;
+    if (!dash.restartAt) return { boot: next, running: true, state: 'running' };
+    const age = Date.now() - dash.restartAt;
+    if (age < 1500) return { boot: prev, running: true, state: 'running' };
+    if (age < 4500) return null;
+    if (age < 7500) return { boot: next, running: false, state: 'starting' };
+    return { boot: next, running: true, state: 'running' };
+  };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const body = req.method === 'POST' ? await requestBody(req) : null;
@@ -89,11 +111,37 @@ async function startStubGateway() {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Hermes-Session-Id, X-Hermes-Session-Key',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Hermes-Session-Id, X-Hermes-Session-Key, X-Hermes-Session-Token',
         'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       });
       res.end();
       return;
+    }
+    if (dash.enabled) {
+      const port = req.socket.localPort;
+      if (url.pathname === '/api/desktop/dashboard-candidates') { json(res, 200, { candidates: [port] }); return; }
+      if (url.pathname === '/' && req.method === 'GET') {
+        const html = '<!doctype html><script>window.__HERMES_SESSION_TOKEN__="qa-dashboard-token";</script>';
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Access-Control-Allow-Origin': '*' });
+        res.end(html);
+        return;
+      }
+      if (url.pathname === '/api/status') {
+        const state = dashStatus();
+        if (!state) { req.socket.destroy(); return; }
+        json(res, 200, {
+          version: 'qa', gateway_mode: 'single', profiles: ['default'], auth_required: false,
+          gateway_running: state.running, gateway_state: state.state, memory: { boot_id: state.boot },
+        });
+        return;
+      }
+      if (url.pathname === '/api/gateway/restart' && req.method === 'POST') {
+        if (req.headers['x-hermes-session-token'] !== 'qa-dashboard-token') { json(res, 401, { detail: 'Unauthorized' }); return; }
+        dash.gen += 1;
+        dash.restartAt = Date.now();
+        json(res, 200, { ok: true, pid: 1, name: 'gateway-restart' });
+        return;
+      }
     }
     if (url.pathname === '/health' || url.pathname === '/v1/health') {
       json(res, 200, { status: 'ok', platform: 'hermes-agent', version: 'qa' });
@@ -135,6 +183,10 @@ async function startStubGateway() {
       return;
     }
     if (/\/chat$/.test(url.pathname) && req.method === 'POST') {
+      if (chatMode === 'stale-runtime') {
+        json(res, 400, { error: { message: STALE_RUNTIME_BODY, type: 'invalid_request_error' } });
+        return;
+      }
       if (chatMode === 'init-failure') {
         json(res, 500, { error: { message: INIT_FAILURE_BODY, type: 'server_error' } });
         return;
@@ -173,6 +225,7 @@ async function startStubGateway() {
     baseUrl: `http://127.0.0.1:${port}`,
     requests,
     setChatMode: (mode) => { chatMode = mode; },
+    dash,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
@@ -456,6 +509,140 @@ async function main() {
     const fallbackChatRequests = () => gateway.requests.filter((request) => /\/chat$/.test(request.path) && request.method === 'POST').length;
     assert.equal(fallbackChatRequests(), 1, 'A gateway runtime failure must not replay the rejected turn.');
     console.log('[qa] scenario A ok:', JSON.stringify({ title: failedState.title, connectStatus: failedState.connectStatus.slice(0, 220) }, null, 1));
+
+    // ---- Scenario A2: gateway process still runs pre-update code --------------
+    // A realistic side-panel height so the whole failure bubble is in frame.
+    await panel.call('Emulation.setDeviceMetricsOverride', { width: 460, height: 900, deviceScaleFactor: 2, mobile: false });
+    gateway.setChatMode('stale-runtime');
+    gateway.dash.enabled = true;
+    const stalePrompt = 'test';
+    await submitPrompt(panel, stalePrompt);
+    const staleState = await waitFor(() => panel.evaluate(`(() => {
+      const state = ${paneldState};
+      if (!state.messages.includes('Hermes was updated')) return null;
+      return { ...state, hasAction: Boolean(document.querySelector('.gateway-restart-action')) };
+    })()`), 30_000).catch(async (error) => {
+      console.error('[qa] scenario A2 state', JSON.stringify(await panel.evaluate(paneldState).catch(() => null), null, 1));
+      throw error;
+    });
+    assert.equal(staleState.inputValue, stalePrompt, 'Draft must be preserved for the stale-runtime failure.');
+    assert.ok(!staleState.messages.includes('Hermes request rejected'), 'Stale-runtime failure must not read as a generic rejection.');
+    assert.equal(staleState.hasAction, true, 'The restart control must be attached to the failure bubble.');
+    assert.equal(staleState.connection, 'Hermes connected', 'A stale runtime must not report the gateway as unreachable.');
+    const restartPosts = () => gateway.requests.filter((request) => request.path === '/api/gateway/restart').length;
+    const staleView = `(() => {
+      const action = document.querySelector('.gateway-restart-action');
+      action?.scrollIntoView({ block: 'center' });
+      return {
+        phase: action?.dataset.phase,
+        primary: action?.querySelector('.gateway-restart-primary')?.textContent,
+        note: action?.querySelector('.gateway-restart-note')?.textContent,
+        cancelHidden: action?.querySelector('.gateway-restart-cancel')?.hidden,
+      };
+    })()`;
+    const idleView = await panel.evaluate(staleView);
+    assert.deepEqual(idleView, { phase: 'idle', primary: 'Restart Hermes', note: '', cancelHidden: true });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await saveScreenshot(panel, SCREENSHOT_STALE_IDLE);
+    await panel.evaluate(`document.querySelector('.gateway-restart-primary').click(); true`);
+    const armedView = await panel.evaluate(staleView);
+    assert.equal(armedView.phase, 'armed', 'First click must only arm the restart.');
+    assert.match(armedView.note, /interrupts every turn/i);
+    assert.equal(armedView.cancelHidden, false);
+    assert.equal(restartPosts(), 0, 'Arming must never call the restart route.');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await saveScreenshot(panel, SCREENSHOT_STALE_ARMED);
+    await panel.evaluate(`document.querySelector('.gateway-restart-cancel').click(); true`);
+    assert.equal((await panel.evaluate(staleView)).phase, 'idle', 'Cancel must disarm without restarting.');
+    assert.equal(restartPosts(), 0, 'Cancel must never call the restart route.');
+
+    // Confirm for real: the extension must show progress, then a finished state,
+    // and the restart button must NOT come back once Hermes is running again.
+    await panel.evaluate(`document.querySelector('.gateway-restart-primary').click(); true`);
+    await panel.evaluate(`document.querySelector('.gateway-restart-primary').click(); true`);
+    const workingView = await waitFor(() => panel.evaluate(`(() => {
+      const action = document.querySelector('.gateway-restart-action');
+      if (action?.dataset.phase !== 'working') return null;
+      action.scrollIntoView({ block: 'center' });
+      return { phase: action.dataset.phase, stage: action.dataset.stage, note: action.querySelector('.gateway-restart-note')?.textContent, progressHidden: action.querySelector('.gateway-restart-progress')?.hidden };
+    })()`), 10_000);
+    assert.equal(workingView.progressHidden, false, 'The restart must show an animated progress state.');
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await saveScreenshot(panel, SCREENSHOT_STALE_STOPPING);
+    await waitFor(() => panel.evaluate(`document.querySelector('.gateway-restart-action')?.dataset.stage === 'starting'`), 15_000);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await saveScreenshot(panel, SCREENSHOT_STALE_WORKING);
+    assert.equal(restartPosts(), 1, 'Exactly one restart request may be issued.');
+    const doneView = await waitFor(() => panel.evaluate(`(() => {
+      const action = document.querySelector('.gateway-restart-action');
+      if (action?.dataset.phase !== 'done') return null;
+      return {
+        successHidden: action.querySelector('.gateway-restart-success')?.hidden,
+        buttonsHidden: action.querySelector('.gateway-restart-buttons')?.hidden,
+        successText: action.querySelector('.gateway-restart-success-text')?.textContent,
+      };
+    })()`), 30_000);
+    assert.deepEqual(doneView, { successHidden: false, buttonsHidden: true, successText: 'Hermes restarted' });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const finalState = await panel.evaluate(`(() => {
+      const bubbles = Array.from(document.querySelectorAll('.message-content')).map((node) => node.textContent).join(' ');
+      return {
+        bubbles,
+        phase: document.querySelector('.gateway-restart-action')?.dataset.phase,
+        title: document.querySelector('#activeTitle')?.textContent || '',
+        draft: document.querySelector('#promptInput')?.value || '',
+        focused: document.activeElement?.id === 'promptInput',
+      };
+    })()`);
+    assert.match(finalState.bubbles, /Hermes is back/, 'The failure bubble must turn into a completion message.');
+    assert.doesNotMatch(finalState.bubbles, /restart it/i, 'The "restart it" prompt must be gone after a successful restart.');
+    assert.equal(finalState.draft, stalePrompt, 'The preserved draft must survive the restart.');
+    assert.match(finalState.title, /Hermes restarted/);
+    await saveScreenshot(panel, SCREENSHOT_STALE_DONE);
+
+    // ---- Scenario A3: Hermes is restarted from OUTSIDE the button -------------
+    // (terminal, Desktop, anything else). The user must not have to click or
+    // retype: the bubble follows the restart and announces it on its own.
+    gateway.setChatMode('stale-runtime');
+    await submitPrompt(panel, stalePrompt);
+    const lastAction = `(() => { const all = document.querySelectorAll('.gateway-restart-action'); return all[all.length - 1]; })()`;
+    await waitFor(() => panel.evaluate(`document.querySelectorAll('.gateway-restart-action').length === 2`), 30_000);
+    const postsBeforeAuto = restartPosts();
+    assert.equal(await panel.evaluate(`${lastAction}.dataset.phase`), 'idle');
+    // Simulate `hermes gateway restart` run in a terminal: no click, no POST.
+    gateway.dash.gen += 1;
+    gateway.dash.restartAt = Date.now();
+    const detected = await waitFor(() => panel.evaluate(`(() => {
+      const action = ${lastAction};
+      if (action?.dataset.phase !== 'working') return null;
+      action.scrollIntoView({ block: 'center' });
+      return { stage: action.dataset.stage, note: action.querySelector('.gateway-restart-note')?.textContent };
+    })()`), 15_000);
+    assert.match(detected.note, /Stopping|Starting/, 'An outside restart must be shown as it happens.');
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    await saveScreenshot(panel, SCREENSHOT_AUTO_DETECTED);
+    await waitFor(() => panel.evaluate(`${lastAction}.dataset.phase === 'done'`), 40_000);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const autoFinal = await panel.evaluate(`(() => {
+      const all = document.querySelectorAll('.gateway-restart-action');
+      const action = all[all.length - 1];
+      const bubble = action.closest('.message');
+      return {
+        bubble: bubble?.querySelector('.message-content')?.textContent || '',
+        buttonsHidden: action.querySelector('.gateway-restart-buttons')?.hidden,
+        title: document.querySelector('#activeTitle')?.textContent || '',
+      };
+    })()`);
+    assert.match(autoFinal.bubble, /Hermes is back/, 'An outside restart must resolve the bubble to a completion message.');
+    assert.equal(autoFinal.buttonsHidden, true);
+    assert.match(autoFinal.title, /Hermes restarted/);
+    assert.equal(restartPosts(), postsBeforeAuto, 'The passive path must never call the restart route.');
+    await saveScreenshot(panel, SCREENSHOT_AUTO_DONE);
+    gateway.dash.enabled = false;
+    await panel.evaluate(`(() => { const input = document.querySelector('#promptInput'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+    await panel.call('Emulation.clearDeviceMetricsOverride');
+    console.log('[qa] scenario A2 ok:', JSON.stringify({ idleView, armedView }, null, 1));
+    console.log('[qa] screenshots:', SCREENSHOT_STALE_IDLE, SCREENSHOT_STALE_ARMED, SCREENSHOT_STALE_STOPPING, SCREENSHOT_STALE_WORKING, SCREENSHOT_STALE_DONE, SCREENSHOT_AUTO_DETECTED, SCREENSHOT_AUTO_DONE);
 
     // ---- Scenario B: the gateway resets the socket inside the request handler,
     // so the turn may already have been delivered mid-flight -----------------

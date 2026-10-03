@@ -1,4 +1,5 @@
-import { remoteSessionIdentity } from './gateway-ws.mjs';
+import { remoteSessionIdentity, runtimeModelFromSessionStatus, buildSessionModelSwitchRequest } from './gateway-ws.mjs';
+import { profileDefaultModelFromOptions } from './model-discovery.mjs';
 
 const GROUP_PROJECTION_MAX_CHARS = 48_000;
 const GROUP_MEMBER_MIN = 2;
@@ -13,6 +14,15 @@ function clean(value) {
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+// Display-only room events (per-room model-change lines, "X passed" lines) live
+// on the surface and must never reach a member prompt or the synced projection.
+export function isRoomEventRow(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const kind = clean(value.kind || value.display_kind).toLowerCase();
+  if (kind === 'room-event' || kind === 'room_event') return true;
+  return clean(value.role).toLowerCase() === 'system';
 }
 
 function textFromPayload(value) {
@@ -62,11 +72,15 @@ function normalizeDisplayMessage(message) {
   // "default" is never a display identity. Map it to the canonical primary
   // bot name (Roxas) so group sender labels never leak the raw profile name.
   const roleLabel = /^default$/i.test(rawLabel) ? 'Roxas' : rawLabel;
+  const roomEvent = isRoomEventRow(row);
+  const speaker = clean(row.speaker).slice(0, 128);
   return {
     role,
     roleLabel: roleLabel.slice(0, 128),
     content,
     ts: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now(),
+    ...(roomEvent ? { kind: 'room-event' } : {}),
+    ...(speaker ? { speaker } : {}),
     ...(Array.isArray(row.attachments) && row.attachments.length ? { attachments: row.attachments } : {}),
   };
 }
@@ -107,6 +121,9 @@ export function groupMembersForTurn(text = '', members = []) {
 
 export function groupProjectionEntryFromDisplayMessage(message = {}) {
   const row = asObject(message);
+  // Display-only room events (model-change lines, pass/fail lines) are local to
+  // the surface and must never be written into the cross-client projection.
+  if (isRoomEventRow(row)) return null;
   const role = clean(row.role).toLowerCase() === 'user' ? 'user' : 'member';
   const content = textFromPayload(row.content).slice(0, GROUP_TEXT_MAX);
   const timestamp = Number(row.ts ?? row.timestamp ?? Date.now());
@@ -114,11 +131,15 @@ export function groupProjectionEntryFromDisplayMessage(message = {}) {
   // Projection entries are the cross-client record: a "default" label here
   // would sync back into the desktop roster. Normalize to the canonical name.
   const label = /^default$/i.test(rawLabel) ? 'Roxas' : rawLabel;
+  // Prefer the additive `speaker` (the real profile name) over the display
+  // label so the synced projection stores the actual author. `roleLabel` on
+  // display records stays untouched (it is model-facing, B0.5).
+  const fromName = role === 'user' ? label : (clean(row.speaker) || label);
   return {
     id: clean(row.id).slice(0, 160),
     from: {
       kind: role === 'user' ? 'user' : 'member',
-      name: label.slice(0, 128),
+      name: fromName.slice(0, 128),
       source: clean(row.source).slice(0, 128),
     },
     text: content,
@@ -136,6 +157,8 @@ export async function persistGroupProjectionAppend(client, {
 } = {}) {
   if (!client?.request) throw new TypeError('A Hermes dashboard client is required.');
   const entry = groupProjectionEntryFromDisplayMessage(message);
+  // Display-only room events (model-change lines) are skipped, never synced.
+  if (!entry) return { ok: true, skipped: true };
   if (!entry.text) throw new Error('A non-empty group message is required.');
   const targetRoomId = clean(roomId);
   const targetRoomKey = clean(roomKey);
@@ -449,6 +472,7 @@ export async function persistGroupProjectionRename(client, options = {}) {
   return persistGroupProjectionUpdate(client, options);
 }
 function groupLine(message, viewerName = '') {
+  if (isRoomEventRow(message)) return '';
   const role = clean(message.role).toLowerCase();
   const label = clean(message.roleLabel || (role === 'user' ? 'You' : 'Hermes'));
   const suffix = role === 'assistant' && label === viewerName ? ' (you)' : '';
@@ -460,7 +484,10 @@ function buildGroupMemberPrompt({ roomId, groupName, members, viewer, messages }
     .filter((member) => member.name !== viewer.name)
     .map((member) => member.title ? `${member.title} (@${member.name})` : `@${member.name}`)
     .join(', ');
-  const lines = messages.slice(-GROUP_HISTORY_LIMIT).map((message) => `  ${groupLine(message, viewer.name)}`);
+  const lines = messages
+    .filter((message) => !isRoomEventRow(message))
+    .slice(-GROUP_HISTORY_LIMIT)
+    .map((message) => `  ${groupLine(message, viewer.name)}`);
 
   const lastUserMsg = [...messages].reverse().find((m) => clean(m.role).toLowerCase() === 'user');
   const userText = clean(lastUserMsg?.content);
@@ -550,7 +577,11 @@ async function resolveMemberSession(client, roomId, member, { createIfMissing = 
   const profile = member.name;
   const candidate = await findMemberSession(client, title, profile);
   if (candidate?.id) return resumeMemberSession(client, clean(candidate.id), profile, title);
-  if (!createIfMissing) throw new Error(`Existing group session not found for ${profile}.`);
+  if (!createIfMissing) {
+    const error = new Error(`Existing group session not found for ${profile}.`);
+    error.code = 'no-session';
+    throw error;
+  }
 
   try {
     const created = await client.request('session.create', {
@@ -642,9 +673,15 @@ function waitForMemberCompletion(client, liveId, { signal, timeoutMs = GROUP_TUR
   });
 }
 
-async function submitMemberPrompt(client, session, prompt, { signal, timeoutMs, onActivity } = {}) {
+async function submitMemberPrompt(client, session, prompt, { signal, timeoutMs, onActivity, onAttempt } = {}) {
   let current = session;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    // The per-attempt hook runs before EVERY submission attempt — including a
+    // rebound after a 4001 — so a member is never prompted on a session the
+    // hook did not configure. The caller commits the resolved session to its
+    // cache BEFORE the hook runs. A rejected hook aborts this attempt (and the
+    // member's turn) without submitting a prompt.
+    if (typeof onAttempt === 'function') await onAttempt({ ...current });
     try {
       return await waitForMemberCompletion(client, current.liveId, { signal, timeoutMs, text: prompt, onActivity });
     } catch (error) {
@@ -660,10 +697,54 @@ export function createBotGroupRuntime({
   onActivity = () => undefined,
   onMessage = () => undefined,
   persist = async () => undefined,
+  beforeMemberTurn = null,
   now = () => Date.now(),
   timeoutMs = GROUP_TURN_TIMEOUT_MS,
 } = {}) {
   if (!client?.request) throw new TypeError('A Hermes dashboard client is required.');
+
+  // Per-member resolved session cache. A room turn otherwise re-resolves every
+  // member's live session on each send; caching removes those setup round
+  // trips after the first resolution. Only positive resolutions are cached (a
+  // missing session is never cached as an absent one), and an entry is dropped
+  // whenever the live session is gone and cannot be recovered.
+  const sessionCache = new Map();
+  let activeMember = '';
+  // A turn (send or retry) is "running" for its whole member loop, not just
+  // during one member's submit, so a retry can be refused while ANY turn runs.
+  // `retryMemberName` marks the member whose retry is in flight so a second
+  // retry (or a re-entrant one) cannot double-fire.
+  let turnRunning = false;
+  let retryMemberName = '';
+
+  function sessionSnapshot(entry) {
+    return entry ? { liveId: entry.liveId, storedId: entry.storedId, profile: entry.profile, title: entry.title } : null;
+  }
+
+  function rememberSession(session) {
+    if (!session?.liveId) return session;
+    sessionCache.set(clean(session.profile), {
+      liveId: session.liveId,
+      storedId: session.storedId,
+      profile: session.profile,
+      title: session.title,
+    });
+    return session;
+  }
+
+  async function memberSessionFor(roomId, member, { createIfMissing = true } = {}) {
+    const cached = sessionCache.get(member.name);
+    if (cached) return sessionSnapshot(cached);
+    return rememberSession(await resolveMemberSession(client, roomId, member, { createIfMissing }));
+  }
+
+  function assertMemberIdle(name) {
+    if (activeMember && activeMember === name) {
+      const error = new Error(`${name} is replying right now; wait for its turn to finish.`);
+      error.code = 'member-busy';
+      throw error;
+    }
+  }
 
   async function prepare({ roomId = '', members = [] } = {}) {
     const roster = normalizeMembers(members);
@@ -674,7 +755,10 @@ export function createBotGroupRuntime({
     const failures = [];
     for (const member of roster) {
       try {
-        sessions.push(await resolveMemberSession(client, roomId, member, { createIfMissing: false }));
+        // Commit the resolved session to the positive cache so a later send()
+        // (or readMemberModel) reuses it instead of re-resolving. A missing
+        // session still throws `no-session` and is never cached as absent.
+        sessions.push(rememberSession(await resolveMemberSession(client, roomId, member, { createIfMissing: false })));
       } catch (error) {
         failures.push({ member: member.name, error: safeFailure(error) });
       }
@@ -723,21 +807,47 @@ export function createBotGroupRuntime({
     // "@everyone" or no mention prompts all members.
     const roster = groupMembersForTurn(trimmed, roster0);
 
+    // Announce the full routed roster up front so the presence strip can show
+    // who is queued before the first member begins (B2.1).
+    await onActivity({
+      kind: 'turn_start',
+      thread: turnThread,
+      members: roster.map((member) => ({ member: member.name, roleLabel: member.title || member.name })),
+    });
+
+    // A retry must not start while this turn's member loop is still draining.
+    turnRunning = true;
+    try {
     for (const member of roster) {
       if (signal?.aborted) break;
       await onActivity({ kind: 'working', member: member.name, roleLabel: member.title || member.name });
+      activeMember = member.name;
       try {
-        const session = await resolveMemberSession(client, roomId, member);
+        const session = await memberSessionFor(roomId, member);
         const prompt = buildGroupMemberPrompt({ roomId, groupName, members: roster, viewer: member, messages: working });
         const reply = await submitMemberPrompt(client, session, prompt, {
           signal,
           timeoutMs,
           onActivity: (act) => onActivity({ ...act, member: member.name, roleLabel: member.title || member.name }),
+          // Outcome R guard: a per-room model pick is dropped on session.resume,
+          // so the surface re-applies it before EVERY submission attempt (the
+          // first, and any rebound after a 4001). The resolved session is
+          // committed to the cache before the hook runs, so the hook reads the
+          // exact session it is about to configure. A rejected hook fails the
+          // member (with the reason) and skips its turn rather than silently
+          // answering on the wrong model.
+          onAttempt: async (attemptSession) => {
+            rememberSession(attemptSession);
+            if (typeof beforeMemberTurn === 'function') {
+              await beforeMemberTurn({ ...member }, { ...attemptSession });
+            }
+          },
         });
         if (!isGroupPassText(reply)) {
           const message = {
             role: 'assistant',
             roleLabel: member.title || member.name,
+            speaker: member.name,
             content: clean(reply).slice(0, GROUP_TEXT_MAX),
             ts: Number(now()) || Date.now(),
             thread: turnThread,
@@ -750,15 +860,350 @@ export function createBotGroupRuntime({
           await onActivity({ kind: 'pass', member: member.name, roleLabel: member.title || member.name });
         }
       } catch (error) {
+        if (isSessionGoneError(error)) sessionCache.delete(member.name);
         const failure = { member: member.name, roleLabel: member.title || member.name, error: safeFailure(error) };
         failures.push(failure);
         await onActivity({ kind: 'failed', ...failure });
+      } finally {
+        activeMember = '';
       }
+    }
+    } finally {
+      turnRunning = false;
     }
     await onActivity({ kind: 'idle' });
 
     return { ok: true, messages: working, failures, syncFailures };
   }
 
-  return Object.freeze({ prepare, send });
+  // Re-run ONE member's turn after a failure. Uses the exact same session
+  // resolution and beforeMemberTurn (per-room model re-apply) path as a normal
+  // turn, so the stored per-room model binding is re-verified before the prompt
+  // is submitted, and moves the member through the presence reducer
+  // (retry/queued -> working/typing -> reply|pass|failed -> idle). Refused
+  // while any turn runs (`turn-busy`) and against a second in-flight retry
+  // (`retry-busy`) so it cannot overlap a turn or double-fire.
+  async function retryMember({ roomId = '', groupName = '', members = [], messages = [], member, text = '', thread = '', signal } = {}) {
+    const roster = normalizeMembers(members);
+    const target = normalizeMember(member);
+    const found = target ? roster.find((entry) => entry.name === target.name) : null;
+    const baseMessages = (Array.isArray(messages) ? messages : []).map(normalizeDisplayMessage).filter(Boolean).slice(-GROUP_HISTORY_LIMIT);
+    if (!found) return { ok: false, reason: 'member', messages: baseMessages, failures: [] };
+    if (signal?.aborted) return { ok: false, reason: 'aborted', messages: baseMessages, failures: [] };
+    if (turnRunning || retryMemberName) {
+      const error = new Error(turnRunning
+        ? 'A group turn is already running; wait for it to finish before retrying.'
+        : `${retryMemberName || 'A member'} is already being retried.`);
+      error.code = turnRunning ? 'turn-busy' : 'retry-busy';
+      throw error;
+    }
+
+    const name = found.name;
+    const label = found.title || found.name;
+    const turnThread = clean(thread).slice(0, 128) || 'main';
+    // Fold the original user prompt into the context only when it is not
+    // already the last user turn, so the member sees the same ask it failed on
+    // without the prompt being duplicated in the room history.
+    const working = [...baseMessages];
+    const promptText = clean(text).slice(0, GROUP_TEXT_MAX);
+    const last = working.at(-1);
+    const hasPrompt = Boolean(promptText)
+      && clean(last?.role).toLowerCase() === 'user'
+      && clean(last?.content) === promptText;
+    if (promptText && !hasPrompt) {
+      working.push({ role: 'user', roleLabel: 'You', content: promptText, ts: Number(now()) || Date.now(), thread: turnThread });
+    }
+
+    const failures = [];
+    const syncFailures = [];
+    // Also used as the double-fire guard: set BEFORE the first await so a
+    // re-entrant or duplicate retry is rejected synchronously.
+    retryMemberName = name;
+    const mirror = async (meta) => {
+      try {
+        await persist(working, meta);
+      } catch (error) {
+        const failure = { stage: meta.kind, ...(meta.member ? { member: meta.member } : {}), error: safeFailure(error) };
+        syncFailures.push(failure);
+        await onActivity({ kind: 'sync_failed', ...failure });
+      }
+    };
+    try {
+      await onActivity({ kind: 'retry', member: name, roleLabel: label });
+      await onActivity({ kind: 'working', member: name, roleLabel: label });
+      activeMember = name;
+      const session = await memberSessionFor(roomId, found);
+      const prompt = buildGroupMemberPrompt({ roomId, groupName, members: roster, viewer: found, messages: working });
+      const reply = await submitMemberPrompt(client, session, prompt, {
+        signal,
+        timeoutMs,
+        onActivity: (act) => onActivity({ ...act, member: name, roleLabel: label }),
+        // Same Outcome R guard as a normal turn: the stored room binding is
+        // re-applied and verified before EVERY submission attempt, including a
+        // rebound after a 4001. A rejected hook fails the retry with the reason.
+        onAttempt: async (attemptSession) => {
+          rememberSession(attemptSession);
+          if (typeof beforeMemberTurn === 'function') {
+            await beforeMemberTurn({ ...found }, { ...attemptSession });
+          }
+        },
+      });
+      if (!isGroupPassText(reply)) {
+        const message = {
+          role: 'assistant',
+          roleLabel: label,
+          speaker: name,
+          content: clean(reply).slice(0, GROUP_TEXT_MAX),
+          ts: Number(now()) || Date.now(),
+          thread: turnThread,
+          ...(found.source ? { source: found.source } : {}),
+        };
+        working.push(message);
+        await onMessage(message, { kind: 'reply', member: name, roleLabel: label });
+        await mirror({ kind: 'reply', member: name, roomId: clean(roomId) });
+      } else {
+        await onActivity({ kind: 'pass', member: name, roleLabel: label });
+      }
+    } catch (error) {
+      if (isSessionGoneError(error)) sessionCache.delete(name);
+      const failure = { member: name, roleLabel: label, error: safeFailure(error) };
+      failures.push(failure);
+      await onActivity({ kind: 'failed', ...failure });
+    } finally {
+      activeMember = '';
+      retryMemberName = '';
+    }
+    await onActivity({ kind: 'idle' });
+
+    return { ok: true, messages: working, failures, syncFailures };
+  }
+
+  // Read-only snapshot of a member's resolved room session (B3.2 / B2.2).
+  function getMemberSession(name) {
+    return sessionSnapshot(sessionCache.get(clean(name)));
+  }
+
+  // Truthful per-room model read: never an assumed value. A member with no
+  // existing session reports `no-session` and is NOT cached as absent. A live
+  // session that has been reaped (4001) is resumed from the cached stored id
+  // and the status read is retried exactly once.
+  async function readMemberModel(roomId, member) {
+    const normalized = normalizeMember(member);
+    if (!normalized) throw new Error('A group member is required.');
+    let session;
+    try {
+      session = await memberSessionFor(roomId, normalized, { createIfMissing: false });
+    } catch (error) {
+      if (error?.code === 'no-session') return { state: 'no-session' };
+      return { state: 'unknown', error: safeFailure(error) };
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const status = await client.request('session.status', { session_id: session.liveId });
+        const parsed = runtimeModelFromSessionStatus(status);
+        if (!parsed.model && !parsed.provider) {
+          return { state: 'unknown', error: 'The member session did not report a model.' };
+        }
+        return { state: 'ok', model: parsed.model, provider: parsed.provider };
+      } catch (error) {
+        if (attempt === 0 && isSessionGoneError(error) && session.storedId) {
+          // The live runtime is gone but the stored row survives: drop the dead
+          // cache entry, resume from the cached stored id once, and retry.
+          sessionCache.delete(normalized.name);
+          try {
+            session = rememberSession(await resumeMemberSession(client, session.storedId, session.profile, session.title));
+          } catch (resumeError) {
+            return { state: 'unknown', error: safeFailure(resumeError) };
+          }
+          continue;
+        }
+        if (isSessionGoneError(error)) sessionCache.delete(normalized.name);
+        return { state: 'unknown', error: safeFailure(error) };
+      }
+    }
+    return { state: 'unknown', error: 'The member session did not report a model.' };
+  }
+
+  // A switch is only verified when the session reports the requested model —
+  // and provider, when one was requested. A readable status that still shows
+  // the OLD model is NOT success (the live recon showed room status lag).
+  function memberModelMatches(parsed, targetModel, targetProvider) {
+    const observedModel = clean(parsed?.model);
+    if (!observedModel || observedModel !== clean(targetModel)) return false;
+    const wantedProvider = clean(targetProvider);
+    return !wantedProvider || clean(parsed?.provider) === wantedProvider;
+  }
+
+  // Verify a session-scoped switch on the TARGET session only. `session.status`
+  // is the primary evidence. When it still shows the old model, a SAFE
+  // live-reuse `session.resume` (attempted only after a successful status read
+  // proved the session is live, and trusted only when it reused the SAME live
+  // id — never a destructive rebuild) is additional gateway evidence. Returns
+  // `{ verified, evidence, observed, rebuilt?, error? }`; it never claims
+  // success without a target match.
+  async function verifyMemberModelSwitch(session, targetModel, targetProvider) {
+    let observed = null;
+    let statusRead = false;
+    try {
+      const status = await client.request('session.status', { session_id: session.liveId });
+      statusRead = true;
+      observed = runtimeModelFromSessionStatus(status);
+      if (memberModelMatches(observed, targetModel, targetProvider)) {
+        return { verified: true, evidence: 'session.status', observed };
+      }
+    } catch (error) {
+      if (isSessionGoneError(error)) sessionCache.delete(clean(session.profile));
+      return { verified: false, observed: null, error: safeFailure(error) };
+    }
+    if (statusRead && session.storedId) {
+      try {
+        const resumed = await client.request('session.resume', {
+          session_id: session.storedId,
+          profile: session.profile,
+          omit_messages: true,
+        });
+        const identity = remoteSessionIdentity(resumed, session.storedId);
+        if (identity.liveId && identity.liveId !== session.liveId) {
+          // The resume rebuilt the runtime from the stored row (a destructive
+          // path): never report the requested pick as verified.
+          return { verified: false, observed, rebuilt: true, error: 'The member session was rebuilt on resume.' };
+        }
+        const resumedModel = runtimeModelFromSessionStatus(asObject(resumed?.info));
+        if (memberModelMatches(resumedModel, targetModel, targetProvider)) {
+          return { verified: true, evidence: 'session.resume', observed: resumedModel };
+        }
+        return { verified: false, observed: resumedModel.model || resumedModel.provider ? resumedModel : observed };
+      } catch (error) {
+        return { verified: false, observed, error: safeFailure(error) };
+      }
+    }
+    return { verified: false, observed };
+  }
+
+  // Shape a verification into the public result. `ok` carries explicit
+  // `verified`/`evidence`/`observed` fields. Otherwise the switch was accepted
+  // but could not be confirmed (`unverified`) or its truth could not be read at
+  // all (`unknown`) — neither is ever a success.
+  function modelSwitchOutcome(verification, { targetModel, targetProvider, scope, extra = {} }) {
+    if (verification.verified) {
+      return {
+        state: 'ok',
+        model: targetModel,
+        provider: targetProvider || clean(verification.observed?.provider),
+        scope,
+        verified: true,
+        evidence: verification.evidence,
+        observed: verification.observed,
+        ...extra,
+      };
+    }
+    return {
+      state: verification.observed || !verification.error ? 'unverified' : 'unknown',
+      accepted: true,
+      verified: false,
+      requested: { model: targetModel, provider: targetProvider },
+      observed: verification.observed || null,
+      scope,
+      error: verification.error || 'The member session did not confirm the requested model.',
+      ...extra,
+    };
+  }
+
+  // Session-scoped per-room model switch. Never global. Returns a `confirm`
+  // state when the gateway asks (expensive model), requiring a second call with
+  // `confirm: true`. Success is only reported after the switch is verified on
+  // the target session — never from an arbitrary readable status.
+  async function setMemberModel(roomId, member, { model = '', provider = '', confirm = false } = {}) {
+    const normalized = normalizeMember(member);
+    if (!normalized) throw new Error('A group member is required.');
+    const targetModel = clean(model);
+    const targetProvider = clean(provider);
+    if (!targetModel) throw new Error('A Hermes model is required to switch models.');
+    assertMemberIdle(normalized.name);
+    const session = await memberSessionFor(roomId, normalized, { createIfMissing: true });
+    const request = buildSessionModelSwitchRequest({ sessionId: session.liveId, model: targetModel, provider: targetProvider });
+    const params = { ...request.params, ...(confirm ? { confirm_expensive_model: true } : {}) };
+    const result = await client.request(request.method, params);
+    const scope = clean(result?.scope) || 'session';
+    // A confirm request is never success — not even on the second, confirmed
+    // call (the gateway can still refuse to apply without a fresh confirmation).
+    if (result?.confirm_required === true) {
+      return {
+        state: 'confirm',
+        detail: {
+          member: normalized.name,
+          model: targetModel,
+          provider: targetProvider,
+          message: clean(result?.confirm_message),
+          warning: clean(result?.warning),
+          scope,
+        },
+      };
+    }
+    if (scope === 'global') {
+      return {
+        state: 'unverified',
+        accepted: false,
+        verified: false,
+        requested: { model: targetModel, provider: targetProvider },
+        observed: null,
+        scope,
+        error: 'The gateway applied the model switch globally; a per-room switch must stay session-scoped.',
+      };
+    }
+    const verification = await verifyMemberModelSwitch(session, targetModel, targetProvider);
+    return modelSwitchOutcome(verification, { targetModel, targetProvider, scope });
+  }
+
+  // Restore the member's PROFILE default model (read from model.options for the
+  // profile, never from the current picked session) with a session-scoped
+  // switch, then verify the truth on the target session.
+  async function resetMemberModel(roomId, member, { confirm = false } = {}) {
+    const normalized = normalizeMember(member);
+    if (!normalized) throw new Error('A group member is required.');
+    assertMemberIdle(normalized.name);
+    const session = await memberSessionFor(roomId, normalized, { createIfMissing: true });
+    const options = await client.request('model.options', { profile: normalized.name, session_id: session.liveId });
+    const profileDefault = profileDefaultModelFromOptions(options);
+    if (!profileDefault?.model) {
+      const error = new Error(`No profile default model is available for ${normalized.name}.`);
+      error.code = 'no-profile-default';
+      throw error;
+    }
+    const targetModel = clean(profileDefault.model);
+    const targetProvider = clean(profileDefault.provider);
+    const request = buildSessionModelSwitchRequest({ sessionId: session.liveId, model: targetModel, provider: targetProvider });
+    const params = { ...request.params, ...(confirm ? { confirm_expensive_model: true } : {}) };
+    const result = await client.request(request.method, params);
+    const scope = clean(result?.scope) || 'session';
+    if (result?.confirm_required === true) {
+      return {
+        state: 'confirm',
+        detail: {
+          member: normalized.name,
+          model: targetModel,
+          provider: targetProvider,
+          message: clean(result?.confirm_message),
+          warning: clean(result?.warning),
+          scope,
+        },
+      };
+    }
+    if (scope === 'global') {
+      return {
+        state: 'unverified',
+        accepted: false,
+        verified: false,
+        source: 'profile-default',
+        requested: { model: targetModel, provider: targetProvider },
+        observed: null,
+        scope,
+        error: 'The gateway applied the model switch globally; a per-room switch must stay session-scoped.',
+      };
+    }
+    const verification = await verifyMemberModelSwitch(session, targetModel, targetProvider);
+    return modelSwitchOutcome(verification, { targetModel, targetProvider, scope, extra: { source: 'profile-default' } });
+  }
+
+  return Object.freeze({ prepare, send, retryMember, getMemberSession, readMemberModel, setMemberModel, resetMemberModel });
 }

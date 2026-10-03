@@ -69,6 +69,17 @@ test('provider option rejection keeps gateway health separate and preserves the 
   });
 });
 
+test('stale gateway import errors after an update ask for a restart instead of "request rejected"', () => {
+  const state = turnRequestFailureState(hermesRequestError({
+    status: 400,
+    body: JSON.stringify({ error: "cannot import name 'AwakeIdleMeter' from 'agent.session_activity' (C:\\Users\\x\\.hermes\\hermes-agent\\agent\\session_activity.py)" }),
+  }));
+
+  assert.equal(state.kind, 'hermes-update-restart');
+  assert.equal(state.title, 'Hermes was updated — restart it');
+  assert.equal(state.preserveDraft, true);
+});
+
 test('authentication rejection stays on the existing gateway-auth diagnostic path', () => {
   const error = hermesRequestError({ status: 401, body: '{"error":"Unauthorized"}' });
 
@@ -204,7 +215,7 @@ test('terminal error paths dispose the diffusion placeholder on both surfaces', 
   // Side panel: the streaming updater owns an explicit dispose and the turn
   // catch calls it everywhere the stream ends without a final flush.
   assert.match(sidepanelSource, /function dispose\(\) \{[\s\S]*?setToolActivity\(node, null\);/);
-  assert.match(sidepanelSource, /return \{\s*update: updateText,\s*updateText,\s*updateTool,\s*flush,\s*dispose,\s*\};/);
+  assert.match(sidepanelSource, /return \{\s*node,\s*update: updateText,\s*updateText,\s*updateTool,\s*flush,\s*dispose,\s*\};/);
   assert.match(sidepanelSource, /if \(error\?\.requestAccepted !== true\) \{\s*\n\s*streamPacer\?\.flush\?\.\(\);\s*\n\s*streamView\?\.dispose\?\.\(\);\s*\n\s*\}/);
   assert.match(sidepanelSource, /if \(contextRecovery\) \{[\s\S]*?streamView\?\.dispose\?\.\(\);/);
   // Hermes Web: the live-run diffusion card is cleared on the rejected-request

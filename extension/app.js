@@ -6,6 +6,7 @@ import {
   applySessionModelBindings,
   groupSessionsForMenu,
   messageDisplayText,
+  isSteerMessage,
   isModelRuntimeSelectable,
   normalizeHermesModels,
   normalizeHermesSessions,
@@ -20,6 +21,7 @@ import {
   shouldRecoverSkillsFromDashboard,
   interceptChatLinkClick,
 } from './lib/common.mjs';
+import { createUserFileAttachment, appendUserFileAttachments, stageUserFiles, attachmentFileContext, attachmentSourceKey, rememberUserFileAttachments, restoreUserFileAttachments, openUserFileAttachment, downloadUserFileAttachment } from './lib/user-file-attachments.mjs';
 import { renderMarkdownSafe } from './lib/sanitizer.mjs';
 import { enhanceMarkdownCodeBlocks } from './lib/markdown-code-copy.mjs';
 import {
@@ -59,6 +61,8 @@ import {
   withAppearancePreferenceUpdate,
 } from './lib/appearance-preferences.mjs';
 import { mountBrandedSelect } from './lib/branded-select.mjs';
+import { probeSignatureFonts } from './lib/font-availability.mjs';
+import { refreshHermesContextRegistry } from './lib/hermes-context-sync.mjs';
 import {
   CUSTOM_THEME_MAX_INPUT_BYTES,
   CUSTOM_THEME_STORAGE_KEY,
@@ -154,7 +158,11 @@ import {
 import { thinkingIndicatorMarkup } from './lib/web-thinking-indicator.mjs';
 import { clearComposerDraft, loadComposerDraft, persistComposerDraft } from './lib/composer-draft.mjs';
 import { createImageViewerState, imageViewerReducer } from './lib/image-viewer.mjs';
-import { writeAssistantClipboardEvent } from './lib/assistant-clipboard.mjs';
+import { buildCleanClipboardPayload, writeAssistantClipboardEvent } from './lib/assistant-clipboard.mjs';
+import { normalizeMessageTimestamp } from './lib/message-meta.mjs';
+import { createMessageThreadUi } from './lib/message-thread-ui.mjs';
+import { highlightMentions, insertMention } from './lib/room-mentions.mjs';
+import { resolveRoomSpeaker } from './lib/bot-identity.mjs';
 import { taskStackFromToolEvent, taskStackProgress, updateTaskStackStore } from './lib/task-stack.mjs';
 import {
   DELEGATION_WATCH_STORAGE_KEY,
@@ -356,6 +364,7 @@ const els = {
   settingsCustomFontFamilyField: $('#settingsCustomFontFamilyField'),
   settingsCustomFontFamilyInput: $('#settingsCustomFontFamilyInput'),
   settingsAppearanceSaveStatus: $('#settingsAppearanceSaveStatus'),
+  settingsSignatureFontFallbackNote: $('#settingsSignatureFontFallbackNote'),
   inlineAssistEnabled: $('#inlineAssistEnabled'),
   inlineAssistDefaultRoute: $('#inlineAssistDefaultRoute'),
   inlineAssistModel: $('#inlineAssistModel'),
@@ -405,6 +414,9 @@ let settings = {};
 let contextConsentPrincipalBinding = { origin: '', transport: '', principal: '' };
 let webAppearanceMutationId = 0;
 let webAppearanceSaveStatus = '';
+// Guards the async signature-font probe so a stale result cannot toggle the
+// fallback note after a newer render already decided its visibility.
+let webSignatureNoteProbeId = 0;
 let webThemeFontPinned = false;
 let webThemeFontPinnedFor = '';
 let webAppearanceWriteQueue = Promise.resolve();
@@ -432,6 +444,8 @@ let appliedWebCustomThemeVariables = [];
 let sessions = [];
 let activeSessionId = handoff.sessionId;
 let activeMessages = [];
+let webMessageThread = null;
+let fileHistoryRestoreGeneration = 0;
 let taskStackStore = {};
 let taskStackExpanded = true;
 let subagentState = {};
@@ -1013,6 +1027,23 @@ async function persistActiveWebGroupProjection(client, displayMessages) {
   });
 }
 
+function webRoomReplyMember(record) {
+  if (!activeGroupProjection || record?.role !== 'assistant') return null;
+  return resolveRoomSpeaker(record, webGroupRuntimeMembers());
+}
+
+// Reply: insert "@handle " at the caret of the existing draft, focus, never send.
+function webReplyToRoomMember(record) {
+  const member = webRoomReplyMember(record);
+  if (!member || !els.prompt) return;
+  const field = els.prompt;
+  const result = insertMention(field.value, field.selectionStart, field.selectionEnd, member.name);
+  field.value = result.value;
+  field.focus();
+  field.setSelectionRange?.(result.caret, result.caret);
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 function webGroupRuntimeMembers(row = activeGroupProjection) {
   return (Array.isArray(row?.members) ? row.members : [])
     .map((memberName) => {
@@ -1378,13 +1409,25 @@ async function streamDashboardPromptAttempt(connection, sessionId, prompt, { sig
     if (submitPrompt) {
       void (async () => {
         try {
+          await stageUserFiles(connection.client, sessionId, turnAttachments, { sourceKey: attachmentSourceKey(settings) });
+        } catch (error) {
+          finish(reject, error);
+          return;
+        }
+        try {
           await attachDashboardPromptImages(connection.client, sessionId, turnAttachments);
         } catch (error) {
           console.warn('[Hermes Browser] Dashboard image attach failed:', error);
         }
         if (settled) return;
-        connection.client.request(WS_METHODS.promptSubmit, { session_id: sessionId, text: prompt })
-          .then(() => { submitAccepted = true; })
+        const references = turnAttachments.filter(item => item.kind === 'file').map(attachmentFileContext).join('\n\n');
+        const filePrompt = references ? `${prompt}\n\n[FILE_REFERENCES]\n${references}\n[/FILE_REFERENCES]` : prompt;
+        connection.client.request(WS_METHODS.promptSubmit, { session_id: sessionId, text: filePrompt })
+          .then(() => {
+            submitAccepted = true;
+            void rememberUserFileAttachments(attachmentSourceKey(settings), activeSessionId, prompt, turnAttachments)
+              .catch(() => { els.composerStatus.textContent = t('attachments.file_unavailable'); });
+          })
           .catch((error) => finish(reject, error));
       })();
     } else {
@@ -2410,9 +2453,43 @@ async function hydrateSessionMediaInElement(element) {
 }
 
 function renderMessages(messages = []) {
+  const fileGeneration = ++fileHistoryRestoreGeneration;
+  const fileMessageCount = messages.length;
+  const fileSessionId = activeSessionId;
+  const fileSourceKey = attachmentSourceKey(settings);
+  if (!activeGroupProjection) {
+    void restoreUserFileAttachments(messages, fileSourceKey, fileSessionId).then(restored => {
+      if (fileGeneration !== fileHistoryRestoreGeneration || fileSessionId !== activeSessionId
+        || messages.length !== fileMessageCount || sending
+        || fileSourceKey !== attachmentSourceKey(settings) || restored === messages) return;
+      renderMessages(restored);
+    }).catch(() => {});
+  }
   const recoveredImageSources = resolvedGeneratedImageSourcesFromMessages(messages);
   const renderedMessages = webHistoryMediaMessages(appendGeneratedImageSourcesToMessages(messages, recoveredImageSources));
   activeMessages = renderedMessages;
+  webMessageThread ||= createMessageThreadUi({
+    root: els.messageList, document, window, locale: getLocale, translate: translateUiText,
+    replyLabelFor: (record) => { const m = webRoomReplyMember(record); return m ? t('ui.reply.to.member', { name: m.name }) : ''; },
+    onReply: (record) => webReplyToRoomMember(record),
+    onCopy: async (record, article) => {
+      try {
+        if (record.role === 'user') {
+          await navigator.clipboard.writeText(messageDisplayText('user', messageText(record.content)));
+          return true;
+        }
+        const fragment = document.createDocumentFragment();
+        for (const node of article.querySelector('.web-message-content').childNodes) fragment.append(node.cloneNode(true));
+        const payload = buildCleanClipboardPayload({ fragment, document });
+        if (!payload) return false;
+        await navigator.clipboard.writeText(payload.text);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  webMessageThread.reset();
   els.messageList.replaceChildren();
   const visible = browserDisplayMessages(renderedMessages)
     .filter((message) => !isDelegationCompletionMarkerMessage(message));
@@ -2422,10 +2499,14 @@ function renderMessages(messages = []) {
   for (const message of visible) {
     const role = String(message.role || 'system').toLowerCase();
     const article = document.createElement('article');
-    article.className = `web-message ${role}`;
+    article.className = `message web-message ${role}`;
+    const row = document.createElement('div');
+    row.className = 'message-row web-message-row';
     const roleNode = document.createElement('div');
     roleNode.className = 'web-message-role';
-    roleNode.textContent = role === 'assistant' ? (message.roleLabel || 'Hermes') : role;
+    const steered = isSteerMessage({ role, content: messageText(message.content), display_kind: message.display_kind });
+    if (steered) article.classList.add('steer-sent');
+    roleNode.textContent = steered ? t('ui.steered.label') : (role === 'assistant' ? (message.roleLabel || 'Hermes') : role);
     const content = document.createElement('div');
     content.className = 'web-message-content';
     const rawText = messageText(message.content);
@@ -2441,10 +2522,16 @@ function renderMessages(messages = []) {
         copyLabel: translateUiText('Copy code'),
         copiedLabel: translateUiText('Copied'),
       });
+      if (activeGroupProjection) highlightMentions(content, { document, members: webGroupRuntimeMembers() });
     }
     if (role === 'user') {
       appendUserImageAttachments(content, message.attachments, {
         onOpen: (_image, preview) => openImageLightbox(preview.source, preview.name),
+      });
+      appendUserFileAttachments(content, message.attachments, {
+        translate: t,
+        onOpen: (item) => { void openUserFileAttachment(item, { translate: t }).catch(() => { els.composerStatus.textContent = t('attachments.file_unavailable'); }); },
+        onDownload: (item) => { void downloadUserFileAttachment(item).catch(() => { els.composerStatus.textContent = t('attachments.file_unavailable'); }); },
       });
     }
     const deferMediaGroup = role === 'assistant'
@@ -2487,7 +2574,13 @@ function renderMessages(messages = []) {
       content.append(renderArtifactCard(artifact));
     }
     article.append(roleNode, content);
-    els.messageList.append(article);
+    row.append(article);
+    webMessageThread.attach({
+      row, node: article,
+      record: { ...message, role, speaker: message.speaker, ts: normalizeMessageTimestamp(message.timestamp ?? message.ts) },
+      room: Boolean(activeGroupProjection),
+    });
+    els.messageList.append(row);
   }
   renderLiveRun();
   renderContextWindow();
@@ -2882,6 +2975,7 @@ async function writeCachedModelCatalog(models = []) {
 }
 
 async function loadModels({ refresh = false } = {}) {
+  await refreshHermesContextRegistry({ storage: browserApi.storage.local, refresh });
   const previousSelectedModel = settings.model;
   let registryModels = [];
   let registrySource = '';
@@ -3810,6 +3904,7 @@ async function handleWebCustomThemeStoreChange() {
 }
 
 function applyAppearance() {
+  document.body.classList.toggle('hide-message-times', settings.showMessageTimes === false);
   const mode = normalizeColorMode(settings.webColorMode || 'light');
   const resolved = resolveColorMode(mode, globalThis.matchMedia('(prefers-color-scheme: dark)').matches);
   const root = document.documentElement;
@@ -3832,6 +3927,26 @@ function applyAppearance() {
     visualTheme,
     { pinThemeFont: webThemeFontPinned && webThemeFontPinnedFor === visualTheme },
   ));
+}
+
+// The signature profile renders the bundled fallback face when the licensed
+// Rules faces are absent. Probe the faces actually registered in
+// document.fonts (not document.fonts.check, which reports true even for a
+// family that was never registered) and reveal the honest note only when the
+// licensed faces are confirmed missing. A superseded probe result is dropped so
+// it cannot flip the note back after a newer render already decided.
+async function refreshSignatureFontFallbackNote(fontProfile) {
+  const note = els.settingsSignatureFontFallbackNote;
+  if (!note) return;
+  const probeId = ++webSignatureNoteProbeId;
+  if (fontProfile !== 'signature') {
+    note.hidden = true;
+    return;
+  }
+  const fontSet = typeof document === 'undefined' ? null : document.fonts;
+  const result = await probeSignatureFonts(fontSet);
+  if (probeId !== webSignatureNoteProbeId) return;
+  note.hidden = result.status !== 'fallback';
 }
 
 function renderAppearanceSettings() {
@@ -3864,6 +3979,7 @@ function renderAppearanceSettings() {
   mountBrandedSelect(els.settingsFontProfileSelect, {
     previewFont: (value) => fontFamilyPreview(value, preferences.customFontFamily),
   });
+  void refreshSignatureFontFallbackNote(preferences.fontProfile);
   mountBrandedSelect(els.settingsLanguageSelect, { language: true });
   if (els.settingsAppearanceSaveStatus) {
     const overlay = themeOwnsFont(theme) && !(webThemeFontPinned && webThemeFontPinnedFor === theme)
@@ -4115,8 +4231,12 @@ function renderAttachments() {
   for (const attachment of attachments) {
     const chip = document.createElement('div');
     chip.className = 'attachment-chip';
-    const label = document.createElement('span');
+    const label = document.createElement(attachment.kind === 'file' ? 'button' : 'span');
     label.textContent = `${attachment.kind === 'image' ? 'IMAGE' : 'FILE'} · ${attachment.name} · ${formatBytes(attachment.size)}`;
+    if (attachment.kind === 'file') {
+      label.type = 'button'; label.className = 'attachment-open';
+      label.addEventListener('click', () => { void openUserFileAttachment(attachment, { translate: t }).catch(() => { els.composerStatus.textContent = t('attachments.file_unavailable'); }); });
+    }
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.textContent = '×';
@@ -4135,9 +4255,13 @@ function renderAttachments() {
 async function attachFiles(fileList) {
   for (const file of Array.from(fileList || [])) {
     const image = String(file.type || '').startsWith('image/');
-    const text = image ? '' : await readFile(file, 'readAsText').catch(() => '');
-    const dataUrl = image ? await readFile(file, 'readAsDataURL') : '';
-    attachments.push({ id: `${Date.now()}:${Math.random()}`, kind: image ? 'image' : 'file', name: file.name || 'attachment', size: file.size, type: file.type, text: text.slice(0, 120_000), dataUrl });
+    if (image) {
+      const dataUrl = await readFile(file, 'readAsDataURL');
+      attachments.push({ id: `${Date.now()}:${Math.random()}`, kind: 'image', name: file.name || 'attachment', size: file.size, type: file.type, text: '', dataUrl });
+    } else {
+      try { attachments.push(await createUserFileAttachment(file)); }
+      catch (error) { els.composerStatus.textContent = t(error.uiKey || 'attachments.file_unavailable'); }
+    }
   }
   renderAttachments();
   persistCurrentComposerDraft({ immediate: true });
@@ -5134,6 +5258,9 @@ async function sendPrompt(text) {
   let streamTerminalStatus = '';
   let dashboardTurnSessionId = '';
   try {
+    if (turnAttachments.some(item => item.kind === 'file') && !usesDashboardTicketTransport()) {
+      throw Object.assign(new Error('attachments.upload_unavailable'), { attachmentFailure: true, uiKey: 'attachments.upload_unavailable' });
+    }
     if (usesDashboardTicketTransport()) {
       const streamedAnswer = await streamDashboardPrompt(prompt, {
         signal: activeAbortController.signal,
@@ -5262,6 +5389,18 @@ async function sendPrompt(text) {
       activeRunControl = markRunTerminal(activeRunControl, streamTerminalStatus || 'completed');
     }
   } catch (error) {
+    if (error?.attachmentFailure) {
+      if (!els.prompt.value.trim()) els.prompt.value = text;
+      attachments = [...turnAttachments];
+      renderAttachments();
+      persistCurrentComposerDraft({ immediate: true });
+      activeMessages = activeMessages.filter(message => message !== user && message !== assistant);
+      clearLiveRun();
+      renderMessages(activeMessages);
+      activeRunControl = markRunTerminal(activeRunControl, 'failed');
+      els.composerStatus.textContent = t(error.uiKey || 'attachments.upload_unavailable');
+      return false;
+    }
     if (error?.requestAccepted === true && error?.name !== 'AbortError') {
       const recovered = await recoverAcceptedWebTurn(prompt, { signal: activeAbortController.signal });
       const recoveredImageSources = Array.isArray(recovered?.imageSources) ? recovered.imageSources : [];

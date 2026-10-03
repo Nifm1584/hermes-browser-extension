@@ -7,7 +7,7 @@ export { HERMES_DEFAULT_FALLBACK_CONTEXT };
 
 // Display names and live ids Hermes's slug table does not spell out, but
 // resolves to the same window. Longer keys are listed first by the matcher.
-const DISPLAY_CONTEXT_ALIASES = Object.freeze({
+export const DISPLAY_CONTEXT_ALIASES = Object.freeze({
   'claude-opus-5.5': 1_000_000,
   'claude-opus-5-5': 1_000_000,
   'opus-5.5': 1_000_000,

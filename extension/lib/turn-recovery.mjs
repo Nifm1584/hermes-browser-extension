@@ -47,6 +47,10 @@ function responseErrorDetail(body = '') {
   return redactSensitiveText(text.replace(/\s+/g, ' ')).slice(0, 900);
 }
 
+function staleRuntimeText(value = '') {
+  return /cannot import name .{1,80} from '(?:agent|hermes_cli|gateway|tools|tui_gateway|cron)(?:\.[\w.]+)?'/i.test(String(value || ''));
+}
+
 function modelOptionRejectionText(value = '') {
   return /reasoning[_ -]?effort|thinking.{0,60}(?:unsupported|must be one of)|unsupported.{0,60}reasoning/i.test(String(value || ''));
 }
@@ -100,6 +104,15 @@ export function turnRequestFailureState(error = {}) {
   const providerFailure = error?.turnFailureLayer === 'provider';
   if ((!error?.requestRejected && !providerFailure) || error?.fallbackSafe || [401, 403].includes(status)) return null;
   const detail = recoveryErrorText(error).replace(/^Error:\s*/, '').trim();
+  if (staleRuntimeText(detail)) {
+    return {
+      kind: 'hermes-update-restart',
+      title: 'Hermes was updated — restart it',
+      detail: 'The running Hermes gateway is still using files from before your update. Restart Hermes, then resend. Your message was kept as a draft.',
+      preserveDraft: true,
+      gatewayStatus: 'connected',
+    };
+  }
   const modelOptionRejected = modelOptionRejectionText(detail);
   const providerTitle = error?.errorSurface?.retryable === false
     ? 'Provider request rejected'

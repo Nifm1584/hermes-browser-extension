@@ -13,7 +13,7 @@ Browser-native side panel for [Hermes Agent](https://hermes-agent.nousresearch.c
 </p>
 
 <p align="center">
-  <strong>Public v0.3.3 · Load unpacked · Local / Hermes Cloud / Remote · Full Hermes runtime tools</strong><br />
+  <strong>Public v0.3.4 · Load unpacked · Local / Hermes Cloud / Remote · Full Hermes runtime tools</strong><br />
   Not on the Chrome Web Store yet.
 </p>
 
@@ -22,6 +22,19 @@ Browser-native side panel for [Hermes Agent](https://hermes-agent.nousresearch.c
 Hermes Browser Extension is not a browser chatbot. It is a Chrome/Edge/Chromium side panel for the real Hermes Agent runtime. Choose a local gateway, attach to a signed-in Hermes Cloud agent tab, or connect to a self-hosted remote API/dashboard. Local and remote API connections can use the models, tools, skills, sessions, memory, and MCP servers already configured in Hermes; Cloud and dashboard-ticket connections are intentionally Chat-only.
 
 This repo is specifically for the **Hermes Browser Extension**: the Chrome/Edge/Chromium side-panel integration for Hermes Agent.
+
+### New in v0.3.4
+
+- **Better rooms**: create-time member synchronization, truthful sync badges, distinct bot identities, live turn presence, targeted mentions, and saved pass/failure notices.
+- **Room-specific models**: change or reset one member's model without changing its profile default, with model/provider disclosure, required confirmation, and a blocking guard for unverified pins.
+- **Message tools**: Copy, user-message times, day dividers and theme-aware bubbles. Supported side-panel user turns also offer Edit and Restore checkpoint; unsupported transports and rooms do not.
+- **Browser Control dialog**: change This tab, Selected tabs or Task set from the composer, with hover/focus scope explanations, a full-width Apply action and branded tab-list scrolling. A task set includes only explicitly chosen tabs.
+- **Original-file cards**: local byte retention and Open/Download actions. A supported gateway must acknowledge the upload before a turn references it; an unavailable upload capability preserves the draft instead of pretending delivery succeeded.
+- **Clearer limits**: delivered-tab counts in context receipts, explicit large-paste handling, bundled Signature font fallbacks, and more useful gateway-failure messages.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the item-by-item changes.
+
+Model context windows prefer the connected Hermes runtime/catalog. Missing metadata falls back to automatically synchronized Hermes Agent rules, with offline caching; account-specific live limits still win over the published fallback. Builds read the installed Agent when available, and model refresh updates the official upstream fallback metadata.
 
 ### New in v0.3.3
 
@@ -128,7 +141,7 @@ The old full-page Hermes Web workspace is retired. The side panel is the support
 
 ## Compatibility matrix
 
-| Surface | Supported in v0.3.3 | Fallback / note |
+| Surface | Supported in v0.3.4 | Fallback / note |
 | --- | --- | --- |
 | Chrome / Edge / Chromium 114+ side panel | Yes | Primary public support target. |
 | Brave / Comet / Chromium forks | Best-effort | Must expose the Chromium Side Panel API and extension clipboard permissions for Copy Diagnostics. |
@@ -355,14 +368,14 @@ Make sure you loaded `dist/`, not the repo root. The selected folder must contai
 
 ### Chrome still shows an older version after updating
 
-The browser is still using an old unpacked folder or an unpacked extension card that was not reloaded. For v0.3.3, the source manifest, built `dist/` manifest, and release archive should all contain `manifest.json` version `0.3.3`.
+The browser is still using an old unpacked folder or an unpacked extension card that was not reloaded. For v0.3.4, the source manifest, built `dist/` manifest, and release archive should all contain `manifest.json` version `0.3.4`.
 
 Fix:
 
-1. Extract/download the v0.3.3 release or run `npm run build` locally.
+1. Extract/download the v0.3.4 release or run `npm run build` locally.
 2. Open `chrome://extensions` or `edge://extensions`.
 3. On the Hermes Browser Extension card, click **Reload**.
-4. If it still shows an older version, click **Remove**, then **Load unpacked** again and select the fresh v0.3.3 `dist/` folder.
+4. If it still shows an older version, click **Remove**, then **Load unpacked** again and select the fresh v0.3.4 `dist/` folder.
 5. Click **service worker** / **Inspect views** only for debugging; it is not the version source.
 
 ### Filing a support issue

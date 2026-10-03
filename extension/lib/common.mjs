@@ -13,6 +13,7 @@ import { hasCredentialBearingUrl, redactSensitiveText } from './redaction.mjs';
 import { CONNECTION_SCHEMA_VERSION, CONNECTION_TRANSPORTS } from './connection-modes.mjs';
 import { canFlushQueuedTurn } from './run-control-lifecycle.mjs';
 import { hermesContextForModel, HERMES_DEFAULT_FALLBACK_CONTEXT } from './hermes-context-windows.mjs';
+import { contextFromHermesRegistry } from './hermes-context-sync.mjs';
 export { redactSensitiveText };
 
 export const GATEWAY_MODES = Object.freeze([
@@ -118,6 +119,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   agentDiscoveryHost: '127.0.0.1',
   agentDiscoveryScheme: 'http',
   autoNameSessions: true,
+  showMessageTimes: true,
+  groupRoomModelBindings: {},
   sessionStartupMode: 'new-session',
   colorMode: 'dark',
   appearanceTheme: 'nous',
@@ -141,7 +144,7 @@ export function messagesForLocalCache(messages = [], maxMessages = DEFAULT_SETTI
   return Array.from(messages || []).slice(-limit);
 }
 
-export function messageDisplayText(role = '', content = '') {
+function messageDisplayTextOnce(role = '', content = '') {
   const text = String(content ?? '');
   if (String(role || '').trim().toLowerCase() !== 'user') return text;
 
@@ -209,6 +212,35 @@ export function messageDisplayText(role = '', content = '') {
   }
   if (starts.length !== 1 || ends.length !== 1 || ends[0] <= starts[0]) return reveal(text);
   return reveal(lines.slice(starts[0] + 1, ends[0]).join('\n').trim());
+}
+
+// A mid-turn steer reaches the model wrapped in a self-describing marker. The
+// marker is for the model; people see only their own words, labeled as a steer.
+const STEER_MARKER_RE = /^\s*\[OUT-OF-BAND USER MESSAGE[^\]]*\]\s*([\s\S]*?)\s*\[\/OUT-OF-BAND USER MESSAGE\]\s*$/;
+
+export function steerMessageText(content = '') {
+  const match = STEER_MARKER_RE.exec(String(content ?? ''));
+  return match ? match[1].trim() : null;
+}
+
+export function isSteerMessage(record = {}) {
+  if (!record || String(record.role || '').toLowerCase() !== 'user') return false;
+  return String(record.display_kind || '').toLowerCase() === 'steer'
+    || steerMessageText(record.content) !== null;
+}
+
+// What a person typed, however the row was stored. Unwraps repeatedly so a row
+// that an earlier replay re-wrapped still shows only the typed words.
+export function messageDisplayText(role = '', content = '') {
+  let current = String(content ?? '');
+  if (String(role || '').trim().toLowerCase() !== 'user') return current;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const steer = steerMessageText(current);
+    const next = messageDisplayTextOnce(role, steer ?? current);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
 }
 
 export function isHermesBrowserOwnedSession(session = {}) {
@@ -1678,8 +1710,6 @@ const MODEL_CONTEXT_FALLBACKS = Object.freeze([
   ['deepseek', 128_000],
 ]);
 
-const CODEX_LARGE_CONTEXT_TOKENS = 872_000;
-
 function modelProviderIdentity(model = {}) {
   const normalize = (value) => String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
   const explicitProvider = normalize(model.provider);
@@ -1688,49 +1718,8 @@ function modelProviderIdentity(model = {}) {
 }
 
 function fallbackModelContextTokens(model = {}) {
-  const values = [
-    model.id,
-    model.name,
-    model.root,
-    model.label,
-    model.rawModelId,
-    model.raw_model_id,
-    model.model,
-    model.provider,
-    model.providerLabel,
-    model.provider_label,
-    model.owned_by,
-  ];
-  const variants = values
-    .filter(Boolean)
-    .flatMap((value) => {
-      const raw = String(value).toLowerCase();
-      return [raw, raw.replace(/[\s_./:]+/g, '-')];
-    });
-  const providerHint = values
-    .filter(Boolean)
-    .map((value) => String(value).toLowerCase())
-    .join(' ');
-  const providerIdentity = modelProviderIdentity(model);
-  const isCodexOAuth = providerIdentity === 'openai-codex' || providerIdentity === 'codex';
-  const isDirectOpenAi = providerIdentity === 'openai';
-  const isGpt56 = /\bgpt-5\.6(?:-|\b)/.test(providerHint);
-  const isGpt6Tier = /\b(?:chat)?gpt[- .]?6[- .]?(?:sol|luna|terra|astra)(?:-|\b)/.test(providerHint);
-  const isExactGpt54 = /\bgpt-5\.4\b(?!-)/.test(providerHint);
-  const isGpt54Mini = /\bgpt-5\.4-mini\b/.test(providerHint);
-  const has900kVariant = variants.some((value) => /(?:^|[-_/:\\s])900k(?:$|[-_/:\\s])/.test(value));
-  if (isGpt56 || isGpt6Tier) {
-    // Codex keeps the advertised 272K window on the base slug. The Hermes
-    // -900k picker alias is the large window, capped at the Codex catalog
-    // max (872K) instead of the old uncapped 900K bump. Direct OpenAI keeps
-    // its 1.05M API window. A row with no provider stays unknown.
-    if (isCodexOAuth) return has900kVariant ? CODEX_LARGE_CONTEXT_TOKENS : 272_000;
-    if (isDirectOpenAi) return 1_050_000;
-  }
-  if (isCodexOAuth && isGpt54Mini) return 272_000;
-  if (isCodexOAuth && isExactGpt54) return CODEX_LARGE_CONTEXT_TOKENS;
-  if (/\bgpt-5\.5\b/.test(providerHint) && isCodexOAuth) return 272_000;
-  return hermesContextForModel(model) || HERMES_DEFAULT_FALLBACK_CONTEXT;
+  return contextFromHermesRegistry({ ...model, provider: modelProviderIdentity(model) })
+    || hermesContextForModel(model) || HERMES_DEFAULT_FALLBACK_CONTEXT;
 }
 
 export function normalizeReasoningEffort(value = DEFAULT_SETTINGS.reasoningEffort) {
@@ -1954,16 +1943,8 @@ export function contextAccountingSnapshot({
     session?.modelContextTokens,
     modelContextTokens,
   );
-  const effectiveCodexFallback = fallbackModelContextTokens({
-    id: runtime?.id || session?.id,
-    model: runtime?.model || session?.model,
-    rawModelId: runtime?.rawModelId || runtime?.raw_model_id || session?.rawModelId || session?.raw_model_id,
-    provider: runtime?.provider || session?.provider,
-    providerLabel: runtime?.providerLabel || runtime?.provider_label || session?.providerLabel || session?.provider_label,
-  });
-  const staleCodexAdvertisedLimit = (reportedContextLimitTokens === 272_000 || reportedContextLimitTokens === 900_000)
-    && effectiveCodexFallback === CODEX_LARGE_CONTEXT_TOKENS;
-  const contextLimitTokens = staleCodexAdvertisedLimit ? effectiveCodexFallback : reportedContextLimitTokens;
+  // Session runtime values are effective limits, not model-name guesses.
+  const contextLimitTokens = reportedContextLimitTokens;
 
   const runtimePromptTokens = firstPositiveToken(
     runtime?.last_prompt_tokens,
@@ -2477,6 +2458,9 @@ export function renderMarkdown(value = '') {
 }
 
 function modelContextTokens(model = {}) {
+  const authoritative = Number(model.hermesContextTokens || model.effective_context_length || 0);
+  if (Number.isFinite(authoritative) && authoritative > 0) return authoritative;
+  if (model.contextSource === 'hermes-fallback' || (model.source === 'cache' && model.contextSource !== 'provider')) return fallbackModelContextTokens(model);
   const value =
     model.context_length ??
     model.context_window ??
@@ -2487,31 +2471,7 @@ function modelContextTokens(model = {}) {
     model.metadata?.context_length ??
     model.metadata?.context_window;
   const number = Number(value || 0);
-  const fallback = fallbackModelContextTokens(model);
-  // Codex still advertises 272K for the GPT-5.6 and GPT-6 families, and older
-  // Browser builds stored the uncapped 900K bump. Hermes caps that opt-in
-  // window at the catalog max, 872K. Repair only those two stale values.
-  if (Number.isFinite(number) && number > 0) {
-    if ((number === 272_000 || number === 900_000) && fallback === CODEX_LARGE_CONTEXT_TOKENS) return fallback;
-    // Qwen Token Plan slugs (qwen3.6/3.7/3.8 max/plus/flash) are 1M, but a
-    // stale Hermes runtime or cached model catalog often reports the generic
-    // qwen family default (131072) instead. When the curated table knows the
-    // specific 1M window, trust it over that stale generic value so the picker
-    // is correct without needing the dashboard up + a manual model refresh.
-    if (number === 131_072 && fallback === 1_000_000) {
-      const haystack = `${model.id ?? ''} ${model.rawModelId ?? ''} ${model.raw_model_id ?? ''} ${model.model ?? ''} ${model.name ?? ''}`.toLowerCase();
-      if (/qwen3\.[6-9]-/.test(haystack)) return fallback;
-    }
-    // Grok 4.5, 4.6, and 4.7 are 500k. The older grok-4 catch-all (256k) used
-    // to win via substring match, and some catalogs still advertise that stale
-    // window. xAI's live catalog confirms 4.7 at 500k as well.
-    if (fallback === 500_000 && number > 0 && number < fallback) {
-      const haystack = `${model.id ?? ''} ${model.rawModelId ?? ''} ${model.raw_model_id ?? ''} ${model.model ?? ''} ${model.name ?? ''} ${model.label ?? ''}`.toLowerCase();
-      if (/grok-4[.-][5-7]/.test(haystack) || /grok 4\.[5-7]/.test(haystack)) return fallback;
-    }
-    return number;
-  }
-  return fallback;
+  return Number.isFinite(number) && number > 0 ? number : fallbackModelContextTokens(model);
 }
 
 function formatTranscriptTimestamp(seconds = 0) {
@@ -2686,6 +2646,9 @@ export function normalizeHermesModels(payload = {}, selectedModel = DEFAULT_SETT
       rawModelId: typeof item === 'string' ? item : item.rawModelId || item.raw_model_id || item.model || rawId,
       description: typeof item === 'string' ? '' : item.description || '',
       contextTokens: typeof item === 'string' ? 0 : modelContextTokens(item),
+      contextSource: typeof item !== 'string' && (item.contextSource === 'provider' || item.hermesContextTokens > 0 || item.effective_context_length > 0 || (item.contextSource !== 'hermes-fallback' && ['context_length', 'context_window', 'context_tokens', 'contextTokens'].some(key => item[key] > 0) && item.source !== 'cache')) ? 'provider' : 'hermes-fallback',
+      ...(typeof item !== 'string' && item.max_context_window > 0 ? { max_context_window: item.max_context_window } : {}),
+      ...(typeof item !== 'string' && item.hermesContextTokens > 0 ? { hermesContextTokens: item.hermesContextTokens } : {}),
       fast: typeof item === 'string' ? undefined : item.fast,
       reasoning: typeof item === 'string' ? undefined : item.reasoning,
       authenticated: typeof item === 'string' ? undefined : item.authenticated,

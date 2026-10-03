@@ -196,3 +196,18 @@ html[data-hermes-theme="solstice"][data-hermes-mode="light"] {
   --hermes-primary-fg: #f7ebd5;
   --hermes-user-fg: #f7ebd5;
 }
+
+/* Glass tokens: every built-in theme stays opaque in light (the v0.2.0 recipe).
+   Loaded after sidepanel.css so a light theme can never inherit dark glass. */
+html[data-hermes-mode="light"] {
+  --hermes-bubble-user-alpha: 100%;
+  --hermes-bubble-assistant-alpha: 100%;
+  --hermes-bubble-blur: 0px;
+  --hermes-bubble-saturate: 1;
+}
+
+/* Nous light pins the assistant bubble to opaque white with !important, so the
+   room tint rides an inset shadow that survives the forced background. */
+html[data-hermes-theme="nous"][data-hermes-mode="light"] .message-row.room-message > .message.assistant {
+  box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--bot-tint, transparent) 6%, transparent);
+}
