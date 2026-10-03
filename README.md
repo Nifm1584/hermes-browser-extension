@@ -37,8 +37,8 @@ Screenshots use the Mono theme in Dark mode.
 | Side panel | Bot chats | Edit a bot |
 | --- | --- | --- |
 | <img src="./assets/readme/hermes-browser-sidepanel.png" alt="Hermes Browser side panel in Mono Dark, answering a question about the attached page" width="300" /> | <img src="./assets/readme/hermes-browser-bot-chats.png" alt="Bot Mode group chat with four demo agents replying in one room" width="300" /> | <img src="./assets/readme/hermes-browser-bot-profile.png" alt="Bot Mode profile editor with avatar, display title, and description" width="300" /> |
-| Theme settings | Local agents | Petdex |
-| <img src="./assets/readme/hermes-browser-theme-settings.png" alt="Appearance settings with color mode, text zoom, and the nine theme previews" width="300" /> | <img src="./assets/readme/hermes-browser-local-agents.png" alt="Agent Profile settings listing the verified agents from the connected gateway" width="300" /> | <img src="./assets/readme/hermes-browser-petdex.png" alt="Petdex pet avatar picker in the Bot Mode profile editor" width="300" /> |
+| Theme settings | Local agents | Hermes Control |
+| <img src="./assets/readme/hermes-browser-theme-settings.png" alt="Appearance settings with color mode, text zoom, and the nine theme previews" width="300" /> | <img src="./assets/readme/hermes-browser-local-agents.png" alt="Agent Profile settings listing the verified agents from the connected gateway" width="300" /> | <img src="./assets/readme/hermes-browser-control.png" alt="Hermes Control dialog with scope, stay or follow, and turn off controls" width="300" /> |
 
 ## Requirements
 
