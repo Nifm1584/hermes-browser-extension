@@ -230,19 +230,47 @@ html[data-hermes-theme="nous"][data-hermes-mode="dark"] {
 }
 
 html[data-hermes-theme="nous"][data-hermes-mode="light"] {
-  --hermes-blue: #0505e8;
-  --hermes-blue-deep: #03038f;
+  /* White shell, Nous Blue (#0000F2) accents. The blue lives in ink, borders,
+     the user bubble and primary buttons; the page itself stays white with faint
+     blue tints (the Settings look), and the background art rides on top as a
+     watermark. */
+  --hermes-blue: #0000f2;
+  --hermes-blue-deep: #0000b4;
   --hermes-paper: #ffffff;
-  --hermes-fg: #f8faff;
-  --hermes-ink: #0505e8;
-  --hermes-accent: #dbe6ff;
-  --hermes-bg-rgb: 5, 5, 232;
-  --hermes-panel-rgb: 5, 5, 232;
+  --hermes-fg: #0000f2;
+  --hermes-ink: #0000f2;
+  --hermes-accent: #0000f2;
+  --hermes-bg-rgb: 0, 0, 242;
+  --hermes-panel-rgb: 255, 255, 255;
   --hermes-paper-rgb: 255, 255, 255;
-  --hermes-fg-rgb: 248, 250, 255;
-  --hermes-ink-rgb: 5, 5, 232;
-  --hermes-accent-rgb: 219, 230, 255;
-  --hermes-menu-bg: #03038f;
+  --hermes-fg-rgb: 0, 0, 242;
+  --hermes-ink-rgb: 0, 0, 242;
+  --hermes-accent-rgb: 0, 0, 242;
+  --hermes-menu-bg: #f6f8ff;
+  --hermes-app-bg: #ffffff;
+  --hermes-app-bg-deep: #eef2ff;
+  --hermes-panel-border: rgba(0, 0, 242, 0.16);
+  --hermes-line: rgba(0, 0, 242, 0.16);
+  --hermes-line-strong: rgba(0, 0, 242, 0.62);
+  --hermes-control-bg: rgba(0, 0, 242, 0.05);
+  --hermes-control-border: rgba(0, 0, 242, 0.55);
+  --hermes-primary-bg: #0000f2;
+  --hermes-primary-fg: #ffffff;
+  --hermes-primary-border: #0000f2;
+  --hermes-user-bg: #0000f2;
+  --hermes-user-fg: #ffffff;
+  --hermes-user-border: #0000f2;
+  --hermes-card-bg: #ffffff;
+  --hermes-system-bg: #f3f6ff;
+  --hermes-system-fg: #0a0a8c;
+  --hermes-pill-bg: rgba(0, 0, 242, 0.06);
+  --hermes-pill-fg: #0000f2;
+  --hermes-pill-border: rgba(0, 0, 242, 0.36);
+  --hermes-pill-ok-bg: rgba(0, 0, 242, 0.08);
+  --hermes-pill-ok-fg: #0000f2;
+  --hermes-pill-ok-border: #0000f2;
+  --hermes-meter-fill: rgba(0, 0, 242, 0.55);
+  --hermes-shadow-rgb: 0, 0, 120;
 }
 
 html[data-hermes-theme="midnight"][data-hermes-mode="dark"] {
@@ -962,9 +990,10 @@ html[data-hermes-theme="cyberpunk"] .empty-state strong {
   position: relative;
   min-height: 150px;
   border: 1px solid rgba(var(--hermes-fg-rgb),0.62);
-  padding: 16px 12px 12px;
+  padding: 14px 12px 12px;
   overflow: hidden;
   flex: 0 0 auto;
+  color: var(--hermes-fg);
   background:
     linear-gradient(90deg, rgba(var(--hermes-panel-rgb),0.98) 0%, rgba(var(--hermes-panel-rgb),0.82) 55%, rgba(var(--hermes-panel-rgb),0.24) 100%),
     var(--sidecar-art, url("assets/img/hermes-browse.webp")) center / cover no-repeat,
@@ -1008,14 +1037,14 @@ html[data-hermes-theme="cyberpunk"] .empty-state strong {
   display: block;
   width: min(205px, calc(100% - 62px));
   height: auto;
-  margin: 14px 0 0;
+  margin: 2px 0 0;
   overflow: visible;
   color: var(--hermes-fg);
   fill: currentColor;
 }
 .intro {
   max-width: 31ch;
-  margin: 10px 0 0;
+  margin: 8px 0 0;
   color: var(--hermes-fg);
   font-size: calc(12px * var(--hermes-text-zoom, 1));
   line-height: 1.42;
