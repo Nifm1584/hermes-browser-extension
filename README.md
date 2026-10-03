@@ -10,8 +10,7 @@ Browser-native side panel for [Hermes Agent](https://hermes-agent.nousresearch.c
 
 <p align="center">
   <strong>Public v0.3.4 · Load unpacked · Local / Hermes Cloud / Remote · Full Hermes runtime tools</strong><br />
-  Not on the Chrome Web Store yet. Firefox installs from [AMO](https://addons.mozilla.org/en-US/firefox/addon/hermes-browser-extension/).
-</p>
+  </p>
 
 <p align="center">
   <a href="https://ko-fi.com/T8Z726J5YZ"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support Jon Komet on Ko-fi" /></a>
@@ -33,13 +32,13 @@ The full list of changes per version lives in the [changelog](./CHANGELOG.md) an
 
 ## Visual tour
 
-Screenshots use the Mono theme in Dark mode. The agents and conversation in the Bot Mode shots are demo data, not real profiles.
+Screenshots use the Mono theme in Dark mode.
 
 | Side panel | Bot chats | Edit a bot |
 | --- | --- | --- |
 | <img src="./assets/readme/hermes-browser-sidepanel.png" alt="Hermes Browser side panel in Mono Dark, answering a question about the attached page" width="300" /> | <img src="./assets/readme/hermes-browser-bot-chats.png" alt="Bot Mode group chat with four demo agents replying in one room" width="300" /> | <img src="./assets/readme/hermes-browser-bot-profile.png" alt="Bot Mode profile editor with avatar, display title, and description" width="300" /> |
-| Theme settings | Local agents | |
-| <img src="./assets/readme/hermes-browser-theme-settings.png" alt="Appearance settings with color mode, text zoom, and the nine theme previews" width="300" /> | <img src="./assets/readme/hermes-browser-local-agents.png" alt="Agent Profile settings listing the verified agents from the connected gateway" width="300" /> | |
+| Theme settings | Local agents | Petdex |
+| <img src="./assets/readme/hermes-browser-theme-settings.png" alt="Appearance settings with color mode, text zoom, and the nine theme previews" width="300" /> | <img src="./assets/readme/hermes-browser-local-agents.png" alt="Agent Profile settings listing the verified agents from the connected gateway" width="300" /> | <img src="./assets/readme/hermes-browser-petdex.png" alt="Petdex pet avatar picker in the Bot Mode profile editor" width="300" /> |
 
 ## Requirements
 
