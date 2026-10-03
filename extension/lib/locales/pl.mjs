@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Kliknij ponownie mikrofon, aby dokonać transkrypcji za pomocą funkcji zamiany mowy na tekst Hermes.",
   "ui.client": "Klient",
   "ui.close": "Zamknij",
+  "ui.show.or.hide.status": "Pokaż lub ukryj status",
   "ui.close.dbc87420": "ZAMKNIJ",
   "ui.close.generated.image": "Zamknij wygenerowany obraz",
   "ui.close.hermes.assist": "Zamknij asystenta Hermes",

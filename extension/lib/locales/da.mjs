@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Klik på mikrofonen igen for at transskribere med Hermes tale-til-tekst.",
   "ui.client": "Klient",
   "ui.close": "Tæt",
+  "ui.show.or.hide.status": "Vis eller skjul status",
   "ui.close.dbc87420": "TÆT",
   "ui.close.generated.image": "Luk genereret billede",
   "ui.close.hermes.assist": "Luk Hermes Assist",

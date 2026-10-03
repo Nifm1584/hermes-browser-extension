@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "もう一度マイクをクリックすると、Hermes の音声認識で文字起こしします。",
   "ui.client": "クライアント",
   "ui.close": "閉じる",
+  "ui.show.or.hide.status": "ステータスを表示/非表示",
   "ui.close.dbc87420": "閉じる",
   "ui.close.generated.image": "生成された画像を閉じる",
   "ui.close.hermes.assist": "Hermes Assistを閉じる",

@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Klik mikrofon lagi untuk mentranskripsikan dengan Hermes ucapan-ke-teks.",
   "ui.client": "Klien",
   "ui.close": "Menutup",
+  "ui.show.or.hide.status": "Tampilkan atau sembunyikan status",
   "ui.close.dbc87420": "MENUTUP",
   "ui.close.generated.image": "Tutup gambar yang dihasilkan",
   "ui.close.hermes.assist": "Tutup Hermes Assist",

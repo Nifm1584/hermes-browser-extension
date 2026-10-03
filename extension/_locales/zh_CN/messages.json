@@ -5151,6 +5151,10 @@
     "message": "悬停或轻触消息时显示其时间。",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "显示或隐藏状态",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "侧面板",
     "description": "Runtime interface message ui.side.panel"

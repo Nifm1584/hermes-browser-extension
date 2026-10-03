@@ -5151,6 +5151,10 @@
     "message": "Hiện thời gian trên tin nhắn của bạn khi di chuột hoặc chạm vào.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Hiện hoặc ẩn trạng thái",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Bảng điều khiển bên",
     "description": "Runtime interface message ui.side.panel"

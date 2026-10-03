@@ -544,6 +544,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "再次点击麦克风，使用 Hermes 语音转文字进行转写。",
   "ui.client": "客户端",
   "ui.close": "关闭",
+  "ui.show.or.hide.status": "显示或隐藏状态",
   "ui.close.dbc87420": "关闭",
   "ui.close.generated.image": "关闭生成的图像",
   "ui.close.hermes.assist": "关闭 Hermes Assist",

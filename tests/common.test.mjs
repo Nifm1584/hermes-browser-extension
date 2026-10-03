@@ -1221,11 +1221,11 @@ test('shouldSubmitComposerKey sends on Enter while preserving Shift+Enter for ne
   assert.equal(shouldSubmitComposerKey({ key: 'Enter', shiftKey: false, isComposing: true }), false);
 });
 
-test('composer renders the readable context scope control across from Ask Hermes', () => {
+test('composer status row puts the DOM chip left of the scope control, behind a collapse toggle', () => {
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
   const headerIndex = html.indexOf('class="composer-header"');
-  const labelIndex = html.indexOf('class="composer-label"');
+  const labelIndex = html.indexOf('class="composer-label sr-only"');
   const scopeIndex = html.indexOf('id="contextScopeButton"');
   const chipIndex = html.indexOf('id="contextChip"');
   assert.notEqual(headerIndex, -1);
@@ -1233,8 +1233,9 @@ test('composer renders the readable context scope control across from Ask Hermes
   assert.notEqual(scopeIndex, -1);
   assert.notEqual(chipIndex, -1);
   assert.ok(labelIndex > headerIndex, 'Ask Hermes label should be inside the composer header');
-  assert.ok(scopeIndex > labelIndex, 'context scope control should sit across from the Ask Hermes label');
-  assert.ok(scopeIndex < chipIndex, 'context scope control should render above the DOM chip, not below it');
+  assert.ok(chipIndex > labelIndex && chipIndex < scopeIndex, 'DOM chip sits left of the scope control');
+  assert.ok(html.indexOf('id="statusStackToggle"') < headerIndex, 'collapse toggle sits above the status row');
+  assert.match(css, /\.composer\.status-stack-collapsed #composerStatusStack/);
   assert.match(css, /\.context-scope-button\s*\{[^}]*background:\s*rgba\(var\(--hermes-ink-rgb\),0\.12\);[^}]*color:\s*var\(--hermes-ink\);/s);
 });
 

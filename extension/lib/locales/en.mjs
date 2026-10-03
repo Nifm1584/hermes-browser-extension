@@ -558,6 +558,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Click the mic again to transcribe with Hermes speech-to-text.",
   "ui.client": "Client",
   "ui.close": "Close",
+  "ui.show.or.hide.status": "Show or hide status",
   "ui.close.dbc87420": "CLOSE",
   "ui.close.generated.image": "Close generated image",
   "ui.close.hermes.assist": "Close Hermes Assist",

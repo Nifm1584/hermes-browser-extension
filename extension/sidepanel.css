@@ -3465,6 +3465,55 @@ html[data-hermes-font-profile="signature"] .web-message-content ol {
   overflow: hidden;
 }
 .composer-header > * { min-width: 0; }
+.composer-header .context-chip { flex: 1 1 0; width: auto; margin-bottom: 0; min-height: 26px; }
+.composer-header .context-scope-button { flex: 0 1 auto; max-width: 52%; margin-left: auto; }
+.composer-header .context-chip[hidden] + .context-scope-button { margin-left: auto; }
+.composer { position: relative; }
+.status-stack-toggle {
+  position: absolute;
+  z-index: 5;
+  top: -15px;
+  left: 50%;
+  width: 56px;
+  height: 14px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.status-stack-toggle::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30px;
+  height: 3px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  background: rgba(var(--hermes-ink-rgb),0.42);
+  transition: background 120ms ease, width 120ms ease, height 120ms ease;
+}
+.status-stack-toggle:hover,
+.status-stack-toggle:focus-visible,
+.status-stack-toggle:active { background: transparent; border-color: transparent; color: inherit; transform: translateX(-50%); }
+.status-stack-toggle:hover::before,
+.status-stack-toggle:focus-visible::before { width: 38px; height: 4px; background: color-mix(in srgb, var(--hermes-ink) 72%, transparent); }
+.status-stack-toggle:active::before { width: 34px; }
+@keyframes statusStackPop {
+  0% { opacity: 0; transform: scale(0.92) translateY(6px); }
+  60% { opacity: 1; transform: scale(1.015) translateY(-1px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.composer:not(.status-stack-collapsed) #composerStatusStack { animation: statusStackPop 220ms cubic-bezier(0.34, 1.4, 0.64, 1) both; transform-origin: bottom center; }
+@media (prefers-reduced-motion: reduce) { .composer:not(.status-stack-collapsed) #composerStatusStack { animation: none; } }
+.status-stack-toggle:focus-visible { outline: 2px solid var(--hermes-accent, var(--hermes-ink)); outline-offset: -2px; border-radius: 4px; }
+.status-stack-toggle svg { display: none; }
+.composer.status-stack-collapsed #composerStatusStack,
+.composer.status-stack-collapsed #contextPreview,
+.composer.status-stack-collapsed #contextScopeMenu { display: none !important; }
 .composer-label {
   flex: 0 0 auto;
   display: block;

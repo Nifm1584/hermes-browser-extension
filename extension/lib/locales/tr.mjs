@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Hermes'in konuşmayı metne dönüştürme özelliğini kullanarak yazıya dönüştürmek için mikrofona tekrar tıklayın.",
   "ui.client": "Müşteri",
   "ui.close": "Kapat",
+  "ui.show.or.hide.status": "Durumu göster veya gizle",
   "ui.close.dbc87420": "KAPAT",
   "ui.close.generated.image": "Oluşturulan resmi kapat",
   "ui.close.hermes.assist": "Hermes Assist'yi kapat",

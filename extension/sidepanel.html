@@ -434,16 +434,17 @@
           <div class="group-presence-status" id="groupPresenceStatus" aria-live="polite"></div>
         </div>
         <form id="composer" class="composer">
-          <div class="composer-header">
-            <label class="composer-label" id="composerLabel" for="promptInput" data-i18n="ui.ask.hermes.36d55d5a">ASK HERMES</label>
+          <button id="statusStackToggle" class="status-stack-toggle" type="button" aria-expanded="true" aria-controls="composerStatusStack" title="Show or hide status" aria-label="Show or hide status" data-i18n-title="ui.show.or.hide.status" data-i18n-aria-label="ui.show.or.hide.status"><svg viewBox="0 0 16 8" width="16" height="8" aria-hidden="true"><path d="M2 2l6 4 6-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="composer-header" id="composerStatusStack">
+            <label class="composer-label sr-only" id="composerLabel" for="promptInput" data-i18n="ui.ask.hermes.36d55d5a">ASK HERMES</label>
+            <button id="contextChip" class="context-chip" type="button" aria-expanded="false">
+              <span id="contextChipLabel" data-i18n-runtime>📎 Loading...</span>
+              <strong data-i18n-runtime data-i18n="ui.preview.1aa787fe">preview</strong>
+            </button>
             <button id="contextScopeButton" class="context-scope-button" type="button" aria-haspopup="dialog" aria-expanded="false" title="Choose which tab Hermes reads and which open tabs appear in the prompt" data-i18n-title="ui.choose.which.tab.hermes.reads.and.which.open.tabs.appear.in.the.prompt">
               <span id="contextScopeLabel">Follow active tab</span>
             </button>
           </div>
-          <button id="contextChip" class="context-chip" type="button" aria-expanded="false">
-            <span id="contextChipLabel" data-i18n-runtime>📎 Loading...</span>
-            <strong data-i18n-runtime data-i18n="ui.preview.1aa787fe">preview</strong>
-          </button>
           <div id="contextPreview" class="context-preview" data-i18n-runtime hidden></div>
           <div id="explicitSiteCaptureWrap" class="context-explicit-capture-wrap" hidden>
             <button id="explicitSiteCaptureButton" class="context-explicit-capture" type="button" hidden>

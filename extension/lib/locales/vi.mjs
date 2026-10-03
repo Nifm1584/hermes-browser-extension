@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Nhấp lại vào micrô để chuyển lời nói thành văn bản bằng Hermes.",
   "ui.client": "khách hàng",
   "ui.close": "Đóng",
+  "ui.show.or.hide.status": "Hiện hoặc ẩn trạng thái",
   "ui.close.dbc87420": "ĐÓNG",
   "ui.close.generated.image": "Đóng hình ảnh được tạo",
   "ui.close.hermes.assist": "Đóng Hermes Assist",

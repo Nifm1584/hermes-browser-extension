@@ -5151,6 +5151,10 @@
     "message": "Show the time on your messages when you hover or tap them.",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "Show or hide status",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "Side panel",
     "description": "Runtime interface message ui.side.panel"

@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "Hermes वाक्-से-पाठ के साथ प्रतिलेखन करने के लिए माइक पर फिर से क्लिक करें।",
   "ui.client": "ग्राहक",
   "ui.close": "बंद करना",
+  "ui.show.or.hide.status": "स्थिति दिखाएँ या छिपाएँ",
   "ui.close.dbc87420": "बंद करना",
   "ui.close.generated.image": "उत्पन्न छवि बंद करें",
   "ui.close.hermes.assist": "Hermes Assist बंद करें",

@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "คลิกไมโครโฟนอีกครั้งเพื่อถอดเสียงด้วยคำพูดเป็นข้อความ Hermes",
   "ui.client": "ลูกค้า",
   "ui.close": "ปิด",
+  "ui.show.or.hide.status": "แสดงหรือซ่อนสถานะ",
   "ui.close.dbc87420": "ปิด",
   "ui.close.generated.image": "ปิดรูปภาพที่สร้างขึ้น",
   "ui.close.hermes.assist": "ปิด Hermes Assist",

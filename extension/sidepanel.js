@@ -692,6 +692,7 @@ const els = {
   composerLabel: $('#composerLabel'),
   input: $('#promptInput'),
   contextChip: $('#contextChip'),
+  statusStackToggle: $('#statusStackToggle'),
   contextChipLabel: $('#contextChipLabel'),
   contextPreview: $('#contextPreview'),
   explicitSiteCaptureWrap: $('#explicitSiteCaptureWrap'),
@@ -7857,7 +7858,10 @@ function renderContextWindow(userText = els.input?.value || '') {
     if (els.contextChip) els.contextChip.hidden = false;
     const chip = contextChipSummary({ pageContext: pc, activeTab: currentContext.activeTab, parts: stats.parts });
     els.contextChipLabel.textContent = translateUiText(chip.label);
-    els.contextChip.title = translateUiText(chip.title);
+    // DOM means the page's structure and text; explain it rather than echo the URL the user is already on.
+    els.contextChip.title = (pc && !pc.restricted && pc.ok !== false)
+      ? translateUiText('DOM is the page content Hermes reads: the text and structure of the tab you are on. Click to preview exactly what gets sent with your message.')
+      : translateUiText(chip.title);
     els.contextPreview.textContent = [
       currentContext.activeTab?.title || '(unknown tab)',
       currentContext.activeTab?.url || '',
@@ -21549,6 +21553,24 @@ function bindEvents() {
     await attachFolder(els.folderInput.files);
     els.folderInput.value = '';
   });
+  {
+    const STATUS_STACK_KEY = 'hermesStatusStackCollapsed';
+    const applyStatusStack = (collapsed) => {
+      els.composer?.classList.toggle('status-stack-collapsed', collapsed);
+      els.statusStackToggle?.setAttribute('aria-expanded', String(!collapsed));
+    };
+    let statusStackCollapsed = false;
+    try { statusStackCollapsed = localStorage.getItem(STATUS_STACK_KEY) === '1'; } catch { /* storage unavailable */ }
+    applyStatusStack(statusStackCollapsed);
+    els.statusStackToggle?.addEventListener('click', () => {
+      statusStackCollapsed = !statusStackCollapsed;
+      // Always reopen with the DOM preview closed, however it was left.
+      if (els.contextPreview) els.contextPreview.hidden = true;
+      els.contextChip?.setAttribute('aria-expanded', 'false');
+      applyStatusStack(statusStackCollapsed);
+      try { localStorage.setItem(STATUS_STACK_KEY, statusStackCollapsed ? '1' : '0'); } catch { /* storage unavailable */ }
+    });
+  }
   els.contextChip.addEventListener('click', () => {
     const nextHidden = !els.contextPreview.hidden;
     els.contextPreview.hidden = nextHidden;

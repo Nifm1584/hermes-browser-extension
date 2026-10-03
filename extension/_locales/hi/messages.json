@@ -5151,6 +5151,10 @@
     "message": "कर्सर ले जाने या टैप करने पर आपके संदेशों पर समय दिखाएँ।",
     "description": "Runtime interface message ui.show.message.times.hint"
   },
+  "runtime_ui_show_or_hide_status": {
+    "message": "स्थिति दिखाएँ या छिपाएँ",
+    "description": "Runtime interface message ui.show.or.hide.status"
+  },
   "runtime_ui_side_panel": {
     "message": "साइड पैनल",
     "description": "Runtime interface message ui.side.panel"

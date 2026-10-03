@@ -564,6 +564,7 @@ export default Object.freeze({
   "ui.click.the.mic.again.to.transcribe.with.hermes.speech.to.text": "마이크를 다시 클릭하면 Hermes 음성 인식으로 텍스트 변환이 이루어집니다.",
   "ui.client": "클라이언트",
   "ui.close": "닫기",
+  "ui.show.or.hide.status": "상태 표시/숨기기",
   "ui.close.dbc87420": "닫기",
   "ui.close.generated.image": "생성된 이미지 닫기",
   "ui.close.hermes.assist": "Hermes Assist 닫기",
