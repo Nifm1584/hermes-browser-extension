@@ -6,6 +6,7 @@
 
 - Nous Light uses a white shell with Nous Blue (#0000F2) text, borders and buttons. The background art stays as a faint watermark, and the start screen is white with a blue logo.
 - Light-theme user messages are a soft tint of the theme colour with a clear outline, so "What Hermes saw" and code stay readable in every light theme. System notices sit on a solid surface.
+- The README is shorter: version-by-version notes point to the changelog and releases, and remote setup plus extended troubleshooting moved to guides/connection-guide.md and guides/troubleshooting.md. The visual tour has fresh Mono Dark screenshots, including Bot Mode group chats and profile editing.
 - The composer's DOM preview and Attached-tab controls share one row, and a slim handle on the composer border hides or shows them. The choice is remembered, the DOM preview always reopens closed, and hovering DOM explains what it is.
 - The chat intro banner now matches the Settings banner's spacing and keeps white text on blue in Nous Light.
 
