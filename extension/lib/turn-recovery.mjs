@@ -229,3 +229,10 @@ export function latestAssistantAfterUser(rows = [], userContent = '') {
   }
   return '';
 }
+
+// Strict-contract cores answer 4000 "invalid params for prompt.submit: display_text: Extra inputs
+// are not permitted". display_text is optional cosmetics, so the turn is retried without it.
+export function isDisplayTextRejection(error) {
+  const text = String(error?.message || error || '');
+  return /invalid params for prompt\.submit/i.test(text) && /display_text/i.test(text);
+}

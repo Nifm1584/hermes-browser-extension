@@ -342,6 +342,7 @@ import {
   latestAssistantAfterUser,
   sessionContextFailureRecovery,
   turnRequestFailureState,
+  isDisplayTextRejection,
 } from './lib/turn-recovery.mjs';
 import { createGatewayRestartAction, restartGatewayViaDashboard, waitForGatewayReturn, watchGatewayRestart } from './lib/gateway-restart.mjs';
 import { createDiffusionCanvas, diffusionVariantForSeed } from './lib/diffusion-canvas.mjs';
@@ -549,6 +550,7 @@ import { buildCleanClipboardPayload, writeAssistantClipboardEvent } from './lib/
 import { normalizeMessageTimestamp } from './lib/message-meta.mjs';
 import { setRailCopyEnabled } from './lib/message-actions.mjs';
 import { createMessageThreadUi } from './lib/message-thread-ui.mjs';
+import { bindWheelScrollX } from './lib/wheel-scroll-x.mjs';
 import { highlightMentions, insertMention } from './lib/room-mentions.mjs';
 import {
   truncateSubmitParams,
@@ -18654,8 +18656,11 @@ async function ensureRemoteWsSession(connection) {
   return liveId;
 }
 
-// Older cores ignore this. A browser turn stores the typed words; the model still gets the envelope.
+// A browser turn stores the typed words; the model still gets the envelope. Cores with strict
+// params contracts reject the field, so it stays off once one has refused it.
+let displayTextUnsupported = false;
 function browserTurnDisplayParam(text) {
+  if (displayTextUnsupported) return {};
   const shown = messageDisplayText('user', text);
   return shown && shown !== text ? { display_text: shown } : {};
 }
@@ -18838,11 +18843,16 @@ async function streamDashboardWsChatAttempt(connection, sessionId, prompt, onDel
           console.warn('[Hermes Browser] Dashboard image attach failed:', error);
         }
         if (settled) return;
-        client.request(WS_METHODS.promptSubmit, {
+        const submitParams = () => ({
           session_id: sessionId,
           text: prompt,
           ...browserTurnDisplayParam(prompt),
           ...truncateSubmitParams({ rowId: truncate?.rowId }),
+        });
+        client.request(WS_METHODS.promptSubmit, submitParams()).catch((error) => {
+          if (!isDisplayTextRejection(error) || displayTextUnsupported) throw error;
+          displayTextUnsupported = true;
+          return client.request(WS_METHODS.promptSubmit, submitParams());
         }).then((response) => {
           onSubmitResponse?.(response);
           void rememberUserFileAttachments(attachmentSourceKey(settings), connection.wsStoredSessionId || settings.sessionId, prompt, turnAttachments)
@@ -21463,6 +21473,7 @@ function bindEvents() {
       setModelRuntimeOption('reasoningEffort', normalizeReasoningEffort(effort.dataset.effort));
     }
   });
+  bindWheelScrollX(els.modelProviderList);
   els.modelSearchInput.addEventListener('input', () => renderModelMenu(els.modelSearchInput.value));
   els.attachMenuButton.addEventListener('click', (event) => {
     event.stopPropagation();

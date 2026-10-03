@@ -21,6 +21,7 @@
 - Large pastes are handled separately from the inline message limit with explicit retention and excerpt warnings; sending a pasted-text excerpt is not the same as uploading the original file.
 - Signature typography falls back to bundled Hermes display and UI faces before unrelated system fonts on installs without the licensed faces. Font assets are included in build verification.
 - Signature settings show an honest bundled-fallback note based on registered font loading. Switching away from Signature invalidates an in-flight probe so an old result cannot restore the note.
+- The model picker's provider strip scrolls sideways with the mouse wheel: wheel down moves right, wheel up moves left, and the page scrolls normally once the strip reaches either end.
 
 ### Changed
 
@@ -44,6 +45,7 @@
 - GPT 6.1 Sol context windows resolve from Hermes Agent rules. Live catalog/session limits take precedence; display labels no longer silently opt a base model into a larger window.
 - Context fallback rules synchronize automatically from Hermes Agent at build/model refresh time, with bounded public metadata fetching and offline caching, rather than requiring individual Browser patches for each new model.
 - Local distribution signing keys are ignored by source control (#109, thanks @xxkingstuggle).
+- Hermes cores with a strict `prompt.submit` contract no longer reject chat messages with an "invalid params ... display_text" error. The turn is retried once without the optional display text and the extension stops sending it for that session.
 
 ## [0.3.3] - 2026-09-24
 

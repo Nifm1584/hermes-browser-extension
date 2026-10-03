@@ -67,7 +67,8 @@ test('submitRewind fails closed to a new message when no row id can be resolved'
 });
 
 test('the prompt.submit request spreads the row-id-only truncation params', () => {
-  const submit = panel.slice(panel.indexOf('WS_METHODS.promptSubmit'), panel.indexOf('WS_METHODS.promptSubmit') + 400);
+  const at = panel.indexOf('const submitParams = () => ({');
+  const submit = panel.slice(at, at + 400);
   assert.match(submit, /truncateSubmitParams\(\{ rowId: truncate\?\.rowId \}\)/);
   assert.match(panel, /truncate = null, onSubmitResponse = null \} = \{\}\)/);
 });
