@@ -58,8 +58,10 @@ test('tab-scope actions render an inline consent warning instead of appearing to
   assert.match(sidepanel, /action === 'open-context-consent'[\s\S]*contextConsentReason[\s\S]*openSettingsDialog\(\)/);
   assert.match(sidepanelCss, /\.context-scope-consent-notice/);
   assert.match(sidepanelCss, /\.context-scope-consent-action/);
-  assert.ok(pin.indexOf('requireContextConsentForScope(nextScope)') < pin.indexOf('applyContextScope(nextScope'));
-  assert.ok(unlock.indexOf('requireContextConsentForScope(nextScope)') < unlock.indexOf('applyContextScope(nextScope'));
+  assert.ok(pin.indexOf('requireContextConsentForScope(') !== -1);
+  assert.ok(pin.indexOf('requireContextConsentForScope(') < pin.indexOf('applyContextScope('));
+  assert.ok(unlock.indexOf('requireContextConsentForScope(') !== -1);
+  assert.ok(unlock.indexOf('requireContextConsentForScope(') < unlock.indexOf('applyContextScope('));
 });
 
 test('non-loopback Remote API is consent-gated as strictly as Cloud and dashboard transport', () => {
