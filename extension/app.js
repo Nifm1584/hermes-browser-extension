@@ -23,6 +23,7 @@ import {
 } from './lib/common.mjs';
 import { createUserFileAttachment, appendUserFileAttachments, stageUserFiles, attachmentFileContext, attachmentSourceKey, rememberUserFileAttachments, restoreUserFileAttachments, openUserFileAttachment, downloadUserFileAttachment } from './lib/user-file-attachments.mjs';
 import { renderMarkdownSafe } from './lib/sanitizer.mjs';
+import { highlightCodeBlocks } from './lib/code-highlighting.mjs';
 import { enhanceMarkdownCodeBlocks } from './lib/markdown-code-copy.mjs';
 import {
   completionRevealPlan,
@@ -66,6 +67,7 @@ import { refreshHermesContextRegistry } from './lib/hermes-context-sync.mjs';
 import {
   CUSTOM_THEME_MAX_INPUT_BYTES,
   CUSTOM_THEME_STORAGE_KEY,
+  customThemeEffectiveMode,
   customThemePaletteForMode,
   customThemeSelection,
   serializeThemeDocument,
@@ -2517,6 +2519,7 @@ function renderMessages(messages = []) {
     if (displayText) {
       const rendered = document.createElement('div');
       rendered.innerHTML = renderMarkdownSafe(displayText);
+      highlightCodeBlocks(rendered);
       content.append(...rendered.childNodes);
       enhanceMarkdownCodeBlocks(content, {
         copyLabel: translateUiText('Copy code'),
@@ -3917,10 +3920,14 @@ function applyAppearance() {
     for (const [property, value] of Object.entries(variables)) root.style.setProperty(property, value);
     appliedWebCustomThemeVariables = Object.keys(variables);
   }
+  const effectiveMode = selection.kind === 'custom'
+    ? customThemeEffectiveMode(selection.document, resolved)
+    : resolved;
   root.dataset.hermesMode = resolved;
+  root.dataset.hermesEffectiveMode = effectiveMode;
   root.dataset.hermesColorMode = mode;
   root.dataset.hermesTheme = theme;
-  root.style.colorScheme = selection.kind === 'custom' && resolved === 'dark' && !selection.document.darkColors ? 'light' : resolved;
+  root.style.colorScheme = effectiveMode;
   const visualTheme = selection.kind === 'custom' ? '' : theme;
   applyAppearancePreferences(root, appearancePreferencesForTheme(
     webAppearancePreferences(),
@@ -5549,6 +5556,7 @@ function revealWebCompletionReply(node, fullText) {
   const paint = (piece) => {
     const rendered = document.createElement('div');
     rendered.innerHTML = renderMarkdownSafe(piece);
+    highlightCodeBlocks(rendered);
     content.replaceChildren(...rendered.childNodes);
     if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120) {
       scroller.scrollTop = scroller.scrollHeight;

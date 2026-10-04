@@ -140,6 +140,7 @@ import {
 } from './lib/pet-avatar.mjs';
 import { blobatar as blobatarSvg } from './lib/vendor/blobatar-2.0.0.js';
 import { renderMarkdownSafe, sanitizeHtml } from './lib/sanitizer.mjs';
+import { highlightCodeBlocks } from './lib/code-highlighting.mjs';
 import { enhanceMarkdownCodeBlocks } from './lib/markdown-code-copy.mjs';
 import {
   completionRevealPlan,
@@ -195,6 +196,7 @@ import { refreshHermesContextRegistry } from './lib/hermes-context-sync.mjs';
 import {
   CUSTOM_THEME_MAX_INPUT_BYTES,
   CUSTOM_THEME_STORAGE_KEY,
+  customThemeEffectiveMode,
   customThemePaletteForMode,
   customThemeSelection,
   serializeThemeDocument,
@@ -6598,10 +6600,11 @@ function applyAppearanceSettings() {
   root.dataset.hermesTheme = theme;
   root.dataset.hermesColorMode = colorMode;
   root.dataset.hermesMode = resolvedMode;
-  const effectiveColorScheme = selection.kind === 'custom' && resolvedMode === 'dark' && !selection.document.darkColors
-    ? 'light'
+  const effectiveMode = selection.kind === 'custom'
+    ? customThemeEffectiveMode(selection.document, resolvedMode)
     : resolvedMode;
-  root.style.colorScheme = effectiveColorScheme;
+  root.dataset.hermesEffectiveMode = effectiveMode;
+  root.style.colorScheme = effectiveMode;
   const visualTheme = selection.kind === 'custom' ? '' : theme;
   applyAppearancePreferences(root, appearancePreferencesForTheme(
     appearancePreferencesForSurface(settings, 'panel'),
@@ -15730,6 +15733,7 @@ function renderThinkingIndicator(element) {
 function patchRenderedMessageContent(element, html = '') {
   const template = document.createElement('template');
   template.innerHTML = html;
+  highlightCodeBlocks(template.content);
   const incoming = [...template.content.childNodes];
   const existing = [...element.childNodes];
   let stable = 0;
