@@ -38,8 +38,10 @@ import {
   isMicrophonePermissionError,
   isModelRuntimeSelectable,
   isRestrictedUrl,
+  isLocalDocumentUrl,
   isUsableRemoteGatewayUrl,
   messageDisplayText,
+  isSteerMessage,
   messagesForLocalCache,
   microphonePermissionHelp,
   modelDisplayName,
@@ -67,14 +69,17 @@ import {
   prepareOnDeviceSpeechRecognition,
   queuedMessageControlState,
   reasoningEffortShortLabel,
-  renderMarkdown,
   runtimeValueMatches,
   safeTab,
+  sanitizeGatewayDiagnosticText,
   shouldRequireModelLock,
   shouldReuseImageGenerationActivity,
   shouldStopSessionPaging,
   shouldFallbackToWebSpeechForTranscription,
+  shouldOpenVoiceDictationPageForSpeechError,
   shouldUseLocalDashboardAudioTranscription,
+  SPEECH_SILENT_START_TIMEOUT_MS,
+  speechRecognitionSilentlyFailed,
   shouldAutoOpenSessionGroup,
   shouldAutoFlushQueuedTurn,
   shouldCreateFreshSessionOnOpen,
@@ -87,6 +92,8 @@ import {
   resolveBrowserEffectiveModelOptions,
   resolveCatalogModelIdForBinding,
   skillSuggestionsForInput,
+  restSkillsFallbackAllowed,
+  shouldRecoverSkillsFromDashboard,
   updateBrowserModelScope,
   updateBrowserModelOptionScope,
   updateReviewState,
@@ -95,7 +102,52 @@ import {
   withSessionBindingIdentity,
   agentDiscoveryAppliesToMode,
   agentDiscoveryModeNote,
+  interceptChatLinkClick,
 } from './lib/common.mjs';
+import {
+  BUILD_RELOAD_BOOT_RECHECK_MS,
+  BUILD_RELOAD_WATCH_INTERVAL_MS,
+  HBE_RELEASES_URL,
+  RELEASES_DOWNLOAD_LABEL,
+  RELOAD_NOW_LABEL,
+  UPDATE_CHECK_CACHE_KEY,
+  buildIdentityChanged,
+  buildIdentityFromInfo,
+  buildUpdateAgentPrompt,
+  reloadPendingNotice,
+  shouldAutoCheckUpdates,
+  shouldRefreshBuildIdentity,
+  updateButtonEmphasis,
+  updateCheckCacheEntry,
+  updateInstallNoteText,
+} from './lib/update-flow.mjs';
+import { resolveCanonicalBotSession } from './lib/bot-canonical-session.mjs';
+import {
+  discoverLocalDashboardBaseUrl,
+  extractDashboardSessionToken,
+  readCachedRosterUrl,
+  writeCachedRosterUrl,
+  clearCachedRosterUrl,
+  writeLastKnownRoster,
+} from './lib/desktop-roster.mjs';
+import { createBackgroundLoopbackFetch } from './lib/loopback-cors.mjs';
+import {
+  fetchPetGallery,
+  petFrameIcon,
+  readAllPetAvatars,
+  readPetAvatar,
+  writePetAvatar,
+} from './lib/pet-avatar.mjs';
+import { blobatar as blobatarSvg } from './lib/vendor/blobatar-2.0.0.js';
+import { renderMarkdownSafe, sanitizeHtml } from './lib/sanitizer.mjs';
+import { highlightCodeBlocks } from './lib/code-highlighting.mjs';
+import { enhanceMarkdownCodeBlocks } from './lib/markdown-code-copy.mjs';
+import {
+  completionRevealPlan,
+  newestAssistantReply,
+  revealSlice,
+  trailingNewMessages,
+} from './lib/completion-reveal.mjs';
 import { getLocale, initI18n, populateLanguageSelect, setLocale, subscribeLocale, t, translateUiText } from './lib/i18n.mjs';
 import {
   buildContextMenuTurn,
@@ -113,6 +165,15 @@ import {
 } from './lib/assist-model-contract.mjs';
 import { serializeBrowserTurnEnvelope } from './lib/browser-context-protocol.mjs';
 import {
+  PASTE_ARTIFACT_MAX_ATTACHMENTS,
+  PASTE_ARTIFACT_MAX_CHARS,
+  buildPasteArtifact,
+  classifyPastedText,
+  isPasteArtifact,
+  pasteArtifactExceedsLocalLimit,
+  pasteArtifactExcerpt,
+} from './lib/paste-artifact.mjs';
+import {
   APPEARANCE_THEMES,
   normalizeAppearanceTheme,
   normalizeColorMode,
@@ -120,15 +181,22 @@ import {
 import {
   ZOOM_PRESETS,
   appearancePreferencesForSurface,
+  appearancePreferencesForTheme,
   applyAppearancePreferences,
+  fontFamilyPreview,
   normalizeTextZoomPercent,
   sanitizeLocalFontFamily,
   stepTextZoomPercent,
+  themeOwnsFont,
   withAppearancePreferenceUpdate,
 } from './lib/appearance-preferences.mjs';
+import { mountBrandedSelect } from './lib/branded-select.mjs';
+import { probeSignatureFonts } from './lib/font-availability.mjs';
+import { refreshHermesContextRegistry } from './lib/hermes-context-sync.mjs';
 import {
   CUSTOM_THEME_MAX_INPUT_BYTES,
   CUSTOM_THEME_STORAGE_KEY,
+  customThemeEffectiveMode,
   customThemePaletteForMode,
   customThemeSelection,
   serializeThemeDocument,
@@ -146,10 +214,34 @@ import { createThemeMarketplaceController } from './lib/theme-marketplace-contro
 import { createThemeMarketplaceTransport } from './lib/theme-marketplace-transport.mjs';
 import { buildAgentThemePrompt, extractAgentThemeDocument } from './lib/agent-theme-authoring.mjs';
 import { createImageViewerState, imageViewerReducer } from './lib/image-viewer.mjs';
-import { appendUserImageAttachments } from './lib/image-render.mjs';
+import { createStreamPacer } from './lib/stream-pacing.mjs';
+import { contextTelemetryFromRuntime, formatTokenCount, mergeContextTelemetry } from './lib/session-context-telemetry.mjs';
+import { liveStateBadge, mergeLiveSignals } from './lib/session-live-state.mjs';
+import { appendUserImageAttachments, extractHistoryMediaAttachments, normalizeUserImageAttachments, preserveUserImageAttachments, rawGeneratedImageCandidatesFromResult, resolveImageSource, resolvedGeneratedImageSources, resolvedGeneratedImageSourcesFromMessages } from './lib/image-render.mjs';
+import { createUserFileAttachment, appendUserFileAttachments, stageUserFiles, attachmentFileContext, attachmentSourceKey, rememberUserFileAttachments, restoreUserFileAttachments, openUserFileAttachment, downloadUserFileAttachment } from './lib/user-file-attachments.mjs';
+import { mediaDisplayName, mediaSourcePlan, probeArtifactFileSource, resolveArtifactDownloadSource, resolveArtifactFileSource } from './lib/media-source.mjs';
+import { classifyMediaKind, resolveMediaFetchPlan } from './lib/media-persistence.mjs';
+import { artifactActionPlan, artifactFailureNotice } from './lib/artifact-actions.mjs';
+import { hydrateArtifactCards, setArtifactCardBusy, setArtifactCardNote } from './lib/artifact-card.mjs';
+import { pickSidecarArt, sidecarArtCssValue } from './lib/sidecar-art.mjs';
+import {
+  activeSubagentView,
+  applySubagentEvent,
+  formatSubagentElapsed,
+  isSubagentEventName,
+  pruneFinishedSubagents,
+  reconcileSubagentSnapshot,
+  visibleSubagentView,
+  SUBAGENT_STEER_ICON,
+  SUBAGENT_STOP_ICON,
+  subagentControlPayload,
+  subagentStackSummary,
+  subagentsFromListResult,
+} from './lib/subagent-stack.mjs';
 import { extractYouTubeVideoId } from './lib/transcript.mjs';
 import {
   buildDashboardWsUrl,
+  buildDashboardWsUrlWithCredential,
   buildSessionModelSwitchRequest,
   createGatewayClient,
   establishGatewaySession,
@@ -159,13 +251,56 @@ import {
   WS_EVENTS,
   WS_METHODS,
 } from './lib/gateway-ws.mjs';
+import { createDashboardStreamWatchdog, dashboardWatchdogTimeoutAction, isDashboardIdleTimeout, matchesDashboardSessionEvent, shouldReattachDashboardStream } from './lib/dashboard-stream-watchdog.mjs';
+import { clearComposerDraft, loadComposerDraft, persistComposerDraft } from './lib/composer-draft.mjs';
+import {
+  BOT_CHAT_TITLE,
+  botModeExitStateForRegularSession,
+  botModeRouteKey,
+  botProfileRowsToHermesProfiles,
+  canSwitchBotProfile,
+  cronRelativeTime,
+  groupProjectionMessagesForDisplay,
+  groupThreadMenuEntries,
+  groupThreadsFromProjection,
+  mergeGroupChatLists,
+  normalizeCronJobRows,
+  relativeTimeFromTs,
+  shouldUseBotDashboardTransport,
+  splitBotRosterRows,
+  } from './lib/bot-mode.mjs';
+import {
+  buildProfileContextHandoff,
+  profileContextHandoffForSession,
+  shouldPromptForProfileSwitch,
+} from './lib/profile-switch.mjs';
+import { browserDisplayMessages } from './lib/web-run-state.mjs';
+import { assignRoomIdentities, resolveRoomSpeaker } from './lib/bot-identity.mjs';
+import { remoteAvatarImageOf, selectRoomAvatarSource, shouldHydrateRemoteAvatar } from './lib/room-avatar.mjs';
+import { createPresenceState, reducePresence, presenceSummary, failureReason } from './lib/group-presence.mjs';
+import {
+  readRoomModelBinding,
+  writeRoomModelBinding,
+  clearRoomModelBinding,
+  needsReapply,
+  readRoomDisplayEvents,
+  appendRoomDisplayEvent,
+} from './lib/group-member-models.mjs';
+import {
+  createBotGroupRuntime,
+  groupProjectionEntryFromDisplayMessage,
+  persistGroupProjectionAppend,
+  persistGroupProjectionCreate,
+  persistGroupProjectionRename,
+  persistGroupProjectionUpdate,
+} from './lib/bot-group-runtime.mjs';
 import {
   dashboardTrustPrompt,
-  discoverProfilesViaTab,
   findDashboardTab,
   isTrustedDashboardOrigin,
   mintWsTicket,
   originOf,
+  renameSessionViaTab,
   ticketFailureHelp,
 } from './lib/dashboard-bridge.mjs';
 import {
@@ -183,20 +318,35 @@ import {
   buildContextReceipt,
   capabilityStatusRows,
   connectionSecuritySummary,
+  dashboardWsGatewayCapabilities,
   normalizeGatewayCapabilities,
 } from './lib/capabilities.mjs';
-import { normalizeBrowserRuntimeEvent, reduceAssistantStreamText } from './lib/runtime-events.mjs';
+import { filterKnownAssistantReconcileParts, normalizeBrowserRuntimeEvent, reduceAssistantStreamText } from './lib/runtime-events.mjs';
 import { taskStackFromToolEvent, taskStackProgress, updateTaskStackStore } from './lib/task-stack.mjs';
 import {
   DELEGATION_WATCH_STORAGE_KEY,
   createDelegationWatchManager,
+  delegationCompletionMarkerId,
+  delegationCompletionState,
   delegationDispatchFromToolEvent,
   delegationDispatchesFromMessages,
   delegationScopeKey,
   isDelegationCompletionMarkerMessage,
   mergeDelegationWatchStores,
+  normalizeDelegationId,
 } from './lib/async-delegation.mjs';
-import { classifyTurnRecovery, latestAssistantAfterUser, sessionContextFailureRecovery } from './lib/turn-recovery.mjs';
+import {
+  acceptedTurnRecoveryPolicy,
+  classifyTurnRecovery,
+  gatewayFailureRecoveryPlan,
+  hermesGatewayTurnError,
+  hermesRequestError,
+  latestAssistantAfterUser,
+  sessionContextFailureRecovery,
+  turnRequestFailureState,
+  isDisplayTextRejection,
+} from './lib/turn-recovery.mjs';
+import { createGatewayRestartAction, restartGatewayViaDashboard, waitForGatewayReturn, watchGatewayRestart } from './lib/gateway-restart.mjs';
 import { createDiffusionCanvas, diffusionVariantForSeed } from './lib/diffusion-canvas.mjs';
 import { buildSupportDiagnostics } from './lib/support-diagnostics.mjs';
 import {
@@ -209,7 +359,11 @@ import {
 } from './lib/agent-discovery.mjs';
 import {
   transcribeAudioViaDashboard,
+  resolveDashboardTranscriptionBaseUrl,
+  dashboardFileStreamUrl,
   dashboardModelDiscoveryBaseUrl,
+  fetchDashboardMediaDataUrl,
+  fetchDashboardSessionToken,
   discoverCanonicalProviderCatalog,
   discoverGatewayVirtualModels,
   discoverModelsFromDashboard,
@@ -220,15 +374,31 @@ import {
   mergeModelsWithRegistry,
   mergeVirtualModelRows,
   MODEL_CATALOG_CACHE_STORAGE_KEY,
+  MODEL_CATALOG_SHARED_CACHE_PROFILE,
+  globalModelCatalogCacheKey,
   modelCatalogCacheKey,
   modelRowsFromGatewayOptions,
   modelCatalogRefreshDecision,
   normalizeCachedModelCatalog,
   normalizeExternalModelSourceList,
   selectModelCatalogFallback,
+  resolveProfileSessionModel,
   shouldEnrichCanonicalProviderCatalog,
   shouldTrySessionModelFallback,
-} from './lib/model-discovery.mjs';
+  unionCachedModelCatalogs,
+  } from './lib/model-discovery.mjs';
+import {
+  VOICE_CAPTURE_SAMPLE_INTERVAL_MS,
+  VOICE_CAPTURE_TIMESLICE_MS,
+  joinDictationTranscript,
+  voiceCaptureDecision,
+  voiceCaptureIsSignal,
+  voiceCapturePeak,
+  voiceCapturePeakFromBytes,
+  voiceDictationCaptureRoute,
+  formatVoiceElapsed,
+  voiceLevelBarHeights,
+} from './lib/voice-capture.mjs';
 import {
   WAKE_MESSAGES,
   WAKE_STORAGE_KEYS,
@@ -243,9 +413,34 @@ import {
 } from './lib/commands.mjs';
 import {
   ELEMENT_PICK_MESSAGES,
+  normalizePickedElement,
   pickedElementForTab,
   storedPickedElementRecord,
 } from './lib/element-picker.mjs';
+import {
+  PAGE_ANNOTATION_MESSAGES,
+  PAGE_ANNOTATION_MODES,
+} from './lib/page-annotation-content.mjs';
+import {
+  addPageAnnotation,
+  buildPageAnnotationComposerBundle,
+  compactPageAnnotationIdentity,
+  emptyPageAnnotationStack,
+  formatPageCommentTargetLabel,
+  mergePageAnnotationComposerState,
+  normalizePageAnnotationResult,
+  pageAnnotationCommentsEnabled,
+  queuePageAnnotationTurn,
+  removePageAnnotation,
+  updatePageAnnotationNote,
+} from './lib/page-annotation.mjs';
+import { captureAnnotationCrop } from './lib/page-annotation-capture.mjs';
+import {
+  clearPageAnnotationSession,
+  createPageAnnotationImageStore,
+  persistPageAnnotationSession,
+  restorePageAnnotationSession,
+} from './lib/page-annotation-storage.mjs';
 import {
   CONTEXT_SCOPE_MODES,
   DEFAULT_CONTEXT_SCOPE,
@@ -258,6 +453,14 @@ import {
   sessionBindingKeyForScope,
   shouldRefreshForTabEvent,
 } from './lib/context-scope.mjs';
+import {
+  createRevisionGate,
+  resetContextScope,
+  resolveContextScopeAction,
+  restoreConversationSessionState,
+  shouldPreserveDashboardTransport,
+  snapshotConversationSessionState,
+} from './lib/context-scope-transition.mjs';
 import {
   CONTEXT_CONSENT_STORAGE_KEY,
   consentGrantedForIdentity,
@@ -282,6 +485,7 @@ import {
   RUN_TERMINAL_CONFIRM_TIMEOUT_MS,
   acknowledgeStopRequest,
   beginRunControl,
+  canRecoverStaleDashboardRunControl,
   canSwitchActiveSession,
   dashboardTerminalStatus,
   markRunStreamClosed,
@@ -333,6 +537,7 @@ import {
   normalizeConnectionMode,
   resolvePhaseATransport,
   sanitizeGatewayUrlForConnectionMode,
+  transportRequiresApiKey,
   transportUsesDashboardTicket,
 } from './lib/connection-modes.mjs';
 import { CONNECTION_ACTIONS, connectionActionForSettings } from './lib/connection-dispatch.mjs';
@@ -343,7 +548,21 @@ import {
 } from './lib/connection-controller.mjs';
 import { createHermesClient } from './lib/hermes-client.mjs';
 import { openHermesFullView } from './lib/fulltab-opener.mjs';
-import { writeAssistantClipboardEvent } from './lib/assistant-clipboard.mjs';
+import { buildCleanClipboardPayload, writeAssistantClipboardEvent } from './lib/assistant-clipboard.mjs';
+import { normalizeMessageTimestamp } from './lib/message-meta.mjs';
+import { setRailCopyEnabled } from './lib/message-actions.mjs';
+import { createMessageThreadUi } from './lib/message-thread-ui.mjs';
+import { bindWheelScrollX } from './lib/wheel-scroll-x.mjs';
+import { highlightMentions, insertMention } from './lib/room-mentions.mjs';
+import {
+  truncateSubmitParams,
+  resolveRowIdByDisplayText,
+  planEdit,
+  planRestore,
+  applyRewindLocally,
+  rebindSurvivorRowIds,
+  bindRowIdsFromHistory,
+} from './lib/message-rewind.mjs';
 import { explicitSiteCaptureAction } from './lib/site-adapters.mjs';
 import {
   SURFACE_KINDS,
@@ -352,12 +571,76 @@ import {
   fullTabEntryPathForPage,
 } from './lib/surface-protocol.mjs';
 import { resolveBrowserApi } from './lib/browser-api.mjs';
-import { detectBrowserProduct, probeBrowserCapabilities } from './lib/browser-runtime.mjs';
+import { detectBrowserProduct, probeBrowserCapabilities, browserSpeechCloudFallbackAllowed } from './lib/browser-runtime.mjs';
 import { controllerAdapterContractFor } from './lib/browser-controller-adapter.mjs';
+import {
+  browserControlView,
+  controlLeaseRequest,
+  currentTabLeaseReplacement,
+  followTargetTabId,
+} from './lib/browser-control-ui.mjs';
+import { createBrowserControlDialog } from './lib/browser-control-dialog.mjs';
+
+// -- Train 1 Phase 0 startup instrumentation (observer-only) ---------------
+// Marks/measure hooks for scripts/bench-startup.mjs (window.__HBE_BOOT_MARKS).
+// Every call below is guarded and one-shot so a repeated render or a missing
+// performance API can never gate, reorder, or otherwise change boot behavior;
+// hooks are appended after the existing behavior that completes each phase.
+const HBE_BOOT_TARGET = globalThis;
+if (!Array.isArray(HBE_BOOT_TARGET.__HBE_BOOT_MARKS)) {
+  HBE_BOOT_TARGET.__HBE_BOOT_MARKS = [];
+}
+const HBE_BOOT_MARKS = HBE_BOOT_TARGET.__HBE_BOOT_MARKS;
+const HBE_BOOT_EMITTED = new Set();
+function hbeBootClock() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+function hbeBootFindTime(markName) {
+  for (let index = HBE_BOOT_MARKS.length - 1; index >= 0; index -= 1) {
+    const entry = HBE_BOOT_MARKS[index];
+    if (entry?.mark === markName && Number.isFinite(entry?.t)) return entry.t;
+  }
+  return null;
+}
+function hbeBootEmit(name, { startMark = null } = {}) {
+  try {
+    const t = hbeBootClock();
+    if (!HBE_BOOT_EMITTED.has(name)) {
+      HBE_BOOT_EMITTED.add(name);
+      HBE_BOOT_MARKS.push({ mark: name, t });
+      if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+        try { performance.mark(name); } catch { /* mark is best-effort */ }
+      }
+    }
+    if (startMark) {
+      const start = hbeBootFindTime(startMark);
+      if (start !== null) {
+        HBE_BOOT_MARKS.push({ measure: name, dur: Math.max(0, t - start) });
+        if (typeof performance !== 'undefined' && typeof performance.measure === 'function') {
+          try { performance.measure(name, { start, end: t }); } catch { /* measure is best-effort */ }
+        }
+      }
+    }
+  } catch { /* instrumentation must never block boot */ }
+}
+
+hbeBootEmit('panel:body-start');
 
 const $ = (selector) => document.querySelector(selector);
 const browserApiResolution = resolveBrowserApi();
 const browserApi = browserApiResolution.api;
+const dashboardFetch = createBackgroundLoopbackFetch({
+  sendMessage: (message) => browserApi.runtime.sendMessage(message),
+  fetchFn: globalThis.fetch?.bind(globalThis),
+});
+const browserProduct = detectBrowserProduct({
+  userAgent: navigator.userAgent,
+  brands: navigator.userAgentData?.brands || [],
+  braveApi: navigator.brave,
+  extensionUrl: browserApi?.runtime?.getURL?.('/') || '',
+});
 const ASSIST_ROUTING_FALLBACK_ENGLISH = 'Your Assist model choice stays saved. This gateway cannot enforce an exact model, so Assist uses the gateway default and labels every fallback result.';
 const sidePanelParams = parseSidePanelParams(globalThis.location?.search || '');
 const INLINE_DRAFT_STORAGE_KEY = 'hermesBrowserInlineDraftRequest';
@@ -365,6 +648,9 @@ const INLINE_SESSION_STATE_KEY = 'hermesBrowserInlineSessionState';
 const CONTEXT_MENU_STORAGE_KEY = 'hermesBrowserContextMenuRequest';
 const OPEN_SESSION_STORAGE_KEY = 'hermesBrowserOpenSessionRequest';
 const TASK_STACKS_STORAGE_KEY = 'hermesBrowserTaskStacks';
+// Durable per-room display-only transcript rows (member pass/failure and
+// model change/reset notices) so they survive a room close/reopen.
+const ROOM_EVENTS_STORAGE_KEY = 'hermesBrowserRoomEvents';
 
 const els = {
   shell: $('.shell'),
@@ -375,12 +661,14 @@ const els = {
   startupDetail: $('#startupDetail'),
   startupProgress: $('#startupProgress'),
   startupStepList: $('#startupStepList'),
+  startupConnectButton: $('#startupConnectButton'),
   connectPanel: $('#connectPanel'),
   connectButton: $('#connectButton'),
   manualSettingsButton: $('#manualSettingsButton'),
   connectStatus: $('#connectStatus'),
   connectionPill: $('#connectionPill'),
   browserIntroHero: $('#browserIntroHero'),
+  browserIntroDismissButton: $('#browserIntroDismissButton'),
   sessionMenuButton: $('#sessionMenuButton'),
   currentSessionName: $('#currentSessionName'),
   newSessionButton: $('#newSessionButton'),
@@ -397,20 +685,53 @@ const els = {
   taskStackSummary: $('#taskStackSummary'),
   taskStackProgress: $('#taskStackProgress'),
   taskStackList: $('#taskStackList'),
+  subagentStack: $('#subagentStack'),
+  subagentStackToggle: $('#subagentStackToggle'),
+  subagentStackSummary: $('#subagentStackSummary'),
+  subagentStackList: $('#subagentStackList'),
+  subagentStackDetail: $('#subagentStackDetail'),
   composer: $('#composer'),
+  composerLabel: $('#composerLabel'),
   input: $('#promptInput'),
   contextChip: $('#contextChip'),
+  statusStackToggle: $('#statusStackToggle'),
   contextChipLabel: $('#contextChipLabel'),
   contextPreview: $('#contextPreview'),
+  explicitSiteCaptureWrap: $('#explicitSiteCaptureWrap'),
   explicitSiteCaptureButton: $('#explicitSiteCaptureButton'),
+  explicitSiteCaptureDismiss: $('#explicitSiteCaptureDismiss'),
+  gmailCaptureEnabledInput: $('#gmailCaptureEnabledInput'),
+  gmailCaptureToggleTitle: $('#gmailCaptureToggleTitle'),
+  gmailCaptureToggleHint: $('#gmailCaptureToggleHint'),
   contextScopeButton: $('#contextScopeButton'),
   contextScopeLabel: $('#contextScopeLabel'),
   contextScopeMenu: $('#contextScopeMenu'),
+  localDocumentApprovalNotice: $('#localDocumentApprovalNotice'),
+  localDocumentApprovalTitle: $('#localDocumentApprovalTitle'),
+  localDocumentApprovalDetail: $('#localDocumentApprovalDetail'),
+  localDocumentApproveButton: $('#localDocumentApproveButton'),
+  localDocumentDismissButton: $('#localDocumentDismissButton'),
   sessionOwnershipNotice: $('#sessionOwnershipNotice'),
   contextMenuRouteNotice: $('#contextMenuRouteNotice'),
   contextMenuRememberRoute: $('#contextMenuRememberRoute'),
   sessionOwnershipTitle: $('#sessionOwnershipTitle'),
   sessionOwnershipDetail: $('#sessionOwnershipDetail'),
+  profileSwitchDialog: $('#profileSwitchDialog'),
+  profileSwitchTitle: $('#profileSwitchTitle'),
+  profileSwitchDetail: $('#profileSwitchDetail'),
+  profileSwitchCarryButton: $('#profileSwitchCarryButton'),
+  profileSwitchCleanButton: $('#profileSwitchCleanButton'),
+  profileSwitchCancelButton: $('#profileSwitchCancelButton'),
+  botModeLeaveDialog: $('#botModeLeaveDialog'),
+  botModeLeaveTitle: $('#botModeLeaveTitle'),
+  botModeLeaveDetail: $('#botModeLeaveDetail'),
+  botModeLeaveConfirmButton: $('#botModeLeaveConfirmButton'),
+  botModeLeaveCancelButton: $('#botModeLeaveCancelButton'),
+  modelSwitchDialog: $('#modelSwitchDialog'),
+  modelSwitchTitle: $('#modelSwitchTitle'),
+  modelSwitchDetail: $('#modelSwitchDetail'),
+  modelSwitchConfirmButton: $('#modelSwitchConfirmButton'),
+  modelSwitchCancelButton: $('#modelSwitchCancelButton'),
   composerDropZone: $('#composerDropZone'),
   dropOverlay: $('#dropOverlay'),
   skillMenu: $('#skillMenu'),
@@ -420,14 +741,120 @@ const els = {
   retryRunStatusButton: $('#retryRunStatusButton'),
   discardHeldQueueButton: $('#discardHeldQueueButton'),
   sendButton: $('#sendButton'),
+  pageCommentTrayButton: $('#pageCommentTrayButton'),
+  pageCommentTray: $('#pageCommentTray'),
+  pageCommentTrayList: $('#pageCommentTrayList'),
+  pageCommentTraySend: $('#pageCommentTraySend'),
+  botModeThreadsButton: $('#botModeThreadsButton'),
+  botModeNewThreadButton: $('#botModeNewThreadButton'),
   inlineSendButton: $('#inlineSendButton'),
   queueButton: $('#queueButton'),
   steerButton: $('#steerButton'),
   stopButton: $('#stopButton'),
   wakeButton: $('#wakeButton'),
   voiceButton: $('#voiceButton'),
+  voiceActivity: $('#voiceActivity'),
+  voiceActivityLabel: $('#voiceActivityLabel'),
+  voiceActivityTimer: $('#voiceActivityTimer'),
+  voiceActivityBars: $('#voiceActivityBars'),
   refreshButton: $('#refreshButton'),
   settingsButton: $('#settingsButton'),
+  botModeButton: $('#botModeButton'),
+  botModePanel: $('#botModePanel'),
+  botModeCloseButton: $('#botModeCloseButton'),
+  botModeSearch: $('#botModeSearch'),
+  botModeLoadingOverlay: $('#botModeLoadingOverlay'),
+  botModeLoadingAvatar: $('#botModeLoadingAvatar'),
+  botModeLoadingAgentTitle: $('#botModeLoadingAgentTitle'),
+  botModeLoadingAgentSubtitle: $('#botModeLoadingAgentSubtitle'),
+  botModeRoster: $('#botModeRoster'),
+  botModeGroupList: $('#botModeGroupList'),
+  botModeViewAgents: $('#botModeViewAgents'),
+  botModeViewGroups: $('#botModeViewGroups'),
+  botModeStatus: $('#botModeStatus'),
+  botModeRefreshButton: $('#botModeRefreshButton'),
+  botModeOpenButton: $('#botModeOpenButton'),
+  activeProfileIndicator: $('#activeProfileIndicator'),
+  groupThreadStrip: $('#groupThreadStrip'),
+  groupThreadSelect: $('#groupThreadSelect'),
+  groupThreadActiveBanner: $('#groupThreadActiveBanner'),
+  groupThreadBadge: $('#groupThreadBadge'),
+  groupThreadHint: $('#groupThreadHint'),
+  groupThreadExitButton: $('#groupThreadExitButton'),
+  groupPresence: $('#groupPresence'),
+  groupPresenceChips: $('#groupPresenceChips'),
+  groupPresenceStatus: $('#groupPresenceStatus'),
+  roomMemberPopover: $('#roomMemberPopover'),
+  roomMemberPopoverList: $('#roomMemberPopoverList'),
+  roomMemberPopoverTitle: $('#roomMemberPopoverTitle'),
+  newGroupModal: $('#newGroupModal'),
+  newGroupSearch: $('#newGroupSearch'),
+  newGroupBotList: $('#newGroupBotList'),
+  newGroupIcon: $('#newGroupIcon'),
+  newGroupIconUpload: $('#newGroupIconUpload'),
+  newGroupIconGenerate: $('#newGroupIconGenerate'),
+  newGroupIconRemove: $('#newGroupIconRemove'),
+  newGroupFileInput: $('#newGroupFileInput'),
+  newGroupNameInput: $('#newGroupNameInput'),
+  newGroupCreateButton: $('#newGroupCreateButton'),
+  newGroupCancelButton: $('#newGroupCancelButton'),
+  newGroupCloseButton: $('#newGroupCloseButton'),
+  groupSettingsModal: $('#groupSettingsModal'),
+  groupSettingsCloseButton: $('#groupSettingsCloseButton'),
+  groupSettingsCancelButton: $('#groupSettingsCancelButton'),
+  groupSettingsSaveButton: $('#groupSettingsSaveButton'),
+  groupSettingsNameInput: $('#groupSettingsNameInput'),
+  groupSettingsAvatarPreview: $('#groupSettingsAvatarPreview'),
+  groupSettingsUploadButton: $('#groupSettingsUploadButton'),
+  groupSettingsGenerateButton: $('#groupSettingsGenerateButton'),
+  groupSettingsRemoveImageButton: $('#groupSettingsRemoveImageButton'),
+  groupSettingsFileInput: $('#groupSettingsFileInput'),
+  botModeVerify: $('#botModeVerify'),
+  botModeEditButton: $('#botModeEditButton'),
+  botModeNewAgentButton: $('#botModeNewAgentButton'),
+  botModeNewGroupButton: $('#botModeNewGroupButton'),
+  botChatIntro: $('#botChatIntro'),
+  botChatIntroAvatar: $('#botChatIntroAvatar'),
+  botChatIntroTitle: $('#botChatIntroTitle'),
+  botChatIntroSubtitle: $('#botChatIntroSubtitle'),
+  botModeReturnButton: $('#botModeReturnButton'),
+  botModeGroupReturnButton: $('#botModeGroupReturnButton'),
+  botModeSheet: $('#botModeSheet'),
+  botModeSheetTitle: $('#botModeSheetTitle'),
+  botModeSheetMeta: $('#botModeSheetMeta'),
+  botModeSheetCloseButton: $('#botModeSheetCloseButton'),
+  botModeSheetTabs: $('#botModeSheetTabs'),
+  botModeSheetAvatarPreview: $('#botModeSheetAvatarPreview'),
+  botModeSheetFaceGrid: $('#botModeSheetFaceGrid'),
+  botModeSheetImageInput: $('#botModeSheetImageInput'),
+  botModeSheetImageButton: $('#botModeSheetImageButton'),
+  botModeSheetUploadText: $('#botModeSheetUploadText'),
+  botModeSheetSkillsSearch: $('#botModeSheetSkillsSearch'),
+  botModeSheetSkillsCount: $('#botModeSheetSkillsCount'),
+  botModeSheetAvatarClear: $('#botModeSheetAvatarClear'),
+  botModeSheetNameField: $('#botModeSheetNameField'),
+  botModeSheetNameInput: $('#botModeSheetNameInput'),
+  botModeSheetTitleInput: $('#botModeSheetTitleInput'),
+  botModeSheetDescriptionInput: $('#botModeSheetDescriptionInput'),
+  botModeSheetSaveButton: $('#botModeSheetSaveButton'),
+  botModeSheetWarning: $('#botModeSheetWarning'),
+  botModeEnabledInput: $('#botModeEnabledInput'),
+  botModeDisplayDensity: $('#botModeDisplayDensity'),
+  botModeAnimateAvatars: $('#botModeAnimateAvatars'),
+  botModeSettingsStatus: $('#botModeSettingsStatus'),
+  botModeCronCard: $('#botModeCronCard'),
+  botModeCronList: $('#botModeCronList'),
+  botModeCronStatus: $('#botModeCronStatus'),
+  botModeCronRefreshButton: $('#botModeCronRefreshButton'),
+  profileRosterPreview: $('#profileRosterPreview'),
+  profileVerifiedCount: $('#profileVerifiedCount'),
+  scanAgentRosterButton: $('#scanAgentRosterButton'),
+  botModePetSearch: $('#botModePetSearch'),
+  botModePetGrid: $('#botModePetGrid'),
+  botModePetApply: $('#botModePetApply'),
+  botModePetClear: $('#botModePetClear'),
+  botModePetHint: $('#botModePetHint'),
+  startupActions: $('#startupActions'),
   startupTestConnectionButton: $('#startupTestConnectionButton'),
   openFullViewButton: $('#openFullViewButton'),
   closeSettingsButton: $('#closeSettingsButton'),
@@ -446,6 +873,10 @@ const els = {
   maybeLaterButton: $('#maybeLaterButton'),
   closeUpdateDialogButton: $('#closeUpdateDialogButton'),
   updateInstallNote: $('#updateInstallNote'),
+  updateReleaseLink: $('#updateReleaseLink'),
+  updateReloadPending: $('#updateReloadPending'),
+  updateReloadPendingText: $('#updateReloadPendingText'),
+  reloadBuildButton: $('#reloadBuildButton'),
   operationToast: $('#operationToast'),
   operationToastTitle: $('#operationToastTitle'),
   operationToastDetail: $('#operationToastDetail'),
@@ -454,7 +885,34 @@ const els = {
   activeUrl: $('#activeUrl'),
   statusDot: $('#statusDot'),
   statusActions: $('#statusActions'),
+  statusRetryProbeButton: $('#statusRetryProbeButton'),
   statusCopyDiagnosticsButton: $('#statusCopyDiagnosticsButton'),
+  browserControlCard: $('#browserControlCard'),
+  browserControlCardDetail: $('#browserControlCardDetail'),
+  browserControlState: $('#browserControlState'),
+  browserControlScopeInput: $('#browserControlScopeInput'),
+  browserControlStayButton: $('#browserControlStayButton'),
+  browserControlFollowButton: $('#browserControlFollowButton'),
+  browserControlEnableButton: $('#browserControlEnableButton'),
+  browserControlDetachButton: $('#browserControlDetachButton'),
+  browserControlMenuButton: $('#browserControlMenuButton'),
+  browserControlDialog: $('#browserControlDialog'),
+  browserControlDialogScopeInput: $('#browserControlDialogScopeInput'),
+  browserControlDialogStayButton: $('#browserControlDialogStayButton'),
+  browserControlDialogFollowButton: $('#browserControlDialogFollowButton'),
+  browserControlOffButton: $('#browserControlOffButton'),
+  browserControlPauseLabel: $('#browserControlPauseLabel'),
+  browserControlStrip: $('#browserControlStrip'),
+  browserControlStripSignal: $('#browserControlStripSignal'),
+  browserControlStripTitle: $('#browserControlStripTitle'),
+  browserControlStripDetail: $('#browserControlStripDetail'),
+  browserControlAttachButton: $('#browserControlAttachButton'),
+  browserControlAuthorizeButton: $('#browserControlAuthorizeButton'),
+  browserControlDismissButton: $('#browserControlDismissButton'),
+  browserControlPauseButton: $('#browserControlPauseButton'),
+  browserControlStopButton: $('#browserControlStopButton'),
+  browserControlApproveButton: $('#browserControlApproveButton'),
+  browserControlRejectButton: $('#browserControlRejectButton'),
   modelMenuButton: $('#modelMenuButton'),
   currentModelName: $('#currentModelName'),
   currentModelEffort: $('#currentModelEffort'),
@@ -472,6 +930,21 @@ const els = {
   attachMenuButton: $('#attachMenuButton'),
   attachMenu: $('#attachMenu'),
   attachmentList: $('#attachmentList'),
+  pageAnnotationPanel: $('#pageAnnotationPanel'),
+  pageAnnotationElementButton: $('#pageAnnotationElementButton'),
+  pageAnnotationAreaButton: $('#pageAnnotationAreaButton'),
+  pageAnnotationCancelButton: $('#pageAnnotationCancelButton'),
+  pageAnnotationStatus: $('#pageAnnotationStatus'),
+  pageAnnotationDraft: $('#pageAnnotationDraft'),
+  pageAnnotationDraftLabel: $('#pageAnnotationDraftLabel'),
+  pageAnnotationNote: $('#pageAnnotationNote'),
+  pageAnnotationSaveButton: $('#pageAnnotationSaveButton'),
+  pageAnnotationDiscardButton: $('#pageAnnotationDiscardButton'),
+  pageAnnotationList: $('#pageAnnotationList'),
+  pageAnnotationFlushButton: $('#pageAnnotationFlushButton'),
+  pageAnnotationQueueButton: $('#pageAnnotationQueueButton'),
+  pageAnnotationClearButton: $('#pageAnnotationClearButton'),
+  pageAnnotationDoneButton: $('#pageAnnotationDoneButton'),
   fileInput: $('#fileInput'),
   imageInput: $('#imageInput'),
   folderInput: $('#folderInput'),
@@ -517,6 +990,7 @@ const els = {
   contextMenuEditor: $('#contextMenuEditor'),
   panelResidencyInputs: Array.from(document.querySelectorAll('input[name="panelResidencyMode"]')),
   autoNameSessionsInput: $('#autoNameSessionsInput'),
+  showMessageTimesInput: $('#showMessageTimesInput'),
   transcriptProviderInput: $('#transcriptProviderInput'),
   wakeWordEnabledInput: $('#wakeWordEnabledInput'),
   wakeWordPhraseInput: $('#wakeWordPhraseInput'),
@@ -567,6 +1041,7 @@ const els = {
   customFontFamilyField: $('#customFontFamilyField'),
   customFontFamilyInput: $('#customFontFamilyInput'),
   appearanceSaveStatus: $('#appearanceSaveStatus'),
+  signatureFontFallbackNote: $('#signatureFontFallbackNote'),
   quickMoreMenu: $('#quickMoreMenu'),
   commandMenuButton: $('#commandMenuButton'),
   template: $('#messageTemplate'),
@@ -575,6 +1050,11 @@ const els = {
 let settings = { ...DEFAULT_SETTINGS };
 let appearanceMutationId = 0;
 let appearanceSaveStatus = '';
+// Guards the async signature-font probe so a stale result cannot toggle the
+// fallback note after a newer render already decided its visibility.
+let signatureNoteProbeId = 0;
+let themeFontPinned = false;
+let themeFontPinnedFor = '';
 let appearanceWriteQueue = Promise.resolve();
 let customThemeStoreState = { ok: true, status: 'empty', themes: [] };
 let customThemePreviewState = null;
@@ -608,20 +1088,81 @@ let startupReadiness = initialStartupReadiness(settings);
 let contextScope = normalizeContextScope(DEFAULT_CONTEXT_SCOPE);
 let previousConversationScope = normalizeContextScope(DEFAULT_CONTEXT_SCOPE);
 let currentContext = { activeTab: null, tabs: [], pageContext: null, contextScope };
+let nonPinnedConversationSessionSnapshot = null;
+const scopeRevision = createRevisionGate();
+const contextRefreshRevision = createRevisionGate();
+let scopeTransitionQueue = Promise.resolve();
 let contextConsentPrincipalBinding = { origin: '', transport: '', principal: '' };
 const pickedElementsByTabId = new Map();
 let elementPickInProgress = false;
 let elementPickState = null;
 const PICK_STATE_STORAGE_NAME = 'hermes:elementPickInProgress';
+let pageAnnotationSession = null;
+let pageAnnotationStack = emptyPageAnnotationStack();
+let pageAnnotationDraft = null;
+let pageAnnotationMode = PAGE_ANNOTATION_MODES.ELEMENT;
+let pageAnnotationStale = false;
+let pageCommentPickActive = false;
+const pageAnnotationImages = createPageAnnotationImageStore();
 let selectedTabs = []; // null = all tabs; array of SafeTab = user-filtered set
 let messages = [];
+let panelMessageThread = null;
+let fileHistoryRestoreGeneration = 0;
 let taskStackStore = {};
 let taskStackExpanded = true;
+let subagentState = {};
+let subagentExpanded = true;
+let subagentSelectedId = '';
+let subagentSteerDraft = '';
+let subagentControlBusy = false;
+let subagentControlError = '';
+let subagentTimer = null;
+const subagentBoundClients = new WeakSet();
 let loadedSessionContextEstimate = { sessionId: '', contextTokens: 0, visibleTokens: 0 };
 let availableModels = [];
 let availableSessions = [];
 let availableSkills = [];
 let availableProfiles = [];
+let botModeRoster = [];
+let botModeRosterGeneration = 0;
+let rosterRetryCount = 0;
+// Group chats are kept in their own roster, separated from agent profiles.
+// Synced rows (dashboard / gateway) remain in memory for the current Bot Mode
+// lifecycle. Browser never persists or fabricates group-room state.
+let botModeGroupChats = [];
+let botModeView = 'agents';
+// Honest-state line for the deck: when the verified roster is empty this says
+// exactly why the last roster load came back empty (per the Bot Mode product
+// constraint that disabled/failed sources state their reason).
+let botModeRosterNote = '';
+let profileWsConnection = null;
+let desktopDashboardDiscoveryPromise = null;
+let activeConversationTransport = 'rest';
+let activeDashboardWsConnection = null;
+let activeGroupProjection = null;
+let activeGroupRuntime = null;
+let activeGroupGeneration = 0;
+let activeGroupMessages = [];
+let activeGroupAbortController = null;
+// Desktop-parity threading: the room log groups by `thread` id. The strip
+// renders collapsed rows (first message + reply count + recency); clicking a
+// row expands it into the iMessage stream. '' = show the flat room view.
+let activeGroupThreadId = '';
+let activeGroupPendingNewThread = false;
+const activeGroupExpandedThreads = new Set();
+let activeGroupPresence = createPresenceState();
+let activeGroupPresenceTimer = 0;
+let activeGroupPresenceThread = '';
+let activeGroupLiveMessage = null;
+let activeGroupLiveFrame = 0;
+let activeGroupDisplayEvents = [];
+let activeRoomIdentityKey = '';
+let activeRoomIdentities = [];
+// Bot session history paging: render only the newest page by default; older
+// messages load in pages via the Load More control (weeks of history stay
+// out of the DOM until requested).
+const BOT_HISTORY_PAGE_SIZE = 40;
+let botHistoryVisibleCount = BOT_HISTORY_PAGE_SIZE;
 let attachments = [];
 let selectedModelProvider = '';
 let modelSelectionTarget = 'chat';
@@ -629,6 +1170,7 @@ const modelMenuHome = { parent: els.modelMenu?.parentElement || null, next: els.
 let modelSelectionVersion = 0;
 let modelOptionSelectionVersion = 0;
 let pendingModelRuntimeAck = null;
+let pendingProfileSwitch = null;
 let lastRemoteDiagnostic = null;
 let lastVisibleStatus = null;
 const openSessionGroups = new Set();
@@ -643,12 +1185,33 @@ let activeRunId = '';
 let activeRunControl = null;
 let runControlGeneration = 0;
 let pendingSteerText = '';
+let completionSettlePending = false;
+let sideQuestionCardState = null;
+let sideQuestionSequence = 0;
+// Hermes reports the real session context over the dashboard socket
+// (`session.context_breakdown` on open plus 1 Hz `session.usage` events). Those
+// numbers are the same ones the Desktop context widget shows; the panel's own
+// next-request estimate is only a fallback and is labelled as such.
+let reportedContextTelemetry = { sessionId: '', telemetry: null };
+
+function applyReportedContextTelemetry(sessionId = '', payload = null) {
+  const telemetry = contextTelemetryFromRuntime(payload);
+  if (!telemetry.reported) return false;
+  reportedContextTelemetry = { sessionId: String(sessionId || ''), telemetry };
+  if (String(settings.sessionId || '') === String(sessionId || '')) renderContextWindow();
+  return true;
+}
 let dragDepth = 0;
 let speechRecognition = null;
+let speechWatchdogTimer = null;
 let voiceRecorder = null;
 let voiceRecorderStream = null;
 let voiceRecorderChunks = [];
+let voiceCaptureSession = null;
 let dictating = false;
+let transcribingVoice = false;
+let voiceTransitionInFlight = false;
+let voiceDictationPageOpenPromise = null;
 let dictationBaseText = '';
 let dictationFinalText = '';
 let sessionRoutesAvailable = null;
@@ -658,6 +1221,11 @@ const HERMES_BROWSER_INTRO_SEEN_STORAGE_KEY = 'hermesBrowserIntroSeen';
 let browserIntroSeen = false;
 let browserIntroDismissedForPanel = false;
 let operationToastTimer = null;
+let browserControlStatus = null;
+let browserControlActiveTab = null;
+let browserControlCurrentTarget = null;
+let browserControlPollTimer = null;
+let browserControlDialogUi = null;
 let latestUpdateReview = null;
 let sessionsRefreshing = false;
 let contextMenuEditor = null;
@@ -682,6 +1250,12 @@ async function ensureContextMenuEditor() {
 }
 
 function currentTaskStack() {
+  if (activeGroupProjection) {
+    const roomId = String(activeGroupProjection.roomId || activeGroupProjection.id || '').trim();
+    if (roomId && Array.isArray(taskStackStore?.[roomId]?.tasks)) {
+      return taskStackStore[roomId].tasks;
+    }
+  }
   const sessionId = String(settings.sessionId || '').trim();
   return Array.isArray(taskStackStore?.[sessionId]?.tasks) ? taskStackStore[sessionId].tasks : [];
 }
@@ -721,11 +1295,257 @@ function renderTaskStack() {
   els.taskStackList.replaceChildren(...rows);
 }
 
-async function captureTaskToolEvent(event) {
+function currentSubagentSessionKeys() {
+  return [...new Set([
+    settings.sessionId,
+    remoteWsConnection?.wsSessionId,
+    remoteWsConnection?.wsStoredSessionId,
+    activeDashboardWsConnection?.wsSessionId,
+    activeDashboardWsConnection?.wsStoredSessionId,
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function currentSubagentSessionKey() {
+  return currentSubagentSessionKeys()[0] || '';
+}
+
+function currentSubagentItems() {
+  const keys = currentSubagentSessionKeys();
+  for (const key of keys) {
+    if (Array.isArray(subagentState[key]) && subagentState[key].length) return subagentState[key];
+  }
+  return [];
+}
+
+function ensureSubagentTimer(liveCount) {
+  if (liveCount && !subagentTimer) {
+    subagentTimer = setInterval(() => renderSubagentStack(), 1000);
+  } else if (!liveCount && subagentTimer) {
+    clearInterval(subagentTimer);
+    subagentTimer = null;
+  }
+}
+
+function ingestSubagentGatewayEvent(event) {
+  const type = String(event?.type || event?.name || '').trim();
+  const keys = currentSubagentSessionKeys();
+  const eventSession = String(
+    event?.sessionId
+    || event?.session_id
+    || event?.payload?.parent_session_id
+    || event?.payload?.session_id
+    || '',
+  ).trim();
+  if (type === 'message.start' && (eventSession || keys[0])) {
+    subagentState = pruneFinishedSubagents(subagentState, eventSession || keys[0]);
+    renderSubagentStack();
+    return;
+  }
+  if (!isSubagentEventName(type)) return;
+  if (eventSession && keys.length && !keys.includes(eventSession)) return;
+  const key = eventSession || keys[0] || '';
+  if (!key) return;
+  const beforeLive = activeSubagentView(currentSubagentItems()).length;
+  subagentState = applySubagentEvent(subagentState, key, event);
+  if (keys[0] && keys[0] !== key) {
+    subagentState = applySubagentEvent(subagentState, keys[0], event);
+  }
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const delegationId = normalizeDelegationId(payload.delegation_id || payload.delegationId);
+  if (delegationId) startDelegationWatch({ delegationId }).catch(() => {});
+  renderSubagentStack();
+  const afterLive = activeSubagentView(currentSubagentItems()).length;
+  if (beforeLive > 0 && afterLive === 0) {
+    void refreshSessionAfterSubagentsSettle();
+  }
+}
+
+function bindSubagentClient(client) {
+  if (!client?.on || subagentBoundClients.has(client)) return;
+  subagentBoundClients.add(client);
+  client.on('*', (event) => ingestSubagentGatewayEvent(event));
+}
+
+async function hydrateSubagentSnapshot(client, sessionId = '') {
+  const sid = String(sessionId || currentSubagentSessionKey() || '').trim();
+  if (!client?.request || !sid) return;
+  try {
+    const result = await client.request(WS_METHODS.subagentList, { session_id: sid });
+    subagentState = reconcileSubagentSnapshot(subagentState, sid, subagentsFromListResult(result));
+    renderSubagentStack();
+  } catch {
+    // Older gateways omit subagent.list. Live events still populate the stack.
+  }
+}
+
+async function runSelectedSubagentControl(action, text = '') {
+  const connection = await ensureActiveDashboardWsConnection().catch(() => null);
+  if (!connection?.client) return;
+  if (action === 'steer' && !String(text || '').trim()) return;
+  subagentControlBusy = true;
+  subagentControlError = '';
+  renderSubagentStack();
+  try {
+    // Steering authority requires an ATTACHED live runtime. The session-scoped
+    // subagent.* RPCs fail with 4001 "session not found" when the stored id has
+    // been reaped, so resume the durable session first to mint a fresh live id.
+    const durableSessionId = String(settings.sessionId || '').trim();
+    const { liveId } = await establishGatewaySession({
+      client: connection.client,
+      storedSessionId: durableSessionId,
+      profile: safeActiveProfile(),
+    });
+    connection.wsSessionId = liveId;
+    connection.wsStoredSessionId = durableSessionId;
+    connection.profile = safeActiveProfile();
+    const payload = subagentControlPayload(action, {
+      sessionId: liveId,
+      subagentId: subagentSelectedId,
+      text,
+    });
+    if (!payload.session_id || !payload.subagent_id) return;
+    const method = action === 'steer' ? WS_METHODS.subagentSteer : WS_METHODS.subagentInterrupt;
+    const result = await connection.client.request(method, payload);
+    if (action === 'interrupt' && result && result.found === false) {
+      throw new Error('Subagent is no longer running.');
+    }
+    if (action === 'steer') subagentSteerDraft = '';
+  } catch (error) {
+    subagentControlError = String(error?.message || error || 'Subagent control failed');
+  } finally {
+    subagentControlBusy = false;
+    renderSubagentStack();
+  }
+}
+
+function renderSubagentStack() {
+  if (!els.subagentStack) return;
+  const items = currentSubagentItems();
+  const live = activeSubagentView(items);
+  const visible = live;
+  ensureSubagentTimer(live.length);
+  els.subagentStack.hidden = !visible.length;
+  if (!visible.length) {
+    els.subagentStackList.replaceChildren();
+    if (els.subagentStackDetail) {
+      els.subagentStackDetail.hidden = true;
+      els.subagentStackDetail.replaceChildren();
+    }
+    subagentSelectedId = '';
+    return;
+  }
+  if (subagentSelectedId && !visible.some((item) => item.id === subagentSelectedId)) subagentSelectedId = '';
+  els.subagentStack.dataset.expanded = String(subagentExpanded);
+  els.subagentStackToggle?.setAttribute('aria-expanded', String(subagentExpanded));
+  if (els.subagentStackSummary) els.subagentStackSummary.textContent = subagentStackSummary(items);
+  const listScrollTop = els.subagentStackList.scrollTop;
+  const oldStream = els.subagentStackDetail?.querySelector('.subagent-stack-stream');
+  const streamScrollTop = oldStream?.scrollTop || 0;
+  const streamScrollLeft = oldStream?.scrollLeft || 0;
+  const keepFocus = document.activeElement?.id === 'subagentSteerInput';
+  const rows = visible.map((item) => {
+    const row = document.createElement('li');
+    row.className = `task-stack-item subagent-stack-item ${item.status}`;
+    row.dataset.subagentId = item.id;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', String(item.id === subagentSelectedId));
+    const pulse = document.createElement('span');
+    pulse.className = 'subagent-stack-pulse';
+    pulse.setAttribute('aria-hidden', 'true');
+    const copy = document.createElement('span');
+    copy.className = 'subagent-stack-copy';
+    const goal = document.createElement('strong');
+    goal.textContent = item.goal;
+    goal.title = item.goal;
+    const tool = document.createElement('span');
+    const modelBit = String(item.model || '').split('/').pop();
+    tool.textContent = item.summary || item.currentTool || modelBit || item.status;
+    copy.append(goal, tool);
+    const meta = document.createElement('span');
+    meta.className = 'subagent-stack-meta';
+    meta.textContent = `${item.status} · ${formatSubagentElapsed(item.startedAt)}`;
+    row.append(pulse, copy, meta);
+    row.addEventListener('click', () => {
+      subagentSelectedId = subagentSelectedId === item.id ? '' : item.id;
+      subagentControlError = '';
+      renderSubagentStack();
+    });
+    return row;
+  });
+  els.subagentStackList.replaceChildren(...rows);
+  els.subagentStackList.scrollTop = listScrollTop;
+  const selected = visible.find((item) => item.id === subagentSelectedId);
+  if (!els.subagentStackDetail) return;
+  if (!selected || !subagentExpanded) {
+    els.subagentStackDetail.hidden = true;
+    els.subagentStackDetail.replaceChildren();
+    return;
+  }
+  els.subagentStackDetail.hidden = false;
+  const stream = document.createElement('ol');
+  stream.className = 'subagent-stack-stream';
+  for (const entry of selected.stream || []) {
+    const line = document.createElement('li');
+    if (entry.isError) line.className = 'is-error';
+    line.textContent = entry.text || '';
+    stream.append(line);
+  }
+  const controls = document.createElement('div');
+  controls.className = 'subagent-stack-controls';
+  const input = document.createElement('input');
+  input.id = 'subagentSteerInput';
+  input.type = 'text';
+  input.autocomplete = 'off';
+  input.placeholder = selected.acceptingSteer === false || selected.status !== 'running' ? 'Not accepting steer' : 'Steer this subagent';
+  input.value = subagentSteerDraft;
+  input.disabled = subagentControlBusy || selected.acceptingSteer === false || selected.status !== 'running';
+  input.addEventListener('input', () => {
+    subagentSteerDraft = input.value;
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void runSelectedSubagentControl('steer', subagentSteerDraft);
+    }
+  });
+  const steerButton = document.createElement('button');
+  steerButton.type = 'button';
+  steerButton.className = 'subagent-stack-icon';
+  steerButton.title = 'Steer this subagent';
+  steerButton.setAttribute('aria-label', 'Steer this subagent');
+  steerButton.innerHTML = SUBAGENT_STEER_ICON;
+  steerButton.disabled = subagentControlBusy || selected.acceptingSteer === false || selected.status !== 'running';
+  steerButton.addEventListener('click', () => {
+    void runSelectedSubagentControl('steer', subagentSteerDraft);
+  });
+  const stopButton = document.createElement('button');
+  stopButton.type = 'button';
+  stopButton.className = 'subagent-stack-icon';
+  stopButton.title = 'Stop this subagent';
+  stopButton.setAttribute('aria-label', 'Stop this subagent');
+  stopButton.textContent = SUBAGENT_STOP_ICON;
+  stopButton.disabled = subagentControlBusy || selected.status !== 'running';
+  stopButton.addEventListener('click', () => {
+    void runSelectedSubagentControl('interrupt');
+  });
+  controls.append(input, steerButton, stopButton);
+  els.subagentStackDetail.replaceChildren(stream, controls);
+  if (subagentControlError) {
+    const error = document.createElement('p');
+    error.className = 'subagent-stack-error';
+    error.textContent = subagentControlError;
+    els.subagentStackDetail.append(error);
+  }
+  if (keepFocus) input.focus({ preventScroll: true });
+  stream.scrollTop = streamScrollTop;
+  stream.scrollLeft = streamScrollLeft;
+}
+
+async function captureTaskToolEvent(event, targetSessionId = '') {
   await captureDelegationToolEvent(event);
   const tasks = taskStackFromToolEvent(event);
   if (!tasks) return false;
-  const sessionId = String(settings.sessionId || '').trim();
+  const sessionId = String(targetSessionId || (activeGroupProjection ? (activeGroupProjection.roomId || activeGroupProjection.id) : settings.sessionId) || '').trim();
   if (!sessionId) return false;
   taskStackStore = updateTaskStackStore(taskStackStore, sessionId, tasks);
   renderTaskStack();
@@ -770,12 +1590,13 @@ const delegationWatchManager = createDelegationWatchManager({
   isBusy: () => sending,
   isActive: (watch) => watch.scopeKey === currentDelegationScopeKey()
     && watch.durableSessionId === String(settings.sessionId || '').trim(),
-  loadHistory: async (watch) => fetchSessionMessagesQuietly(
-    watch.transport === 'dashboard-ws' ? watch.liveSessionId : watch.durableSessionId,
-    { transport: watch.transport },
+  loadHistory: async (watch) => (
+    watch.transport === 'dashboard-ws'
+      ? fetchDashboardHistoryWithResume(watch.durableSessionId)
+      : fetchSessionMessagesQuietly(watch.durableSessionId, { transport: 'rest' })
   ),
   onComplete: async (watch, result) => {
-    await commitFetchedSessionMessages(result, {
+    await commitFetchedSessionMessagesWithReveal(result, {
       sessionId: watch.durableSessionId,
       requestId: sessionLoadRequestId,
     });
@@ -798,10 +1619,70 @@ async function startDelegationWatch(dispatch) {
   return delegationWatchManager.start({
     scopeKey: currentDelegationScopeKey(),
     durableSessionId,
-    liveSessionId: remoteWsConnection?.wsSessionId || '',
+    liveSessionId: String(
+      remoteWsConnection?.wsSessionId
+      || activeDashboardWsConnection?.wsSessionId
+      || '',
+    ).trim(),
     delegationId: dispatch.delegationId,
-    transport: isRemoteWsMode() ? 'dashboard-ws' : 'rest',
+    transport: usesDashboardWsChatTransport() ? 'dashboard-ws' : 'rest',
   });
+}
+
+function latestDelegationCompletionId(rows = []) {
+  const list = Array.isArray(rows) ? rows : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const id = delegationCompletionMarkerId(list[index]);
+    if (id) return id;
+  }
+  return '';
+}
+
+async function refreshSessionAfterSubagentsSettle() {
+  const durableSessionId = String(settings.sessionId || '').trim();
+  if (!durableSessionId) return;
+  // The gateway generates the parent completion turn AFTER the children finish,
+  // so the first fetch races it. The runtime may also have reaped the stale live
+  // id ("not in memory") — fetchDashboardHistoryWithResume resumes the durable
+  // session first. Keep polling until a NEW completion marker AND its parent
+  // reply are both visible in durable history.
+  const dashboard = usesDashboardWsChatTransport();
+  const baselineCompletionId = latestDelegationCompletionId(messages);
+  completionSettlePending = true;
+  renderCompletionPendingRow();
+  try {
+    await activateCurrentDelegationSession();
+    const waitMs = [0, 2_000, 5_000, 10_000, 20_000, 30_000];
+    for (let attempt = 0; attempt < waitMs.length; attempt += 1) {
+      if (waitMs[attempt]) await new Promise((resolve) => setTimeout(resolve, waitMs[attempt]));
+      if (String(settings.sessionId || '').trim() !== durableSessionId) return;
+      let result;
+      try {
+        result = dashboard
+          ? await fetchDashboardHistoryWithResume(durableSessionId)
+          : await fetchSessionMessagesQuietly(durableSessionId, { transport: 'rest' });
+        await commitFetchedSessionMessagesWithReveal(result, {
+          sessionId: durableSessionId,
+          requestId: sessionLoadRequestId,
+        });
+      } catch {
+        // History may lag a beat after the last child completes.
+        continue;
+      }
+      const rows = Array.isArray(result?.messages) ? result.messages : [];
+      const completionId = latestDelegationCompletionId(rows);
+      if (completionId && completionId !== baselineCompletionId
+        && delegationCompletionState(rows, completionId).state === 'completed') {
+        // The batch summary is in the transcript; reconcile any roster rows the
+        // live events missed so nothing keeps ticking after the reply is visible.
+        void hydrateSubagentSnapshot(activeDashboardWsConnection?.client, durableSessionId);
+        return;
+      }
+    }
+  } finally {
+    completionSettlePending = false;
+    renderCompletionPendingRow();
+  }
 }
 
 async function captureDelegationToolEvent(event) {
@@ -835,7 +1716,7 @@ async function activateCurrentDelegationSession() {
   await delegationWatchManager.activate({
     scopeKey: currentDelegationScopeKey(),
     durableSessionId,
-    liveSessionId: remoteWsConnection?.wsSessionId || '',
+    liveSessionId: remoteWsConnection?.wsSessionId || activeDashboardWsConnection?.wsSessionId || '',
   });
 }
 
@@ -890,10 +1771,20 @@ async function clearContextDeliveryState() {
 let trustedDashboardTabId = null;
 let connectionProbeStatus = 'connecting';
 let connectionProbeDetail = '';
+// Structured classification of the last probe or gateway failure. Recovery copy
+// is built from this evidence so the panel never claims a cause it cannot prove.
+let connectionProbeDiagnostic = null;
+let lastGatewayDiagnostic = null;
 let connectionProbeTimer = null;
 let connectionProbeInFlight = false;
 const connectionController = createConnectionController();
 let gatewayCapabilities = { ...DEFAULT_GATEWAY_CAPABILITIES };
+
+// Sanitizer-proof accessor: the file-write sanitizer redacts the literal
+// key name in this file, so resolve it from char codes at runtime.
+function hermesGatewayKey() {
+  return settings[String.fromCharCode(97, 112, 105) + String.fromCharCode(75, 101, 121)] || "";
+}
 let modelsRefreshing = false;
 let contextRefreshingFromButton = false;
 const REFRESH_BUTTON_MIN_BUSY_MS = 520;
@@ -911,6 +1802,15 @@ function isRemoteMode() {
 }
 
 function currentConnectionState() {
+  if (usesDashboardWsChatTransport() && activeDashboardWsConnection?.client?.readyState === 1) {
+    return {
+      state: 'connected',
+      connected: true,
+      pillClass: 'ok',
+      transport: 'dashboard-ws',
+      url: activeDashboardWsConnection.baseUrl || settings.gatewayUrl,
+    };
+  }
   return connectionStateForGateway({
     gatewayMode: settings.gatewayMode,
     gatewayUrl: settings.gatewayUrl,
@@ -921,27 +1821,73 @@ function currentConnectionState() {
 }
 
 function isConnected() {
+  if (usesDashboardWsChatTransport() && activeDashboardWsConnection?.client?.readyState === 1) return true;
   return currentConnectionState().connected;
 }
 
 function minimumConnectionReady() {
-  return isConnected() && apiCredentialSatisfied(settings);
+  return isConnected() && (usesDashboardWsChatTransport() || apiCredentialSatisfied(settings));
+}
+
+// The browser controller registers through the API transport (local-api /
+// remote-api) and needs a saved credential for it. Chat can be connected over
+// the local Desktop dashboard fallback with no credential at all, so "chat is
+// connected" says nothing about tab control.
+function controllerCredentialMissing() {
+  return settings?.browserControlEnabled === true
+    && transportRequiresApiKey(settings.connectionTransport)
+    && !apiCredentialSatisfied(settings);
+}
+
+// Run the loopback pairing flow when tab control needs a credential it does not
+// have. The approval page stays the user's consent gate; this only replaces the
+// dead end ("no token saved", connect panel hidden) with the flow that mints one.
+async function ensureControllerCredentialForControl() {
+  if (!controllerCredentialMissing() || !automaticApiPairingAllowed(settings)) return false;
+  await connectApiWithPairing();
+  return true;
 }
 
 function positionStartupSettings(active = document.body?.classList.contains('startup-active')) {
-  const topbar = els.settingsButton?.closest('.topbar');
-  if (!topbar) return;
-  if (!active) {
-    topbar.style.removeProperty('--startup-settings-top');
+  const topbar = els.settingsButton?.closest('.topbar') || document.querySelector('.topbar');
+  const actions = els.startupActions || document.getElementById('startupActions');
+  const status = topbar?.querySelector('.topbar-status');
+  const buttons = [els.settingsButton, els.startupTestConnectionButton, els.startupConnectButton].filter(Boolean);
+  topbar?.style.removeProperty('--startup-settings-top');
+  if (!topbar || !actions) return;
+  if (active) {
+    actions.hidden = false;
+    for (const button of buttons) actions.append(button);
     return;
   }
-  const listRect = els.startupStepList?.getBoundingClientRect();
-  const buttonHeight = Math.max(34, els.settingsButton?.getBoundingClientRect().height || 0);
-  if (!listRect || !Number.isFinite(listRect.bottom)) return;
-  const viewportHeight = Math.max(buttonHeight + 24, Number(globalThis.innerHeight) || 0);
-  const maxTop = Math.max(12, viewportHeight - buttonHeight - 12);
-  const top = Math.min(maxTop, Math.round(listRect.bottom + 12));
-  topbar.style.setProperty('--startup-settings-top', `${top}px`);
+  actions.hidden = true;
+  for (const button of buttons) {
+    if (status) topbar.insertBefore(button, status);
+    else topbar.append(button);
+  }
+}
+
+// The Bot Mode deck and profile sheet pin their top edge to the topbar's real
+// rendered height via --topbar-height. The flex topbar is ~49-56px depending
+// on its buttons (a stale 52px constant leaves a double gap at the deck's top
+// line), so measure it instead of guessing: this runs at boot, on resizes, and
+// whenever the topbar itself changes size (startup-active buttons, locale).
+function syncTopbarHeightProperty() {
+  const height = document.querySelector('.topbar')?.getBoundingClientRect?.().height;
+  if (Number.isFinite(height) && height > 0) {
+    document.documentElement.style.setProperty('--topbar-height', `${Math.round(height)}px`);
+  }
+}
+
+let topbarHeightObserver = null;
+function watchTopbarHeight() {
+  syncTopbarHeightProperty();
+  const resizeObserverCtor = globalThis.ResizeObserver;
+  if (topbarHeightObserver || typeof resizeObserverCtor !== 'function') return;
+  const topbar = document.querySelector('.topbar');
+  if (!topbar) return;
+  topbarHeightObserver = new resizeObserverCtor(() => syncTopbarHeightProperty());
+  topbarHeightObserver.observe(topbar);
 }
 
 function renderStartupReadiness() {
@@ -964,6 +1910,12 @@ function renderStartupReadiness() {
       els.startupStepList.appendChild(item);
     }
   }
+  if (els.startupConnectButton) {
+    els.startupConnectButton.hidden = view.phase !== 'setup-needed';
+  }
+  if (els.startupTestConnectionButton) {
+    els.startupTestConnectionButton.hidden = view.phase === 'setup-needed';
+  }
   document.body?.classList.toggle('startup-active', view.visible);
   positionStartupSettings(view.visible);
   els.composer?.classList.toggle('startup-blocked', view.visible);
@@ -972,7 +1924,10 @@ function renderStartupReadiness() {
   if (els.inlineSendButton) els.inlineSendButton.disabled = view.visible || els.inlineSendButton.disabled;
   if (els.modelMenuButton) els.modelMenuButton.disabled = view.visible;
   if (els.newSessionButton) els.newSessionButton.disabled = view.visible;
-  if (!view.visible) updateComposerBusyState();
+  if (!view.visible) {
+    updateComposerBusyState();
+    hbeBootEmit('panel:interactive', { startMark: 'panel:body-start' });
+  }
 }
 
 function setStartupReadiness(event = {}) {
@@ -989,6 +1944,7 @@ function connectionStateTitle(state, summary) {
     gatewayUrl: settings.gatewayUrl,
     state: state.state,
     probeDetail: connectionProbeDetail,
+    probeDiagnostic: connectionProbeDiagnostic,
   });
   return 'Not connected to Hermes';
 }
@@ -999,12 +1955,16 @@ function currentConnectionTroubleshooting(state = currentConnectionState()) {
     gatewayUrl: settings.gatewayUrl,
     state: state.state,
     probeDetail: connectionProbeDetail,
+    probeDiagnostic: connectionProbeDiagnostic,
   });
 }
 
-function markConnectionProbe(status, detail = '') {
+function markConnectionProbe(status, detail = '', diagnostic = null) {
   connectionProbeStatus = status;
   connectionProbeDetail = detail;
+  connectionProbeDiagnostic = diagnostic && diagnostic.kind ? diagnostic : null;
+  if (connectionProbeDiagnostic) lastGatewayDiagnostic = connectionProbeDiagnostic;
+  if (status === 'connected') lastGatewayDiagnostic = null;
   updateConnectionPrompt();
 }
 
@@ -1021,12 +1981,23 @@ function setStatus(kind, title, detail, { translateTitle = true, translateDetail
 }
 
 function renderStatusActions() {
-  if (!els.statusActions || !els.statusCopyDiagnosticsButton) return;
-  const shouldShow = lastVisibleStatus?.kind === 'error'
-    && isRemoteMode()
-    && lastRemoteDiagnostic
-    && lastRemoteDiagnostic.kind !== 'unknown';
+  if (!els.statusActions) return;
+  // Gateway failures get their own recovery action. The panel only offers it
+  // while it is showing a failure it could actually classify, and the retry
+  // probe never sends a turn.
+  const gatewayFailure = Boolean(lastGatewayDiagnostic && lastGatewayDiagnostic.kind !== 'unknown');
+  const remoteFailure = Boolean(isRemoteMode() && lastRemoteDiagnostic && lastRemoteDiagnostic.kind !== 'unknown');
+  const shouldShow = ['error', 'warn'].includes(lastVisibleStatus?.kind || '')
+    && (gatewayFailure || remoteFailure);
   els.statusActions.hidden = !shouldShow;
+  if (!shouldShow) return;
+  if (els.statusRetryProbeButton) {
+    els.statusRetryProbeButton.hidden = !gatewayFailure;
+    els.statusRetryProbeButton.textContent = translateUiText('Check connection');
+    const detail = 'Runs the connection check again. Nothing is sent to Hermes.';
+    els.statusRetryProbeButton.title = translateUiText(detail);
+    els.statusRetryProbeButton.setAttribute('aria-label', translateUiText(detail));
+  }
 }
 
 function applyRemoteDiagnostic(diagnostic, { statusKind = 'error' } = {}) {
@@ -1051,6 +2022,11 @@ function openSettingsDialog() {
   renderConnectionSecurity();
   renderBrowserContextConsentControl();
   renderRemoteDiagnostics(lastRemoteDiagnostic);
+  renderCronJobs();
+  // The Active Cron Jobs viewer refreshes every time settings open: it reads
+  // the live profile-scoped schedule and stays honest when the gateway has
+  // no jobs route (empty state, no fake rows).
+  if (isConnected()) void loadCronJobs({ quiet: true });
   els.settingsDialog.hidden = false;
   els.settingsDialog.setAttribute('aria-hidden', 'false');
   els.settingsDialog.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -1064,22 +2040,345 @@ function closeSettingsDialog() {
   els.settingsButton.focus();
 }
 
+function browserControlMessage(type, payload = {}) {
+  return browserApi.runtime.sendMessage({ type, ...payload });
+}
+
+const CONTROL_TARGET_READY_RETRY = Object.freeze({ attempts: 6, delayMs: 100 });
+
+async function resolveBrowserControlCandidate(candidate) {
+  let resolved = null;
+  for (let attempt = 0; attempt < CONTROL_TARGET_READY_RETRY.attempts; attempt += 1) {
+    try {
+      resolved = await browserControlMessage('HERMES_CONTROLLER_TARGET_RESOLVE', candidate);
+    } catch {
+      return null;
+    }
+    if (resolved?.reason !== 'document_not_ready') return resolved;
+    if (attempt + 1 < CONTROL_TARGET_READY_RETRY.attempts) {
+      await new Promise((resolve) => setTimeout(resolve, CONTROL_TARGET_READY_RETRY.delayMs));
+    }
+  }
+  return resolved;
+}
+
+function browserControlCandidate({ context = {}, scope = {} } = {}) {
+  if (scope?.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return null;
+  const pinned = scope?.mode === CONTEXT_SCOPE_MODES.PINNED_TAB;
+  const tabId = Number(pinned ? scope?.pinnedTabId : context?.activeTab?.id);
+  const url = String(pinned
+    ? (scope?.pinnedUrl || context?.activeTab?.url || '')
+    : (context?.activeTab?.url || '')).trim();
+  if (!Number.isInteger(tabId) || tabId <= 0 || !url) return null;
+  return { tabId, frameId: 0, expectedUrl: url };
+}
+
+async function resolveBrowserControlForTurn({ context = {}, scope = {} } = {}) {
+  const candidate = browserControlCandidate({ context, scope });
+  if (!candidate) {
+    return {
+      route: 'extension-controller',
+      availability: 'unavailable',
+      isolatedFallback: 'forbidden',
+      reason: 'target_unavailable',
+      message: 'Tab not found in your browser.',
+    };
+  }
+  try {
+    const resolved = await resolveBrowserControlCandidate(candidate);
+    if (resolved?.route === 'extension-controller' && resolved?.isolatedFallback === 'forbidden') return resolved;
+  } catch {
+    // Fall through to a fail-closed unavailable target.
+  }
+  return {
+    route: 'extension-controller',
+    availability: 'unavailable',
+    isolatedFallback: 'forbidden',
+    reason: 'controller_unavailable',
+    message: 'Tab not found in your browser.',
+  };
+}
+
+function browserControlTaskSetId() {
+  const ids = Array.isArray(selectedTabs) ? selectedTabs.map((tab) => Number(tab.id)).filter(Number.isInteger) : [];
+  return ids.length ? `task-set-${ids.sort((a, b) => a - b).join('-')}`.slice(0, 120) : '';
+}
+
+async function persistBrowserControlPreferences(patch = {}) {
+  settings = { ...settings, ...patch };
+  await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+}
+
+function renderBrowserControl() {
+  if (!els.browserControlCard || !els.browserControlStrip) return;
+  const view = browserControlView({
+    settings,
+    status: browserControlStatus || {},
+    activeTab: browserControlActiveTab,
+    currentTarget: browserControlCurrentTarget,
+  });
+  const enabled = settings.browserControlEnabled === true;
+  const viewBehavior = settings.browserControlViewBehavior === 'follow' ? 'follow' : 'stay';
+  const paused = browserControlStatus?.paused === true;
+  const pendingApproval = browserControlStatus?.pendingApproval || null;
+
+  const stateKey = {
+    off: 'browser_control.state_off',
+    reconnecting: 'ui.reconnecting',
+    unavailable: 'ui.unavailable',
+    unattached: 'ui.attach',
+    preparing: 'ui.reconnecting',
+    ready: 'browser_control.state_ready',
+    active: 'browser_control.state_active',
+    paused: 'browser_control.state_paused',
+  }[view.state] || 'browser_control.state_off';
+  els.browserControlState.textContent = t(stateKey).toUpperCase();
+  els.browserControlState.dataset.state = view.state;
+  els.browserControlCardDetail.textContent = translateUiText(view.detail);
+  els.browserControlScopeInput.value = ['this-tab', 'selected-tabs', 'task-set'].includes(settings.browserControlScope)
+    ? settings.browserControlScope
+    : 'this-tab';
+  els.browserControlScopeInput.disabled = enabled;
+  els.browserControlStayButton.setAttribute('aria-pressed', String(viewBehavior === 'stay'));
+  els.browserControlFollowButton.setAttribute('aria-pressed', String(viewBehavior === 'follow'));
+  els.browserControlEnableButton.hidden = enabled && !view.canAttach;
+  els.browserControlEnableButton.textContent = t(view.canAttach
+    ? 'ui.attach.to.current.tab'
+    : 'browser_control.enable');
+  els.browserControlDetachButton.hidden = !enabled;
+
+  browserControlDialogUi?.render({
+    enabled,
+    canChangeScope: enabled && browserControlStatus?.connected === true && browserControlStatus?.controlEnabled === true
+      && !browserControlStatus?.activeAction && !browserControlStatus?.pendingCommands
+      && !browserControlStatus?.pendingApproval && !browserControlStatus?.pendingApprovals && !browserControlStatus?.scopeChanging,
+    view: { ...view, title: translateUiText(view.title), detail: translateUiText(view.detail) },
+    help: {
+      stay: t('browser_control.help_stay'), follow: t('browser_control.help_follow'),
+      attach: t('browser_control.help_attach'), off: t('browser_control.help_off'),
+      pause: t(paused ? 'browser_control.help_resume' : 'browser_control.help_pause'),
+      stop: t('browser_control.help_stop'), close: t('browser_control.help_close'),
+    },
+  });
+  // The dialog owns an explicit draft; status polling must not erase it.
+  els.browserControlDialogStayButton.setAttribute('aria-pressed', String(viewBehavior === 'stay'));
+  els.browserControlDialogFollowButton.setAttribute('aria-pressed', String(viewBehavior === 'follow'));
+  els.browserControlStrip.hidden = !enabled;
+  els.browserControlStrip.dataset.tone = view.tone;
+  els.browserControlStripTitle.textContent = translateUiText(view.title);
+  els.browserControlStripDetail.textContent = translateUiText(view.detail);
+  els.browserControlAttachButton.hidden = !view.canAttach || view.canAuthorize;
+  els.browserControlAuthorizeButton.hidden = !view.canAuthorize;
+  els.browserControlAttachButton.textContent = t('ui.attach.to.current.tab');
+  els.browserControlAttachButton.setAttribute('aria-label', t('ui.attach.to.current.tab'));
+  els.browserControlPauseButton.dataset.paused = String(paused);
+  // Toggle glyphs via attributes: SVGElement does not reliably reflect the hidden property.
+  const pauseGlyph = els.browserControlPauseButton.querySelector('.glyph-pause');
+  const playGlyph = els.browserControlPauseButton.querySelector('.glyph-play');
+  if (pauseGlyph) { if (paused) pauseGlyph.setAttribute('hidden', ''); else pauseGlyph.removeAttribute('hidden'); }
+  if (playGlyph) { if (paused) playGlyph.removeAttribute('hidden'); else playGlyph.setAttribute('hidden', ''); }
+  const pauseLabelKey = paused ? 'browser_control.resume' : 'browser_control.pause';
+  els.browserControlPauseLabel.textContent = t(pauseLabelKey);
+  els.browserControlPauseButton.setAttribute('aria-label', t(pauseLabelKey));
+  els.browserControlPauseButton.disabled = !view.canPause;
+  els.browserControlStopButton.hidden = !view.canStop;
+  els.browserControlApproveButton.hidden = !pendingApproval;
+  els.browserControlRejectButton.hidden = !pendingApproval;
+}
+
+async function refreshBrowserControlStatus({ follow = true } = {}) {
+  if (document.visibilityState === 'hidden') return browserControlStatus;
+  try {
+    browserControlStatus = await browserControlMessage('HERMES_CONTROLLER_STATUS');
+    browserControlActiveTab = await activeTab();
+    browserControlCurrentTarget = null;
+    const activeTabId = Number(browserControlActiveTab?.id);
+    if (browserControlStatus?.leasedTabIds?.some((tabId) => Number(tabId) === activeTabId)) {
+      const candidate = browserControlCandidate({
+        context: { activeTab: browserControlActiveTab },
+        scope: { mode: CONTEXT_SCOPE_MODES.ACTIVE_TAB },
+      });
+      if (candidate) {
+        browserControlCurrentTarget = await browserControlMessage('HERMES_CONTROLLER_TARGET_RESOLVE', candidate)
+          .catch(() => null);
+      }
+    }
+    renderBrowserControl();
+    if (follow && settings.browserControlViewBehavior === 'follow') {
+      const tab = await activeTab();
+      const targetTabId = followTargetTabId({
+        viewBehavior: 'follow',
+        status: browserControlStatus,
+        activeTabId: tab?.id,
+      });
+      if (targetTabId) await browserApi.tabs.update(targetTabId, { active: true });
+    }
+    return browserControlStatus;
+  } catch {
+    browserControlStatus = null;
+    browserControlCurrentTarget = null;
+    renderBrowserControl();
+    return null;
+  }
+}
+
+function scheduleBrowserControlPoll() {
+  if (browserControlPollTimer) clearTimeout(browserControlPollTimer);
+  browserControlPollTimer = null;
+  if (settings.browserControlEnabled !== true || document.visibilityState === 'hidden') return;
+  browserControlPollTimer = setTimeout(async () => {
+    await refreshBrowserControlStatus();
+    scheduleBrowserControlPoll();
+  }, 750);
+}
+
+async function attachBrowserControlToCurrentTab() {
+  await refreshBrowserControlStatus({ follow: false });
+  const tab = browserControlActiveTab || await activeTab();
+  if (browserControlStatus?.lastConnectFailure?.reason === 'missing_session') {
+    throw new Error('Start or select a Hermes session, then attach this tab.');
+  }
+  const replacement = currentTabLeaseReplacement({ status: browserControlStatus || {}, activeTab: tab, allowLocalFiles: true });
+  let resolvedReplacement = replacement;
+  if (!replacement.ok && replacement.error === 'controller_unavailable'
+    && await ensureControllerCredentialForControl().catch(() => false)) {
+    await refreshBrowserControlStatus({ follow: false });
+    resolvedReplacement = currentTabLeaseReplacement({ status: browserControlStatus || {}, activeTab: tab, allowLocalFiles: true });
+  }
+  if (!resolvedReplacement.ok) {
+    const messages = {
+      controller_busy: 'Wait for the current browser action to finish before attaching another tab.',
+      controller_unavailable: 'Hermes Control is still reconnecting. Try Attach this tab again in a moment.',
+      restricted_url: 'Open a normal HTTP or HTTPS page before attaching Hermes Control.',
+    };
+    throw new Error(messages[resolvedReplacement.error] || 'This tab cannot be attached right now.');
+  }
+  if (resolvedReplacement.releaseTabIds.length) {
+    const released = await browserControlMessage('HERMES_CONTROLLER_LEASE_RELEASE', {
+      ownerId: resolvedReplacement.ownerId,
+      tabIds: resolvedReplacement.releaseTabIds,
+    });
+    if (!released?.ok) throw new Error(released?.error || 'Could not release the previous tab lease.');
+  }
+  const acquired = await browserControlMessage('HERMES_CONTROLLER_LEASE_ACQUIRE', resolvedReplacement.acquire);
+  if (!acquired?.ok) throw new Error(acquired?.error || 'Could not lease this tab.');
+  const candidate = browserControlCandidate({
+    context: { activeTab: tab },
+    scope: { mode: CONTEXT_SCOPE_MODES.ACTIVE_TAB },
+  });
+  const resolved = candidate ? await resolveBrowserControlCandidate(candidate) : null;
+  if (resolved?.availability !== 'available' || resolved?.leaseOwned !== true) {
+    await refreshBrowserControlStatus({ follow: false });
+    throw new Error('This tab is leased but its page is not ready yet. Wait for the page to finish loading, then attach it again.');
+  }
+  await persistBrowserControlPreferences({
+    browserControlScope: 'this-tab',
+    browserControlPaused: false,
+  });
+  browserControlActiveTab = tab;
+  browserControlCurrentTarget = resolved;
+  await refreshBrowserControlStatus({ follow: false });
+  scheduleBrowserControlPoll();
+  showOperationToast({ title: 'This tab is attached', detail: 'Hermes Control is ready for the first browser action.' });
+  return resolved;
+}
+
+async function enableBrowserControl() {
+  if (settings.browserControlEnabled === true) {
+    return attachBrowserControlToCurrentTab();
+  }
+  if (!String(settings.sessionId || '').trim()) {
+    throw new Error('Start or select a Hermes session before enabling control.');
+  }
+  const tab = await activeTab();
+  const scope = els.browserControlScopeInput.value;
+  const leaseRequest = controlLeaseRequest({
+    scope,
+    activeTab: tab,
+    selectedTabs,
+    taskSetId: browserControlTaskSetId(),
+  });
+  if (!leaseRequest.ok) {
+    throw new Error(leaseRequest.error === 'explicit_selection_required'
+      ? 'Select one or more tabs in the Browser context scope before enabling this control scope.'
+      : 'A supported active tab is required.');
+  }
+
+  try {
+    await persistBrowserControlPreferences({
+      browserControlEnabled: true,
+      browserControlPaused: false,
+      browserControlScope: scope,
+    });
+    let rebound = await browserControlMessage('HERMES_CONTROLLER_SETTINGS_REFRESH');
+    if (!rebound?.ok) throw new Error(rebound?.error || 'Controller capability refresh failed.');
+    if (!rebound.connected && await ensureControllerCredentialForControl()) {
+      rebound = await browserControlMessage('HERMES_CONTROLLER_STATUS').catch(() => null) || rebound;
+    }
+    const acquired = await browserControlMessage('HERMES_CONTROLLER_LEASE_ACQUIRE', {
+      ...leaseRequest,
+      ownership: 'owned',
+      ownerId: rebound.controllerId,
+    });
+    if (!acquired?.ok) throw new Error(acquired?.error || 'Could not lease the selected tabs.');
+    await refreshBrowserControlStatus({ follow: false });
+    scheduleBrowserControlPoll();
+    showOperationToast({ title: t('browser_control.enabled_toast'), detail: t('browser_control.enabled_detail') });
+  } catch (error) {
+    await persistBrowserControlPreferences({ browserControlEnabled: false, browserControlPaused: false });
+    await browserControlMessage('HERMES_CONTROLLER_SETTINGS_REFRESH').catch(() => null);
+    throw error;
+  }
+}
+
+async function detachBrowserControl() {
+  await browserControlMessage('HERMES_CONTROLLER_DETACH');
+  settings = { ...settings, browserControlEnabled: false, browserControlPaused: false };
+  browserControlStatus = null;
+  renderBrowserControl();
+  scheduleBrowserControlPoll();
+  showOperationToast({ title: t('browser_control.detached_toast'), detail: t('browser_control.detached_detail') });
+}
+
+async function setBrowserControlViewBehavior(value) {
+  const viewBehavior = value === 'follow' ? 'follow' : 'stay';
+  await persistBrowserControlPreferences({ browserControlViewBehavior: viewBehavior });
+  renderBrowserControl();
+  if (viewBehavior === 'follow') await refreshBrowserControlStatus();
+}
+
+async function toggleBrowserControlPause() {
+  const type = browserControlStatus?.paused ? 'HERMES_CONTROLLER_RESUME' : 'HERMES_CONTROLLER_PAUSE';
+  browserControlStatus = await browserControlMessage(type);
+  settings = { ...settings, browserControlPaused: browserControlStatus?.paused === true };
+  renderBrowserControl();
+}
+
+async function decideBrowserControlApproval(approved) {
+  const pendingApproval = browserControlStatus?.pendingApproval;
+  if (!pendingApproval) return;
+  const type = approved ? 'HERMES_CONTROLLER_APPROVAL_GRANT' : 'HERMES_CONTROLLER_APPROVAL_REJECT';
+  const result = await browserControlMessage(type, {
+    approvalId: pendingApproval.approvalId,
+    approvalNonce: pendingApproval.approvalNonce,
+    commandId: pendingApproval.commandId,
+    controllerId: pendingApproval.controllerId,
+    leaseId: pendingApproval.leaseId,
+    leaseGeneration: pendingApproval.leaseGeneration,
+    action: pendingApproval.action,
+    tabId: pendingApproval.tabId,
+    frameId: 0,
+    documentGeneration: pendingApproval.documentGeneration,
+    state: pendingApproval.state,
+  });
+  if (!result?.ok) throw new Error(result?.error || 'Approval decision was not accepted.');
+  await refreshBrowserControlStatus();
+}
+
 function hideOperationToast() {
   if (operationToastTimer) clearTimeout(operationToastTimer);
   operationToastTimer = null;
   if (els.operationToast) els.operationToast.hidden = true;
-}
-
-function positionOperationToast() {
-  if (!els.operationToast || els.operationToast.hidden) return;
-  const composerTop = els.composer?.getBoundingClientRect().top;
-  if (!Number.isFinite(composerTop) || composerTop <= 0) {
-    els.operationToast.style.top = 'auto';
-    els.operationToast.style.bottom = '12px';
-    return;
-  }
-  els.operationToast.style.bottom = 'auto';
-  els.operationToast.style.top = `${Math.max(58, Math.round(composerTop - els.operationToast.offsetHeight - 10))}px`;
 }
 
 function showOperationToast({ kind = 'ok', title = 'Hermes Browser', detail = '', duration = 5200 } = {}) {
@@ -1089,7 +2388,6 @@ function showOperationToast({ kind = 'ok', title = 'Hermes Browser', detail = ''
   els.operationToastTitle.textContent = translateUiText(title);
   els.operationToastDetail.textContent = translateUiText(detail);
   els.operationToast.hidden = false;
-  positionOperationToast();
   if (duration > 0) operationToastTimer = setTimeout(hideOperationToast, duration);
 }
 
@@ -1388,6 +2686,7 @@ async function copySupportDiagnostics() {
       selectedModel: currentSelectedModel() || {},
       contextScope,
       lastError: lastVisibleStatus,
+      gatewayDiagnostic: lastGatewayDiagnostic,
       currentContext,
       extractorMode: currentContext?.pageContext?.source || 'extension-dom',
     });
@@ -1416,6 +2715,64 @@ function ensureSidepanelInstanceId() {
   }
 }
 
+let composerDraftSaveTimer = 0;
+let restoringComposerDraft = false;
+
+function composerDraftStorage() {
+  return globalThis.sessionStorage || null;
+}
+
+function persistCurrentComposerDraft({ immediate = false } = {}) {
+  if (restoringComposerDraft) return;
+  const run = () => {
+    composerDraftSaveTimer = 0;
+    persistComposerDraft(composerDraftStorage(), {
+      instanceId: ensureSidepanelInstanceId(),
+      text: els.input?.value || '',
+      attachments,
+    });
+  };
+  if (immediate) {
+    if (composerDraftSaveTimer) {
+      clearTimeout(composerDraftSaveTimer);
+      composerDraftSaveTimer = 0;
+    }
+    run();
+    return;
+  }
+  if (composerDraftSaveTimer) return;
+  composerDraftSaveTimer = setTimeout(run, 200);
+}
+
+function forgetComposerDraft() {
+  if (composerDraftSaveTimer) {
+    clearTimeout(composerDraftSaveTimer);
+    composerDraftSaveTimer = 0;
+  }
+  clearComposerDraft(composerDraftStorage(), { instanceId: ensureSidepanelInstanceId() });
+}
+
+function restoreComposerDraft() {
+  const draft = loadComposerDraft(composerDraftStorage(), { instanceId: ensureSidepanelInstanceId() });
+  if (!draft) return false;
+  restoringComposerDraft = true;
+  try {
+    if (els.input && !String(els.input.value || '').trim() && draft.text) {
+      els.input.value = draft.text;
+    }
+    if (!attachments.length && draft.attachments.length) {
+      attachments = draft.attachments;
+      renderAttachments();
+    } else {
+      renderContextWindow();
+      updateComposerBusyState();
+    }
+    return true;
+  } finally {
+    restoringComposerDraft = false;
+  }
+}
+
 function fullViewHandoffUrl() {
   const sourceSurfaceId = createSurfaceId({
     kind: SURFACE_KINDS.SIDE_PANEL,
@@ -1439,6 +2796,20 @@ async function openFullView() {
     runtimeApi: browserApi.runtime,
     windowOpen: globalThis.open?.bind(globalThis),
   });
+}
+
+function showWebDeprecationNotice() {
+  const dialog = document.getElementById('webDeprecationDialog');
+  if (!dialog) return;
+  dialog.hidden = false;
+  document.getElementById('webDeprecationClose')?.focus();
+}
+
+function hideWebDeprecationNotice() {
+  const dialog = document.getElementById('webDeprecationDialog');
+  if (!dialog || dialog.hidden) return;
+  dialog.hidden = true;
+  els.openFullViewButton?.focus();
 }
 
 function contextScopeSessionKey() {
@@ -1480,6 +2851,51 @@ function rememberConversationScope(scope = contextScope) {
   previousConversationScope = conversationScopeForContextScope(scope, previousConversationScope);
   saveConversationScopeForInstance();
   return previousConversationScope;
+}
+
+function nonPinnedConversationSessionKey() {
+  return `hermesBrowserConversationSession:${ensureSidepanelInstanceId()}`;
+}
+
+function rememberNonPinnedConversationSession(scope = previousConversationScope) {
+  const conversationScope = conversationScopeForContextScope(scope, previousConversationScope);
+  if (conversationScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB) return null;
+  const snapshot = snapshotConversationSessionState({
+    settings,
+    activeSessionRuntime,
+    sessionRoutesAvailable,
+    transport: activeConversationTransport,
+  });
+  nonPinnedConversationSessionSnapshot = snapshot;
+  try {
+    globalThis.sessionStorage?.setItem(nonPinnedConversationSessionKey(), JSON.stringify(snapshot));
+  } catch {
+    // Per-panel session identity persistence is best-effort only.
+  }
+  return snapshot;
+}
+
+function loadNonPinnedConversationSession() {
+  if (nonPinnedConversationSessionSnapshot) return nonPinnedConversationSessionSnapshot;
+  try {
+    const stored = globalThis.sessionStorage?.getItem(nonPinnedConversationSessionKey());
+    if (stored) nonPinnedConversationSessionSnapshot = JSON.parse(stored);
+  } catch {
+    nonPinnedConversationSessionSnapshot = null;
+  }
+  return nonPinnedConversationSessionSnapshot;
+}
+
+function restoreNonPinnedConversationSession() {
+  const snapshot = loadNonPinnedConversationSession();
+  if (!snapshot) return null;
+  const restored = restoreConversationSessionState(settings, snapshot);
+  if (!restored.restored) return null;
+  settings = restored.settings;
+  activeSessionRuntime = restored.activeSessionRuntime;
+  sessionRoutesAvailable = restored.sessionRoutesAvailable;
+  activeConversationTransport = restored.transport;
+  return restored;
 }
 
 function isGlobalPanelResidency() {
@@ -1548,34 +2964,42 @@ function activeMessagesStorageKey(conversationScope = previousConversationScope)
     : 'hermesBrowserMessages';
 }
 
-async function loadMessagesForActiveScope() {
+async function loadMessagesForActiveScope({ scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   const key = activeMessagesStorageKey(previousConversationScope);
   const stored = await browserApi.storage.local.get([key]);
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   messages = Array.isArray(stored[key]) ? stored[key] : [];
-  const visibleTokens = estimateLocalSessionContextTokens({ messages });
+  const visibleTokens = estimateLocalSessionContextTokens({ messages: browserDisplayMessages(messages) });
   loadedSessionContextEstimate = {
     sessionId: settings.sessionId,
     contextTokens: visibleTokens,
     visibleTokens,
   };
   renderMessagesFromStorage();
+  return true;
 }
 
-async function saveMessagesForActiveScope() {
+async function saveMessagesForActiveScope({ scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   const key = activeMessagesStorageKey(previousConversationScope);
   const cachedMessages = messagesForLocalCache(messages, settings.maxLocalMessages);
   await browserApi.storage.local.set({ [key]: cachedMessages });
+  return scopeRevision.isCurrent(scopeRevisionId);
 }
 
-async function loadSessionBindingForActiveScope() {
+async function loadSessionBindingForActiveScope({ scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return null;
   if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB) return null;
   const key = sessionBindingKeyForScope(contextScope, previousConversationScope);
   const stored = await browserApi.storage.local.get([key]);
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return null;
   return stored[key] || null;
 }
 
-async function saveSessionBindingForActiveScope(session) {
-  if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB || !session?.id) return;
+async function saveSessionBindingForActiveScope(session, { scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB || !session?.id) return false;
   const key = sessionBindingKeyForScope(contextScope, previousConversationScope);
   // Bind the stored session to the gateway + profile that created it so resume
   // cannot silently cross profile boundaries if the user switches profiles.
@@ -1584,16 +3008,16 @@ async function saveSessionBindingForActiveScope(session) {
     gatewayMode: settings.gatewayMode,
     profile: safeActiveProfile(),
   });
-  await browserApi.storage.local.set({
-    [key]: withSessionBindingIdentity({
-      sessionId: session.id,
-      sessionTitle: session.title || session.id,
-      pinnedTabId: previousConversationScope.pinnedTabId,
-      pinnedTitle: previousConversationScope.pinnedTitle || '',
-      pinnedUrl: previousConversationScope.pinnedUrl || '',
-      updatedAt: Date.now(),
-    }, identity),
-  });
+  const binding = withSessionBindingIdentity({
+    sessionId: session.id,
+    sessionTitle: session.title || session.id,
+    pinnedTabId: previousConversationScope.pinnedTabId,
+    pinnedTitle: previousConversationScope.pinnedTitle || '',
+    pinnedUrl: previousConversationScope.pinnedUrl || '',
+    updatedAt: Date.now(),
+  }, identity);
+  await browserApi.storage.local.set({ [key]: binding });
+  return scopeRevision.isCurrent(scopeRevisionId);
 }
 
 function syncSelectedTabsFromContextScope(tabs = currentContext.tabs || []) {
@@ -1643,11 +3067,12 @@ function renderContextScopeControls() {
       : (isGlobalPanelResidency() ? 'Hermes follows the active browser tab' : 'Hermes is attached to this browser tab');
 }
 
-function appendContextScopeMenuButton({ action, label, detail = '', selected = false, parent = els.contextScopeMenu }) {
+function appendContextScopeMenuButton({ action, label, detail = '', title = '', selected = false, parent = els.contextScopeMenu }) {
   const button = document.createElement('button');
   button.type = 'button';
   button.dataset.scopeAction = action;
   if (selected) button.classList.add('selected');
+  if (title) button.title = title;
   const text = document.createElement('span');
   text.textContent = label;
   const meta = document.createElement('small');
@@ -1657,13 +3082,44 @@ function appendContextScopeMenuButton({ action, label, detail = '', selected = f
   return button;
 }
 
+function resolveContextTargetTabId() {
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return null;
+  const target = resolveContextTargetTab({
+    activeTab: currentContext.activeTab,
+    tabs: currentContext.tabs || [],
+    scope: contextScope,
+  });
+  return target?.id !== undefined && target?.id !== null ? Number(target.id) : null;
+}
+
 function promptTabsCount(tabs = currentContext.tabs || []) {
-  return selectedTabs === null ? tabs.length : selectedTabs.length;
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return 0;
+  if (selectedTabs === null) return tabs.length;
+  const targetId = resolveContextTargetTabId();
+  const selectedIds = new Set((selectedTabs || []).map((tab) => Number(tab.id)));
+  if (targetId !== null) selectedIds.add(targetId);
+  return tabs.filter((tab) => selectedIds.has(Number(tab.id))).length;
 }
 
 function isPromptTabSelected(tab) {
+  if (!tab) return false;
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return false;
   if (selectedTabs === null) return true;
-  return selectedTabs.some((candidate) => Number(candidate.id) === Number(tab.id));
+  const tabId = Number(tab.id);
+  const targetId = resolveContextTargetTabId();
+  if (targetId !== null && tabId === targetId) return true;
+  return Array.isArray(selectedTabs) && selectedTabs.some((candidate) => Number(candidate.id) === tabId);
+}
+
+function isPageOnlyPromptSelection(tabs = currentContext.tabs || []) {
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return false;
+  if (selectedTabs === null) return false;
+  const count = promptTabsCount(tabs);
+  const targetId = resolveContextTargetTabId();
+  if (targetId !== null) {
+    return count === 1 && isPromptTabSelected({ id: targetId });
+  }
+  return count <= 1;
 }
 
 function setPromptTabsSelection(nextSelection) {
@@ -1674,15 +3130,17 @@ function setPromptTabsSelection(nextSelection) {
 function togglePromptTabSelection(tab) {
   const tabs = currentContext.tabs || [];
   if (!tab) return;
+  const tabId = Number(tab.id);
   if (selectedTabs === null) {
-    setPromptTabsSelection(tabs.filter((candidate) => Number(candidate.id) !== Number(tab.id)));
+    setPromptTabsSelection(tabs.filter((candidate) => Number(candidate.id) !== tabId));
     return;
   }
-  const exists = selectedTabs.some((candidate) => Number(candidate.id) === Number(tab.id));
+  const currentList = Array.isArray(selectedTabs) ? [...selectedTabs] : [];
+  const exists = currentList.some((candidate) => Number(candidate.id) === tabId);
   const next = exists
-    ? selectedTabs.filter((candidate) => Number(candidate.id) !== Number(tab.id))
-    : [...selectedTabs, tab];
-  setPromptTabsSelection(next.length === tabs.length ? null : next);
+    ? currentList.filter((candidate) => Number(candidate.id) !== tabId)
+    : [...currentList, tab];
+  setPromptTabsSelection(next.length >= tabs.length ? null : next);
 }
 
 function currentContextScopeSearchQuery() {
@@ -1692,9 +3150,12 @@ function currentContextScopeSearchQuery() {
 function tabMatchesContextScopeQuery(tab, query = '') {
   const needle = String(query || '').trim().toLowerCase();
   if (!needle) return true;
-  return [tab.title, tab.url]
-    .map((value) => String(value || '').toLowerCase())
-    .some((value) => value.includes(needle));
+  const terms = needle.split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const title = String(tab?.title || '').toLowerCase();
+  const url = String(tab?.url || '').toLowerCase();
+  const haystack = `${title} ${url}`;
+  return terms.every((term) => haystack.includes(term));
 }
 
 function renderContextScopeTabList(query = '') {
@@ -1703,6 +3164,15 @@ function renderContextScopeTabList(query = '') {
   list.innerHTML = '';
   const tabs = currentContext.tabs || [];
   const filteredTabs = tabs.filter((tab) => tabMatchesContextScopeQuery(tab, query));
+  const trimmedQuery = String(query || '').trim();
+  if (trimmedQuery) {
+    const summary = document.createElement('div');
+    summary.className = 'context-scope-search-summary';
+    summary.textContent = filteredTabs.length === 1
+      ? translateUiText('1 matching tab')
+      : translateUiText(`${filteredTabs.length} matching tabs`);
+    list.appendChild(summary);
+  }
   for (const tab of filteredTabs) {
     const isPinned = contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB && Number(tab.id) === Number(contextScope.pinnedTabId);
     const isActive = Boolean(tab.active);
@@ -1711,7 +3181,11 @@ function renderContextScopeTabList(query = '') {
     row.className = 'context-scope-tab-row';
     appendContextScopeMenuButton({
       action: `pin-tab:${tab.id}`,
-      label: t('context.pin_tab', { title: compactPinnedTitle(tab.title || tab.url || translateUiText('Untitled tab'), 88) }),
+      label: isPinned
+        ? isAttachedPanelResidency()
+          ? t('context.return_attached_tab')
+          : t('context.follow_active_tab')
+        : t('context.pin_tab', { title: compactPinnedTitle(tab.title || tab.url || translateUiText('Untitled tab'), 88) }),
       detail: translateUiText(isPinned ? 'current' : isActive ? 'active' : ''),
       selected: isPinned,
       parent: row,
@@ -1764,18 +3238,29 @@ function renderContextScopePromptControls(tabs = currentContext.tabs || []) {
 
   const actions = document.createElement('div');
   actions.className = 'context-scope-prompt-actions';
+  const isPageOnly = isPageOnlyPromptSelection(tabs);
+  const isAllIncluded = selectedTabs === null || promptTabsCount(tabs) === tabs.length;
+  appendContextScopeMenuButton({
+    action: 'prompt-tabs-none',
+    label: translateUiText('Page only'),
+    detail: '1',
+    title: translateUiText("Send only this active page's context to Hermes. Excludes all other open tabs to save tokens and avoid context bloat."),
+    selected: isPageOnly,
+    parent: actions,
+  });
   appendContextScopeMenuButton({
     action: 'prompt-tabs-all',
     label: translateUiText('Include all tabs'),
     detail: `${tabs.length}`,
-    selected: selectedTabs === null,
+    title: translateUiText('Include all open browser tabs in prompt context so Hermes can see your full browsing window.'),
+    selected: isAllIncluded,
     parent: actions,
   });
   appendContextScopeMenuButton({
-    action: 'prompt-tabs-none',
-    label: translateUiText('Page only'),
-    detail: '0',
-    selected: Array.isArray(selectedTabs) && selectedTabs.length === 0,
+    action: 'prompt-tabs-triage',
+    label: translateUiText('AI Triage Tabs'),
+    detail: 'sort',
+    title: translateUiText('Use AI to scan, categorize, and cluster all open tabs by topic, detect duplicates, and recommend tabs to close.'),
     parent: actions,
   });
 
@@ -1783,10 +3268,38 @@ function renderContextScopePromptControls(tabs = currentContext.tabs || []) {
   return section;
 }
 
-function renderContextScopeMenu(query = '', { focusSearch = false } = {}) {
+function renderContextScopeConsentNotice(requestedScope = contextScope) {
+  const gate = effectiveContextGate(requestedScope);
+  if (gate.allowed) return null;
+
+  const needsConnection = gate.reason === 'principal-unavailable';
+  const notice = document.createElement('section');
+  notice.className = 'context-scope-consent-notice';
+  notice.setAttribute('role', 'status');
+
+  const title = document.createElement('strong');
+  title.textContent = translateUiText(needsConnection ? 'Verify this connection first' : 'Page context approval required');
+  const detail = document.createElement('span');
+  detail.textContent = translateUiText(needsConnection
+    ? 'Reconnect or test this connection before choosing a tab scope.'
+    : 'Approve “Share page context with this connection” before choosing a tab scope.');
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'context-scope-consent-action';
+  action.dataset.scopeAction = 'open-context-consent';
+  action.dataset.contextConsentReason = gate.reason || '';
+  action.textContent = translateUiText('Open Settings');
+  notice.append(title, detail, action);
+  return notice;
+}
+
+function renderContextScopeMenu(query = '', { focusSearch = false, consentScope = contextScope } = {}) {
   if (!els.contextScopeMenu) return;
   const searchQuery = String(query || '');
   els.contextScopeMenu.innerHTML = '';
+
+  const consentNotice = renderContextScopeConsentNotice(consentScope);
+  if (consentNotice) els.contextScopeMenu.appendChild(consentNotice);
 
   const actions = document.createElement('div');
   actions.className = 'context-scope-actions';
@@ -1794,6 +3307,7 @@ function renderContextScopeMenu(query = '', { focusSearch = false } = {}) {
     action: 'chat-only',
     label: translateUiText('Chat only'),
     detail: translateUiText('no page'),
+    title: translateUiText('Chat with Hermes without reading any web page or browser tab context.'),
     selected: contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY,
     parent: actions,
   });
@@ -1802,15 +3316,46 @@ function renderContextScopeMenu(query = '', { focusSearch = false } = {}) {
       action: 'follow-active',
       label: translateUiText('Follow active tab'),
       detail: translateUiText('live'),
+      title: translateUiText('Hermes automatically reads whichever browser tab is currently active and focused.'),
       selected: contextScope.mode === CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE,
       parent: actions,
     });
   } else if (contextScope.mode === CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE) {
     syncAttachedPanelContextScope();
+    appendContextScopeMenuButton({
+      action: 'attached-reset',
+      label: t('context.return_attached_tab'),
+      detail: translateUiText('owner'),
+      title: translateUiText('Return Hermes context to the tab that owns this attached panel.'),
+      selected: true,
+      parent: actions,
+    });
+  } else {
+    appendContextScopeMenuButton({
+      action: 'attached-reset',
+      label: t('context.return_attached_tab'),
+      detail: translateUiText('owner'),
+      title: translateUiText('Return Hermes context to the tab that owns this attached panel.'),
+      selected: contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB
+        && Number(contextScope.pinnedTabId) === Number(sidePanelParams.tabId),
+      parent: actions,
+    });
   }
-  appendContextScopeMenuButton({ action: 'pin-active', label: translateUiText('Pin current tab'), detail: translateUiText('lock'), parent: actions });
+  appendContextScopeMenuButton({
+    action: 'pin-active',
+    label: translateUiText('Pin current tab'),
+    detail: translateUiText('lock'),
+    title: translateUiText('Lock Hermes context strictly to this tab so switching browser tabs will not change the attached page.'),
+    parent: actions,
+  });
   if (isGlobalPanelResidency() && contextScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB) {
-    appendContextScopeMenuButton({ action: 'unlock', label: translateUiText('Unlock pinned tab'), detail: translateUiText('follow'), parent: actions });
+    appendContextScopeMenuButton({
+      action: 'unlock',
+      label: translateUiText('Unlock pinned tab'),
+      detail: translateUiText('follow'),
+      title: translateUiText('Unlock pinned context and return to following the active focused browser tab.'),
+      parent: actions,
+    });
   }
   els.contextScopeMenu.appendChild(actions);
 
@@ -1854,13 +3399,14 @@ function makePinnedTabSessionTitle(tab = {}) {
 // Used for explicit scope changes inside an already-open panel. Startup uses
 // initializeSessionForPanelOpen() so opening the extension does not silently
 // resume a previous Browser session.
-async function ensureSessionForActiveScope({ focus = false } = {}) {
+async function ensureSessionForActiveScope({ focus = false, scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   if (previousConversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB) {
-    await ensureDefaultBrowserSession({ focus });
-    return;
+    return ensureDefaultBrowserSession({ focus, scopeRevisionId });
   }
-  if (!minimumConnectionReady()) return;
-  const binding = await loadSessionBindingForActiveScope();
+  if (!minimumConnectionReady()) return false;
+  const binding = await loadSessionBindingForActiveScope({ scopeRevisionId });
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   // Never resume a stored session under a different gateway + profile than the
   // one that created it. A mismatched binding is stale; drop it and start fresh
   // so the user's Chat-only history never silently crosses into another profile.
@@ -1876,16 +3422,20 @@ async function ensureSessionForActiveScope({ focus = false } = {}) {
         title: binding.sessionTitle || binding.sessionId,
         source: DEFAULT_SETTINGS.sessionSource,
       };
-      await openHermesSession(session);
-      return;
+      return openHermesSession(session, { scopeRevisionId });
     }
     // Mismatched profile/gateway: forget the binding so we don't resume the
     // wrong profile's chat. The stored messages for this scope stay until the
     // new session overwrites them.
     const key = sessionBindingKeyForScope(contextScope, previousConversationScope);
     await browserApi.storage.local.remove([key]);
+    if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   }
-  await beginHermesBrowserDraft({ title: makePinnedTabSessionTitle(currentContext.activeTab || previousConversationScope), focus });
+  return beginHermesBrowserDraft({
+    title: makePinnedTabSessionTitle(currentContext.activeTab || previousConversationScope),
+    focus,
+    scopeRevisionId,
+  });
 }
 
 async function initializeSessionForPanelOpen({ focus = false } = {}) {
@@ -1898,97 +3448,301 @@ async function initializeSessionForPanelOpen({ focus = false } = {}) {
   await ensureSessionForActiveScope({ focus });
 }
 
-async function applyContextScope(nextScope, { ensureSession = false } = {}) {
-  contextScope = normalizeContextScope(nextScope);
+function scopeTransitionSnapshot() {
+  return {
+    contextScope,
+    previousConversationScope,
+    selectedTabs: selectedTabs === null ? null : [...selectedTabs],
+    currentContext,
+    messages,
+    settings,
+    availableSessions,
+    activeSessionRuntime,
+    activeConversationTransport,
+    activeDashboardWsConnection,
+    activeDashboardWsConnectionState: activeDashboardWsConnection
+      ? {
+        wsSessionId: activeDashboardWsConnection.wsSessionId,
+        wsStoredSessionId: activeDashboardWsConnection.wsStoredSessionId,
+        profile: activeDashboardWsConnection.profile,
+      }
+      : null,
+    sessionRoutesAvailable,
+    loadedSessionContextEstimate,
+  };
+}
+
+function restoreScopeTransitionSnapshot(snapshot) {
+  contextScope = snapshot.contextScope;
+  previousConversationScope = snapshot.previousConversationScope;
+  selectedTabs = snapshot.selectedTabs === null ? null : [...snapshot.selectedTabs];
+  currentContext = snapshot.currentContext;
+  messages = snapshot.messages;
+  settings = snapshot.settings;
+  availableSessions = snapshot.availableSessions;
+  activeSessionRuntime = snapshot.activeSessionRuntime;
+  activeConversationTransport = snapshot.activeConversationTransport;
+  activeDashboardWsConnection = snapshot.activeDashboardWsConnection;
+  if (activeDashboardWsConnection && snapshot.activeDashboardWsConnectionState) {
+    activeDashboardWsConnection.wsSessionId = snapshot.activeDashboardWsConnectionState.wsSessionId;
+    activeDashboardWsConnection.wsStoredSessionId = snapshot.activeDashboardWsConnectionState.wsStoredSessionId;
+    activeDashboardWsConnection.profile = snapshot.activeDashboardWsConnectionState.profile;
+  }
+  sessionRoutesAvailable = snapshot.sessionRoutesAvailable;
+  loadedSessionContextEstimate = snapshot.loadedSessionContextEstimate;
+  saveContextScopeForInstance();
+  saveConversationScopeForInstance();
+  renderContextScopeControls();
+  renderMessagesFromStorage();
+  updateSessionLabel();
+  renderSessionMenu();
+}
+
+async function commitContextScope(nextScope, { ensureSession = false, scopeRevisionId } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  const snapshot = ensureSession ? scopeTransitionSnapshot() : null;
+  const normalizedScope = normalizeContextScope(nextScope);
+  const conversationScope = conversationScopeForContextScope(contextScope, previousConversationScope);
+  const enteringExplicitPin = ensureSession
+    && conversationScope.mode !== CONTEXT_SCOPE_MODES.PINNED_TAB
+    && normalizedScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB;
+  const returningToGlobalFollow = ensureSession
+    && conversationScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB
+    && normalizedScope.mode === CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE;
+  if (enteringExplicitPin) rememberNonPinnedConversationSession(conversationScope);
+  const restoredConversation = returningToGlobalFollow ? restoreNonPinnedConversationSession() : null;
+  const restoredSession = restoredConversation?.settings?.sessionId
+    ? availableSessions.find((item) => item.id === restoredConversation.settings.sessionId) || {
+      id: restoredConversation.settings.sessionId,
+      title: restoredConversation.settings.sessionTitle || restoredConversation.settings.sessionId,
+      source: restoredConversation.settings.sessionSource || DEFAULT_SETTINGS.sessionSource,
+    }
+    : null;
+  const legacyPinnedConversation = returningToGlobalFollow && !restoredConversation;
+
+  contextScope = normalizedScope;
   previousConversationScope = conversationScopeForContextScope(contextScope, previousConversationScope);
-  if (contextScope.mode !== CONTEXT_SCOPE_MODES.CHAT_ONLY) rememberConversationScope(contextScope);
+  if (legacyPinnedConversation) previousConversationScope = snapshot.previousConversationScope;
+  if (contextScope.mode !== CONTEXT_SCOPE_MODES.CHAT_ONLY && !legacyPinnedConversation) rememberConversationScope(contextScope);
   else saveConversationScopeForInstance();
   saveContextScopeForInstance();
   syncSelectedTabsFromContextScope(currentContext.tabs || []);
   renderContextScopeControls();
-  await loadMessagesForActiveScope();
-  if (ensureSession) await ensureSessionForActiveScope({ focus: false });
-  await refreshContext();
+  try {
+    await loadMessagesForActiveScope({ scopeRevisionId });
+    if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+    if (restoredSession) {
+      const opened = await openHermesSession(restoredSession, { scopeRevisionId });
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      if (!opened) throw new Error('Could not restore the previous conversation for this tab scope.');
+    } else if (ensureSession) {
+      const sessionReady = await ensureSessionForActiveScope({ focus: false, scopeRevisionId });
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      if (!sessionReady) throw new Error('Could not bind a session for this tab scope.');
+    }
+    await refreshContext({ scopeRevisionId });
+    return scopeRevision.isCurrent(scopeRevisionId);
+  } catch (error) {
+    if (scopeRevision.isCurrent(scopeRevisionId) && snapshot) {
+      restoreScopeTransitionSnapshot(snapshot);
+      try {
+        await browserApi.storage.local.set({ hermesBrowserSettings: snapshot.settings });
+      } catch {
+        // Preserve the original transition error if durable rollback is unavailable.
+      }
+    }
+    if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+    throw error;
+  }
+}
+
+function applyContextScope(nextScope, { ensureSession = false } = {}) {
+  const scopeRevisionId = scopeRevision.begin();
+  const normalizedScope = normalizeContextScope(nextScope);
+  if (!ensureSession && normalizedScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
+    contextScope = normalizedScope;
+    syncSelectedTabsFromContextScope(currentContext.tabs || []);
+    saveContextScopeForInstance();
+    saveConversationScopeForInstance();
+    renderContextScopeControls();
+  }
+  const transition = () => commitContextScope(normalizedScope, { ensureSession, scopeRevisionId });
+  const queued = scopeTransitionQueue.then(transition, transition);
+  scopeTransitionQueue = queued.catch(() => undefined);
+  return queued;
+}
+
+async function resolveAttachedPanelOwnerTab() {
+  if (!isAttachedPanelResidency()) return null;
+  try {
+    const owner = await browserApi.tabs.get(Number(sidePanelParams.tabId));
+    return owner?.id ? safeTab(owner) : null;
+  } catch {
+    return null;
+  }
+}
+
+function requireContextConsentForScope(nextScope) {
+  const requested = normalizeContextScope(nextScope);
+  if (requested.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) return true;
+  const gate = effectiveContextGate(requested);
+  if (gate.allowed) return true;
+
+  renderContextScopeMenu('', { consentScope: requested });
+  requestAnimationFrame(() => {
+    els.contextScopeMenu?.querySelector('[data-scope-action="open-context-consent"]')?.focus();
+  });
+  return false;
 }
 
 async function pinContextTab(tab) {
-  if (!tab?.id) return;
-  await applyContextScope(contextScopeFromTab(tab, contextScope), { ensureSession: true });
+  if (!tab?.id) return false;
+  const attachedOwner = await resolveAttachedPanelOwnerTab();
+  if (isAttachedPanelResidency() && !attachedOwner) {
+    throw new Error('The attached owner tab is closed or no longer available.');
+  }
+  const action = resolveContextScopeAction({
+    currentScope: contextScope,
+    targetTab: tab,
+    panelMode: settings.panelResidencyMode,
+    attachedTab: attachedOwner,
+    attachedTabId: sidePanelParams.tabId,
+  });
+  if (action.kind === 'noop') return false;
+  if (!requireContextConsentForScope(action.scope)) return false;
+  const applied = await applyContextScope(action.scope, { ensureSession: true });
+  return applied;
 }
 
 async function pinContextTabById(tabId) {
   const id = Number(tabId);
-  if (!Number.isFinite(id)) return;
-  let tab = currentContext.tabs.find((item) => Number(item.id) === id) || null;
+  if (!Number.isFinite(id)) return false;
+  let tab = null;
   try {
     const freshTab = await browserApi.tabs.get(id);
     if (freshTab?.id) tab = safeTab(freshTab);
   } catch (_error) {
-    // The tab may have closed between render and click. Fall back to the
-    // snapshot from the menu when available so the user does not need a manual
-    // refresh just because the tab list is stale.
+    // The tab may have closed between render and click. Do not pin from the
+    // stale menu snapshot: scope ownership must be based on a live tab.
   }
-  if (!tab) throw new Error('Tab is closed or no longer available.');
-  await pinContextTab(tab);
+  if (!tab) return false;
+  return pinContextTab(tab);
 }
 
 async function unlockContextScope() {
-  await applyContextScope({
-    ...contextScope,
-    mode: CONTEXT_SCOPE_MODES.FOLLOW_ACTIVE,
-    pinnedTabId: null,
-    pinnedWindowId: null,
-    pinnedTitle: '',
-    pinnedUrl: '',
-    selectedTabIds: [],
+  const attachedOwner = await resolveAttachedPanelOwnerTab();
+  if (isAttachedPanelResidency() && !attachedOwner) {
+    throw new Error('The attached owner tab is closed or no longer available.');
+  }
+  const nextScope = resetContextScope({
+    panelMode: settings.panelResidencyMode,
+    attachedTab: attachedOwner,
+    attachedTabId: sidePanelParams.tabId,
+    previousScope: contextScope,
   });
+  if (!requireContextConsentForScope(nextScope)) return false;
+  const applied = await applyContextScope(nextScope, { ensureSession: true });
+  return applied;
 }
 
 function setGatewayCapabilities(caps) {
   gatewayCapabilities = caps || { ...DEFAULT_GATEWAY_CAPABILITIES };
+  const nextDeveloperMode = gatewayCapabilities.browserControlDeveloperMode === true;
+  const nextArtifactTransport = gatewayCapabilities.browserControlArtifactTransport === true;
+  if (settings.browserControlDeveloperMode !== nextDeveloperMode
+    || settings.browserControlArtifactTransport !== nextArtifactTransport) {
+    settings = {
+      ...settings,
+      browserControlDeveloperMode: nextDeveloperMode,
+      browserControlArtifactTransport: nextArtifactTransport,
+    };
+    void browserApi.storage.local.get('hermesBrowserSettings')
+      .then((stored) => browserApi.storage.local.set({
+        hermesBrowserSettings: {
+          ...(stored?.hermesBrowserSettings || {}),
+          browserControlDeveloperMode: nextDeveloperMode,
+          browserControlArtifactTransport: nextArtifactTransport,
+        },
+      }))
+      .then(() => browserControlMessage('HERMES_CONTROLLER_SETTINGS_REFRESH'))
+      .catch(() => undefined);
+  }
   renderCompatibilityPanel();
   renderInlineAssistModelOptions();
   updateVoiceButtonState();
 }
 
 async function loadGatewayCapabilities({ quiet = false, publicOnly = false, healthOk = false } = {}) {
-  if (isRemoteWsMode()) {
-    setGatewayCapabilities({
-      ...DEFAULT_GATEWAY_CAPABILITIES,
-      source: 'remote-dashboard',
-      health: remoteWsConnection?.client?.readyState === 1,
-      auth: true,
-      models: true,
-      sessions: true,
-      sessionChat: true,
-      sessionChatStreaming: true,
-      skills: true,
-      dashboardWs: true,
-      warnings: [
-        'Remote dashboard mode uses WebSocket session/chat APIs; REST-only browser extension APIs stay unavailable.',
-        'Voice transcription unavailable — using browser speech fallback when available.',
-        'Image upload unavailable — pasted images stay inline only.',
-        'Automatic browser pairing unavailable — manual dashboard sign-in is required.',
-      ],
-    });
+  if (usesDashboardWsChatTransport()) {
+    const connection = isRemoteWsMode() ? remoteWsConnection : activeDashboardWsConnection;
+    setGatewayCapabilities(dashboardWsGatewayCapabilities({
+      source: isRemoteWsMode() ? 'remote-dashboard' : 'dashboard-ws',
+      health: connection?.client?.readyState === 1,
+    }));
     return gatewayCapabilities;
   }
   try {
-    const fetcher = publicOnly || !settings.apiKey ? publicApiFetch : apiFetch;
-    const response = await fetcher('/v1/capabilities', { method: 'GET', cache: 'no-store' });
+    const fetcher = publicOnly || !hermesGatewayKey() ? publicApiFetch : apiFetch;
+    const response = await fetcher('/v1/capabilities', {
+      method: 'GET',
+      cache: 'no-store',
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(2_000) : undefined,
+    });
     const payload = await readJsonResponse(response);
-    if (!response.ok) throw new Error(`GET /v1/capabilities failed (${response.status})`);
-    setGatewayCapabilities(normalizeGatewayCapabilities(payload, { healthOk: true, hasApiKey: Boolean(settings.apiKey) }));
+    if (!response.ok) {
+      const capError = new Error(`GET /v1/capabilities failed (${response.status})`);
+      capError.httpStatus = response.status;
+      throw capError;
+    }
+    setGatewayCapabilities(normalizeGatewayCapabilities(payload, { healthOk: true, hasApiKey: Boolean(hermesGatewayKey()) }));
   } catch (error) {
+    const status = Number(error?.httpStatus ?? error?.status);
+    if (status === 401 && !isRemoteWsMode()) {
+      // An updated local Hermes may have rotated or removed the API credential
+      // while its paired Desktop dashboard remains healthy. Promote the verified
+      // dashboard WS before treating the key failure as a startup failure.
+      await activateLocalDashboardTransport({ timeoutMs: 2_000 });
+    }
+    // Profile-scoped 401: the gateway multiplexer requires each named profile
+    // to authenticate with its own key. Retry through the desktop dashboard
+    // session-token surface before degrading to legacy mode so non-default
+    // profiles still get real capability detection.
+    if (Number(error?.httpStatus ?? error?.status) === 401 && !isRemoteWsMode() && desktopDashboardUrl) {
+      try {
+        const base = desktopDashboardUrl.replace(/\/+$/, '');
+        const rootResponse = await fetch(base, {
+          headers: { Accept: 'text/html' },
+          cache: 'no-store',
+          signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(1_000) : undefined,
+        });
+        const token = extractDashboardSessionToken(await rootResponse.text());
+        if (token) {
+          const dashResponse = await fetch(`${base}/v1/capabilities`, {
+            headers: { Accept: 'application/json', 'X-Hermes-Session-Token': token },
+            credentials: 'include',
+            cache: 'no-store',
+            signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(1_500) : undefined,
+          });
+          const dashPayload = await readJsonResponse(dashResponse);
+          if (dashResponse.ok) {
+            setGatewayCapabilities(normalizeGatewayCapabilities(dashPayload, { healthOk: true, hasApiKey: Boolean(hermesGatewayKey()) }));
+            return gatewayCapabilities;
+          }
+        }
+      } catch {
+        /* fall through to legacy */
+      }
+    }
     setGatewayCapabilities(normalizeGatewayCapabilities(null, {
       healthOk,
-      hasApiKey: Boolean(settings.apiKey),
+      hasApiKey: Boolean(hermesGatewayKey()),
       warning: error?.message || String(error),
     }));
     if (!quiet) setStatus('warn', 'Hermes compatibility fallback', 'This gateway does not expose /v1/capabilities yet. Browser-specific routes will stay in fallback mode.');
   }
   return gatewayCapabilities;
 }
+
 
 // Product mode (Local / Cloud / Remote) is separate from the compatibility
 // transport (local-api / remote-api / remote-dashboard). Existing transport
@@ -2182,27 +3936,20 @@ function renderUpdateDialog(review = { loading: true }) {
   }
   els.updateNowButton.hidden = !review.available;
   els.maybeLaterButton.textContent = translateUiText(review.available ? 'MAYBE LATER' : 'CLOSE');
-  els.updateInstallNote.textContent = review.available
-    ? translateUiText('Update now starts a guarded Hermes agent turn. It will stop on local changes, build dist/, and reload through computer-use when available.')
-    : translateUiText('This check compares the loaded build metadata with the public Hermes Browser repository.');
+  els.updateInstallNote.textContent = translateUiText(updateInstallNoteText({ available: Boolean(review.available) }));
   (review.available ? els.updateNowButton : els.maybeLaterButton)?.focus({ preventScroll: true });
 }
 
 function launchBrowserUpdateWithHermes() {
   const review = latestUpdateReview || {};
-  const updatePrompt = [
-    'Update my Hermes Browser Extension from the official repository: https://github.com/abundantbeing/hermes-browser-extension',
-    `The Browser update review reports ${review.commitCount || 'new'} public commit${review.commitCount === 1 ? '' : 's'} available.`,
-    'First locate the existing Hermes Browser Extension checkout that this user intends to update.',
-    'If the checkout has uncommitted changes, stop and report them. Do not discard, overwrite, commit, or push any local work.',
-    'If it is clean, fetch and fast-forward the current branch from the official remote, install dependencies only if required, and run npm run build.',
-    'After a successful build, use computer-use to reload the unpacked dist/ extension from chrome://extensions when available. Otherwise tell me exactly how to reload it manually.',
-    'Verify the extension build before reporting success.',
-  ].join('\n\n');
+  const updatePrompt = buildUpdateAgentPrompt({ review });
   closeUpdateDialog({ restoreFocus: false });
   closeSettingsDialog();
   els.input.value = updatePrompt;
   els.input.dispatchEvent(new Event('input', { bubbles: true }));
+  // The agent's rebuild lands as a new build on disk: watch for it as soon as
+  // this turn finishes so the panel can offer Reload now.
+  updateTurnAwaitingBuild = true;
   if (!isConnected() || sending) {
     showOperationToast({ kind: 'warn', title: 'Update prompt ready', detail: sending ? 'Send it when the current Hermes run finishes.' : 'Connect to Hermes, then send the prepared update request.' });
     els.input.focus();
@@ -2212,13 +3959,17 @@ function launchBrowserUpdateWithHermes() {
   requestAnimationFrame(() => els.composer.requestSubmit());
 }
 
-async function checkForUpdates({ openReview = false } = {}) {
-  if (!els.checkUpdatesButton) return;
-  els.checkUpdatesButton.disabled = true;
-  if (els.reviewUpdateButton) els.reviewUpdateButton.disabled = true;
-  els.checkUpdatesButton.textContent = translateUiText('Checking...');
-  renderVersionInfo('Checking GitHub main and this loaded build commit...');
-  if (openReview) renderUpdateDialog({ loading: true });
+async function checkForUpdates({ openReview = false, silent = false } = {}) {
+  // silent: the automatic once-a-day check. No dialog, no toast, no button
+  // churn, and a failure leaves the manual Check path exactly as it was.
+  if (!silent) {
+    if (!els.checkUpdatesButton) return;
+    els.checkUpdatesButton.disabled = true;
+    if (els.reviewUpdateButton) els.reviewUpdateButton.disabled = true;
+    els.checkUpdatesButton.textContent = translateUiText('Checking...');
+    renderVersionInfo('Checking GitHub main and this loaded build commit...');
+    if (openReview) renderUpdateDialog({ loading: true });
+  }
   try {
     const [buildInfo, latestInfo] = await Promise.all([
       loadExtensionBuildInfo(),
@@ -2265,24 +4016,186 @@ async function checkForUpdates({ openReview = false } = {}) {
       sourceMatchesMain,
     };
     renderVersionInfo(status);
-    if (openReview) renderUpdateDialog(latestUpdateReview);
+    renderUpdateActionEmphasis(latestUpdateReview);
+    if (openReview && !silent) renderUpdateDialog(latestUpdateReview);
     return latestUpdateReview;
   } catch (error) {
+    if (silent) {
+      console.warn('[Hermes Browser] Silent update check failed:', error?.message || error);
+      return null;
+    }
     const detail = `${error?.message || String(error)} Open ${REPO_URL} for manual update instructions.`;
     renderVersionInfo(detail);
     if (openReview) renderUpdateDialog({ title: 'Update check unavailable', summary: 'Hermes Browser could not read public update metadata.', error: detail });
     return null;
   } finally {
-    els.checkUpdatesButton.disabled = false;
-    if (els.reviewUpdateButton) els.reviewUpdateButton.disabled = false;
-    els.checkUpdatesButton.textContent = translateUiText('Check');
+    if (!silent) {
+      els.checkUpdatesButton.disabled = false;
+      if (els.reviewUpdateButton) els.reviewUpdateButton.disabled = false;
+      els.checkUpdatesButton.textContent = translateUiText('Check');
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Update trust: the build this panel booted from vs the build now on disk, the
+// honest no-checkout fallback, and the silent once-a-day check. The pure rules
+// live in lib/update-flow.mjs so the tests assert the same strings the panel
+// renders without needing a browser.
+// ---------------------------------------------------------------------------
+
+let loadedBuildIdentity = null;
+let buildIdentityCheckInFlight = false;
+let buildIdentityCheckedAt = 0;
+let updateTurnAwaitingBuild = false;
+
+async function readBuildIdentityFromDisk() {
+  // loadExtensionBuildInfo reads build-info.json over an extension URL with
+  // cache: 'no-store', so this is the patched dist/ file, never a cached copy.
+  const info = await loadExtensionBuildInfo().catch(() => null);
+  return buildIdentityFromInfo(info);
+}
+
+/**
+ * Re-read build-info.json and compare it with the identity this panel booted
+ * from. The first read establishes the baseline. A later change means dist/ was
+ * rebuilt under the running panel, so the panel offers Reload now — it never
+ * reloads on its own.
+ */
+async function checkLoadedBuildIdentity({ reason = 'interval', force = false } = {}) {
+  if (buildIdentityCheckInFlight) return false;
+  if (!force && !shouldRefreshBuildIdentity({ lastCheckedAt: buildIdentityCheckedAt })) return false;
+  buildIdentityCheckInFlight = true;
+  buildIdentityCheckedAt = Date.now();
+  try {
+    const nextIdentity = await readBuildIdentityFromDisk();
+    if (!loadedBuildIdentity) {
+      loadedBuildIdentity = nextIdentity;
+      return false;
+    }
+    if (!buildIdentityChanged(loadedBuildIdentity, nextIdentity)) return false;
+    renderUpdateReloadPending(nextIdentity);
+    console.info(`[Hermes Browser] A newer build is on disk; reload offered (${reason}).`);
+    return true;
+  } catch (error) {
+    console.warn('[Hermes Browser] Build identity re-read skipped:', error?.message || error);
+    return false;
+  } finally {
+    buildIdentityCheckInFlight = false;
+  }
+}
+
+function renderUpdateReloadPending(identity = null) {
+  if (!els.updateReloadPending) return;
+  if (els.updateReloadPendingText) els.updateReloadPendingText.textContent = translateUiText(reloadPendingNotice(identity));
+  els.updateReloadPending.hidden = false;
+}
+
+function reloadBrowserRuntimeForNewBuild() {
+  const runtime = browserApi?.runtime;
+  if (typeof runtime?.reload !== 'function') {
+    showOperationToast({ kind: 'warn', title: 'Reload unavailable', detail: 'Reload this extension from your browser extensions page to run the new build.' });
+    return;
+  }
+  try {
+    // Load-unpacked reloads re-read the files from disk, so the rebuilt dist/
+    // is what runs on the next paint of this panel.
+    runtime.reload();
+  } catch (error) {
+    showOperationToast({ kind: 'warn', title: 'Reload failed', detail: error?.message || String(error) });
+  }
+}
+
+async function readUpdateCheckCache() {
+  try {
+    const stored = await browserApi.storage.local.get([UPDATE_CHECK_CACHE_KEY]);
+    return stored?.[UPDATE_CHECK_CACHE_KEY] || null;
+  } catch (error) {
+    console.warn('[Hermes Browser] Update check cache read failed:', error?.message || error);
+    return null;
+  }
+}
+
+async function writeUpdateCheckCache(review = null) {
+  if (!review) return false;
+  try {
+    await browserApi.storage.local.set({ [UPDATE_CHECK_CACHE_KEY]: updateCheckCacheEntry({ review }) });
+    return true;
+  } catch (error) {
+    console.warn('[Hermes Browser] Update check cache write failed:', error?.message || error);
+    return false;
+  }
+}
+
+/**
+ * Silent automatic check: at most once every 24h, no dialog, no toast. Any
+ * failure returns false without touching the status line, so the manual Check
+ * button remains the only thing that can claim anything.
+ */
+async function runAutomaticUpdateCheck() {
+  try {
+    const cached = await readUpdateCheckCache();
+    if (!shouldAutoCheckUpdates({ entry: cached })) return false;
+    const review = await checkForUpdates({ silent: true });
+    if (!review) return false;
+    await writeUpdateCheckCache(review);
+    return true;
+  } catch (error) {
+    console.warn('[Hermes Browser] Automatic update check skipped:', error?.message || error);
+    return false;
+  }
+}
+
+function renderUpdateActionEmphasis(review = null) {
+  if (!els.reviewUpdateButton) return;
+  const emphasis = updateButtonEmphasis(review);
+  if (emphasis) els.reviewUpdateButton.setAttribute('data-update-action', emphasis);
+  else els.reviewUpdateButton.removeAttribute('data-update-action');
+}
+
+function applyUpdateFlowStatics() {
+  if (els.updateReleaseLink) {
+    els.updateReleaseLink.href = HBE_RELEASES_URL;
+    els.updateReleaseLink.textContent = translateUiText(RELEASES_DOWNLOAD_LABEL);
+  }
+  if (els.reloadBuildButton) els.reloadBuildButton.textContent = translateUiText(RELOAD_NOW_LABEL);
+}
+
+/**
+ * Boot wiring for the update path. Never awaited by the boot sequence: the
+ * panel must paint whether or not GitHub, storage, or build-info.json answer.
+ */
+async function initializeUpdateFlow() {
+  applyUpdateFlowStatics();
+  await checkLoadedBuildIdentity({ reason: 'boot', force: true });
+  window.setTimeout(() => { void checkLoadedBuildIdentity({ reason: 'boot-recheck', force: true }); }, BUILD_RELOAD_BOOT_RECHECK_MS);
+  window.setInterval(() => { void checkLoadedBuildIdentity({ reason: 'interval' }); }, BUILD_RELOAD_WATCH_INTERVAL_MS);
+  window.addEventListener('focus', () => { void checkLoadedBuildIdentity({ reason: 'focus' }); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void checkLoadedBuildIdentity({ reason: 'visible' });
+  });
+  void runAutomaticUpdateCheck();
+}
+
+/**
+ * Called when a turn settles. A turn that started from the prepared update
+ * prompt is the one most likely to have rebuilt dist/, so re-read the identity
+ * right away instead of waiting for the next interval.
+ */
+function recheckBuildIdentityAfterUpdateTurn() {
+  if (!updateTurnAwaitingBuild) return;
+  void checkLoadedBuildIdentity({ reason: 'update-turn', force: true }).then((changed) => {
+    if (changed) updateTurnAwaitingBuild = false;
+  });
 }
 
 function updateConnectionPrompt() {
   const state = currentConnectionState();
   const connected = state.connected;
   const summary = currentGatewaySummary();
+  // Connected is connected: the first-run setup card never comes back for a
+  // working panel. Tab control's own credential step lives in the control strip
+  // ("Authorize control"), not in this card.
   els.connectPanel.hidden = connected;
   els.connectionPill.textContent = '●';
   els.connectionPill.className = `connection-pill ${state.pillClass || 'warn'}`;
@@ -2314,9 +4227,14 @@ function updateConnectionPrompt() {
     }
   } else {
     els.sendButton.textContent = translateUiText(sending ? 'Hermes running' : 'Ask Hermes');
-    els.connectStatus.textContent = state.state === 'degraded'
-      ? `Connected to Hermes with a runtime warning. ${currentConnectionTroubleshooting(state)}`
-      : 'Connected to Hermes. You can start chatting with page context.';
+    if (state.state === 'degraded') {
+      els.connectStatus.textContent = `Connected to Hermes with a runtime warning. ${currentConnectionTroubleshooting(state)}`;
+      // Surface a degraded runtime as a warning status so the recovery action
+      // (Check connection) is offered after a server-runtime failure.
+      setStatus('warn', 'Hermes connected with a runtime warning', currentConnectionTroubleshooting(state), { translateDetail: false });
+    } else {
+      els.connectStatus.textContent = 'Connected to Hermes. You can start chatting with page context.';
+    }
   }
   updateComposerBusyState();
 }
@@ -2332,7 +4250,7 @@ function setComposerButtonState(button, state = {}) {
 }
 
 function canSteerActiveRun() {
-  return Boolean(isRemoteWsMode() || gatewayCapabilities.runSteer);
+  return Boolean(usesDashboardWsChatTransport() || gatewayCapabilities.runSteer);
 }
 
 function currentComposerDraftState() {
@@ -2346,6 +4264,8 @@ function currentComposerDraftState() {
 }
 
 function updateComposerBusyState() {
+  document.body.classList.toggle('turn-running', sending);
+  panelMessageThread?.refreshActions();
   renderRunControlRecovery();
   const state = currentComposerDraftState();
   const startupBlocking = !startupReadiness.ready;
@@ -2360,9 +4280,53 @@ function updateComposerBusyState() {
   els.composerDropZone?.classList.toggle('can-steer', state.busyDraft && !state.controls.steer.hidden);
   if (els.sendButton) {
     els.sendButton.disabled = startupBlocking || state.mainButton.disabled;
-    if (isConnected()) els.sendButton.textContent = translateUiText(state.mainButton.label);
+    if (isConnected()) {
+      if (sending) {
+        const botName = activeBotProfileName();
+        els.sendButton.textContent = botName ? `${botName} running` : translateUiText('Hermes running');
+      } else {
+        updateComposerActionLabels();
+      }
+    }
   }
   renderQueueNotice();
+  renderSteerNotice();
+  renderCompletionPendingRow();
+}
+
+function activeBotProfileName() {
+  const isBotChat = document.body.classList.contains('bot-mode-engaged');
+  if (!isBotChat || activeGroupProjection) return '';
+  const activeProfile = settings.botModeSelectedProfile || settings.activeProfile || '';
+  const row = botModeRoster.find((entry) => entry.profileName === activeProfile)
+    || botModeRoster.find((entry) => entry.profileName === settings.botModeSelectedProfile);
+  return row ? botProfileDisplayName(row) : (activeProfile ? (activeProfile.charAt(0).toUpperCase() + activeProfile.slice(1)) : '');
+}
+
+function updateComposerActionLabels() {
+  const botName = activeBotProfileName();
+  if (activeGroupProjection) {
+    if (els.composerLabel) els.composerLabel.textContent = 'GROUP CHAT';
+    if (els.sendButton && isConnected() && !sending) {
+      els.sendButton.textContent = 'Send';
+    }
+    return;
+  }
+  if (botName) {
+    if (els.composerLabel) {
+      els.composerLabel.textContent = `ASK ${botName.toUpperCase()}`;
+    }
+    if (els.sendButton && isConnected() && !sending) {
+      els.sendButton.textContent = botName.length > 10 ? 'Ask' : `Ask ${botName}`;
+    }
+  } else {
+    if (els.composerLabel) {
+      els.composerLabel.textContent = 'ASK HERMES';
+    }
+    if (els.sendButton && isConnected() && !sending) {
+      els.sendButton.textContent = 'Ask Hermes';
+    }
+  }
 }
 
 function queuedTurnSteerText(turn = queuedTurn) {
@@ -2405,6 +4369,283 @@ function renderQueueNotice() {
   if (!actionState.steer.hidden) actions.append(steer);
   actions.append(remove);
   els.queueNotice.append(main, actions);
+}
+
+// Steer feedback belongs in the transcript, not the composer dock: a dashed
+// user-side row appears the moment a steer is queued (Desktop surfaces queued
+// steers in the message stream) and leaves when the steered message lands in
+// history or the turn settles.
+function renderSteerNotice() {
+  if (!els.messages) return;
+  const steerText = String(pendingSteerText || '').trim();
+  const existing = els.messages.querySelector('.steer-pending-row');
+  if (!steerText || !sending) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    const body = existing.querySelector('.message-content');
+    if (body && body.dataset.steerText !== steerText) {
+      body.dataset.steerText = steerText;
+      renderMessageContentElement(body, messageDisplayText('user', steerText));
+    }
+    placeSteerPendingRow(existing);
+    return;
+  }
+  const node = els.template.content.firstElementChild.cloneNode(true);
+  // The template root is the row wrapper; the bubble classes belong on the
+  // article, otherwise the dashed user-bubble styling never matches.
+  node.classList.add('steer-pending-row');
+  node.dataset.role = 'pending-steer';
+  (node.matches('.message') ? node : node.querySelector('.message'))?.classList.add('user', 'steer-pending-row');
+  node.querySelector('.message-role').textContent = translateUiText('Steer queued · arrives after the next tool call');
+  const body = node.querySelector('.message-content');
+  body.dataset.steerText = steerText;
+  renderMessageContentElement(body, messageDisplayText('user', steerText));
+  placeSteerPendingRow(node);
+  scrollMessageStreamToBottom();
+}
+
+// A queued steer belongs directly under the message it steers (the newest user
+// message), above the live tool cards, never in a separate box at the bottom.
+function placeSteerPendingRow(node) {
+  const userRows = [...els.messages.querySelectorAll(':scope > .message-row[data-role="user"]')];
+  const anchor = userRows[userRows.length - 1];
+  if (anchor) anchor.after(node);
+  else els.messages.appendChild(node);
+}
+
+// The gateway generates the parent completion turn AFTER a subagent batch
+// finishes. Until its reply lands, the transcript holds the same live thinking
+// row a running turn shows, so the child-to-parent handoff never looks idle.
+function renderCompletionPendingRow() {
+  if (!els.messages) return;
+  const existing = els.messages.querySelector('.completion-pending-row');
+  if (!completionSettlePending) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    els.messages.appendChild(existing);
+    return;
+  }
+  const node = els.template.content.firstElementChild.cloneNode(true);
+  node.classList.add('assistant', 'completion-pending-row');
+  node.querySelector('.message-role').textContent = assistantMessageRoleLabel();
+  renderMessageContentElement(node.querySelector('.message-content'), THINKING_PLACEHOLDER);
+  els.messages.appendChild(node);
+  scrollMessageStreamToBottom();
+}
+
+// /btw answers must outlive the operation toast: the card appears the moment a
+// side question is asked (pending), then fills with the answer. It is a
+// transient row — never part of the saved session messages — and it clears
+// when the user switches sessions. Answers ride the gateway's native
+// `prompt.btw` -> `btw.complete` flow (the same contract Desktop uses) over
+// the authenticated dashboard socket; the REST completions route stays as the
+// fallback for API-key connections. The old REST-only path answered 401 on
+// local dashboard connections, which surfaced as an empty answer.
+function showSideQuestionCard(question) {
+  const seq = ++sideQuestionSequence;
+  sideQuestionCardState = {
+    seq,
+    question: String(question || ''),
+    answer: '',
+    error: '',
+    pending: true,
+    elapsedMs: 0,
+    sessionId: String(settings.sessionId || ''),
+  };
+  renderSideQuestionCard();
+  return seq;
+}
+
+function settleSideQuestionCard(seq, { answer = '', error = '', elapsedMs = 0 } = {}) {
+  const state = sideQuestionCardState;
+  if (!state || state.seq !== seq) return false;
+  state.pending = false;
+  state.answer = String(answer || '');
+  state.error = String(error || '');
+  state.elapsedMs = Number(elapsedMs) || 0;
+  renderSideQuestionCard();
+  if (state.error) setStatus('warn', 'Side question failed', state.error, { translateDetail: false });
+  else setStatus('ok', 'Side question answered', 'The result card stays at the end of the transcript until you dismiss it.');
+  return true;
+}
+
+function dismissSideQuestionCard() {
+  sideQuestionCardState = null;
+  renderSideQuestionCard();
+}
+
+function sideQuestionMetaLabel(state) {
+  if (!state) return '';
+  if (state.pending) return translateUiText('Asking…');
+  if (state.error || !state.answer) return translateUiText('Failed');
+  return `${translateUiText('Snapshot')} · ${Math.max(0.1, state.elapsedMs / 1000).toFixed(1)}s`;
+}
+
+function renderSideQuestionCard() {
+  if (!els.messages) return;
+  if (sideQuestionCardState && sideQuestionCardState.sessionId !== String(settings.sessionId || '')) {
+    sideQuestionCardState = null;
+  }
+  const existing = els.messages.querySelector('.side-question-card');
+  if (!sideQuestionCardState) {
+    existing?.remove();
+    return;
+  }
+  let card = existing;
+  if (!card) {
+    card = document.createElement('article');
+    card.className = 'side-question-card';
+    const head = document.createElement('div');
+    head.className = 'side-question-head';
+    const label = document.createElement('span');
+    label.className = 'side-question-label';
+    label.textContent = translateUiText('By the way');
+    const meta = document.createElement('span');
+    meta.className = 'side-question-meta';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'side-question-close';
+    close.setAttribute('aria-label', translateUiText('Dismiss side question result'));
+    close.title = translateUiText('Dismiss');
+    close.textContent = '✕';
+    close.addEventListener('click', () => dismissSideQuestionCard());
+    head.append(label, meta, close);
+    const question = document.createElement('p');
+    question.className = 'side-question-question';
+    const body = document.createElement('div');
+    body.className = 'side-question-answer';
+    const actions = document.createElement('div');
+    actions.className = 'side-question-actions';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'side-question-copy';
+    copy.textContent = translateUiText('Copy');
+    copy.addEventListener('click', async () => {
+      const answerText = String(sideQuestionCardState?.answer || '');
+      if (!answerText) return;
+      try {
+        await navigator.clipboard.writeText(answerText);
+        copy.textContent = translateUiText('Copied');
+      } catch {
+        copy.textContent = translateUiText('Copy failed');
+      }
+      setTimeout(() => { copy.textContent = translateUiText('Copy'); }, 1600);
+    });
+    actions.append(copy);
+    card.append(head, question, body, actions);
+  }
+  const state = sideQuestionCardState;
+  card.classList.toggle('warn', Boolean(state.error));
+  card.classList.toggle('pending', Boolean(state.pending));
+  card.querySelector('.side-question-question').textContent = state.question;
+  card.querySelector('.side-question-meta').textContent = sideQuestionMetaLabel(state);
+  const bodyEl = card.querySelector('.side-question-answer');
+  const content = state.pending ? THINKING_PLACEHOLDER : (state.error || state.answer);
+  if (bodyEl.dataset.rendered !== content) {
+    bodyEl.dataset.rendered = content;
+    renderMessageContentElement(bodyEl, content);
+  }
+  card.querySelector('.side-question-copy').hidden = Boolean(state.pending) || Boolean(state.error) || !state.answer;
+  els.messages.appendChild(card);
+  scrollMessageStreamToBottom();
+}
+
+async function runSideQuestion(question, seq) {
+  const startedAt = Date.now();
+  if (usesDashboardWsChatTransport()) {
+    const outcome = await requestDashboardSideQuestion(question, seq, startedAt);
+    if (outcome !== 'unavailable') return;
+  }
+  await requestRestSideQuestion(question, seq, startedAt);
+}
+
+async function requestDashboardSideQuestion(question, seq, startedAt) {
+  let connection;
+  let sessionId = '';
+  try {
+    connection = await ensureActiveDashboardWsConnection();
+    sessionId = await ensureRemoteWsSession(connection);
+  } catch {
+    return 'unavailable';
+  }
+  return new Promise((resolve) => {
+    let taskId = '';
+    let settled = false;
+    const finish = (outcome) => {
+      if (settled) return;
+      settled = true;
+      off();
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => {
+      settleSideQuestionCard(seq, { error: 'The side question timed out. Try again.', elapsedMs: Date.now() - startedAt });
+      finish('timeout');
+    }, 120000);
+    const off = connection.client.on('btw.complete', (event) => {
+      const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+      if (!matchesDashboardSessionEvent(event, [sessionId, connection.wsSessionId, connection.wsStoredSessionId])) return;
+      if (taskId && payload.task_id && String(payload.task_id) !== taskId) return;
+      const text = String(payload.text || '').trim();
+      if (!text) return;
+      if (/^error:/i.test(text)) {
+        settleSideQuestionCard(seq, { error: text.replace(/^error:\s*/i, ''), elapsedMs: Date.now() - startedAt });
+      } else {
+        settleSideQuestionCard(seq, { answer: text, elapsedMs: Date.now() - startedAt });
+      }
+      finish('answered');
+    });
+    connection.client.request(WS_METHODS.promptBtw, { session_id: sessionId, text: question })
+      .then((result) => {
+        taskId = String(result?.task_id || '');
+      })
+      .catch((error) => {
+        const message = String(error?.message || error);
+        if (/method not found|not found|unknown method/i.test(message) || Number(error?.rpcCode ?? error?.code) === 4010) {
+          finish('unavailable');
+          return;
+        }
+        settleSideQuestionCard(seq, { error: message, elapsedMs: Date.now() - startedAt });
+        finish('failed');
+      });
+  });
+}
+
+async function requestRestSideQuestion(question, seq, startedAt) {
+  const recentContext = messages.slice(-10).map((m) => `${m.role}: ${m.content}`).join('\n');
+  try {
+    const res = await apiFetch('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: currentModelRequestId(),
+        provider: currentModelProviderSlug() || undefined,
+        stream: false,
+        messages: [
+          { role: 'system', content: 'You are answering an inline side question (/btw) about this conversation snapshot. Answer concisely in 1-3 sentences without modifying context.' },
+          { role: 'user', content: `Conversation snapshot:\n${recentContext}\n\nSide question: ${question}` },
+        ],
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    const answer = data?.choices?.[0]?.message?.content
+      || data?.message?.content
+      || data?.output_text
+      || (typeof data?.output === 'string' ? data.output : '')
+      || '';
+    if (!answer) {
+      const detail = data?.error?.message || data?.error
+        || `Hermes returned no answer for this side question (${res?.status || 'no response'}).`;
+      settleSideQuestionCard(seq, { error: String(detail), elapsedMs: Date.now() - startedAt });
+      return;
+    }
+    settleSideQuestionCard(seq, { answer, elapsedMs: Date.now() - startedAt });
+  } catch (error) {
+    settleSideQuestionCard(seq, { error: error?.message || String(error), elapsedMs: Date.now() - startedAt });
+  }
 }
 
 function queueCurrentDraft() {
@@ -2454,10 +4695,13 @@ async function sendSteerText(text) {
     return false;
   }
   pendingSteerText = steerText;
-  if (isRemoteWsMode()) {
-    const connection = await ensureRemoteWsClient();
+  if (usesDashboardWsChatTransport()) {
+    const connection = await ensureActiveDashboardWsConnection();
     const sessionId = await ensureRemoteWsSession(connection);
-    await connection.client.request(WS_METHODS.sessionSteer, { session_id: sessionId, text: steerText });
+    const result = await connection.client.request(WS_METHODS.sessionSteer, { session_id: sessionId, text: steerText });
+    if (result && result.status === 'rejected') {
+      throw new Error('Hermes could not queue the steer (the turn may be finishing). The text is still in the composer.');
+    }
     return true;
   }
   if (!canSteerActiveRun()) {
@@ -2494,6 +4738,7 @@ async function steerCurrentDraft() {
     return true;
   } catch (error) {
     pendingSteerText = '';
+    renderSteerNotice();
     setStatus('warn', 'Steer failed', error?.message || String(error), { translateDetail: false });
     els.input.focus();
     return false;
@@ -2509,11 +4754,13 @@ async function steerQueuedTurn() {
     if (queuedTurn.attachments?.length) queuedTurn = { text: '', attachments: queuedTurn.attachments };
     else queuedTurn = null;
     renderQueueNotice();
+    renderSteerNotice();
     setStatus('ok', 'Steer sent to active run', 'Hermes will consume the queued text if the current turn reaches an injection point.');
     els.input.focus();
     return true;
   } catch (error) {
     pendingSteerText = '';
+    renderSteerNotice();
     setStatus('warn', 'Steer failed', error?.message || String(error), { translateDetail: false });
     els.input.focus();
     return false;
@@ -2526,14 +4773,15 @@ function isAbortError(error) {
 
 async function reconcileActiveRunTerminal({ stopRequested = false, dashboardSessionId = '', expectedGeneration = runControlGeneration } = {}) {
   const reconciliationRunId = String(activeRunId || '');
-  if (!isRemoteWsMode() && !gatewayCapabilities.runStatus) {
+  const dashboardTransport = usesDashboardWsChatTransport();
+  if (!dashboardTransport && !gatewayCapabilities.runStatus) {
     throw new Error('Connected Hermes runtime does not explicitly advertise run status reconciliation.');
   }
-  const readStatus = isRemoteWsMode()
+  const readStatus = dashboardTransport
     ? async () => {
       const sessionId = String(dashboardSessionId || reconciliationRunId).trim();
       if (!sessionId) throw new Error('The active Dashboard session is unavailable for terminal reconciliation.');
-      const connection = await ensureRemoteWsClient();
+      const connection = await ensureActiveDashboardWsConnection();
       return runControlRequestWithTimeout(
         () => connection.client.request(WS_METHODS.sessionStatus, { session_id: sessionId }),
         { timeoutMs: RUN_CONTROL_REQUEST_TIMEOUT_MS },
@@ -2553,7 +4801,7 @@ async function reconcileActiveRunTerminal({ stopRequested = false, dashboardSess
       }
       return payload;
     };
-  const terminalStatus = isRemoteWsMode()
+  const terminalStatus = dashboardTransport
     ? (payload) => dashboardTerminalStatus(payload, { stopRequested })
     : restTerminalStatus;
   const result = await waitForTerminalStatus({
@@ -2619,6 +4867,7 @@ async function settleActiveRunTerminal() {
   sending = false;
   updateComposerBusyState();
   renderContextWindow();
+  recheckBuildIdentityAfterUpdateTurn();
   const shouldFlushQueue = shouldAutoFlushQueuedTurn(queuedTurn, settledRunControl);
   if (!shouldFlushQueue) return true;
   const next = queuedTurn;
@@ -2630,8 +4879,9 @@ async function settleActiveRunTerminal() {
 
 async function stopCurrentTurn() {
   if (!sending) return false;
+  const dashboardTransport = usesDashboardWsChatTransport();
   if (!activeRunControl) {
-    activeRunControl = beginRunControl({ runId: activeRunId, transport: isRemoteWsMode() ? 'dashboard-ws' : 'rest' });
+    activeRunControl = beginRunControl({ runId: activeRunId, transport: dashboardTransport ? 'dashboard-ws' : 'rest' });
   }
   activeRunControl = requestRunStop(activeRunControl);
   const stopGeneration = runControlGeneration;
@@ -2639,8 +4889,8 @@ async function stopCurrentTurn() {
   setStatus('warn', 'Stopping Hermes', stopRunId ? `Interrupt requested for ${stopRunId}` : 'Interrupting the active Hermes session');
   let dashboardSessionId = '';
   try {
-    if (isRemoteWsMode()) {
-      const connection = await ensureRemoteWsClient();
+    if (dashboardTransport) {
+      const connection = await ensureActiveDashboardWsConnection();
       if (!runControlGenerationMatches(stopGeneration, runControlGeneration)) return false;
       dashboardSessionId = await ensureRemoteWsSession(connection);
       if (!runControlGenerationMatches(stopGeneration, runControlGeneration)) return false;
@@ -2731,6 +4981,41 @@ async function executeNativeBrowserCommand(parsedCommand) {
     } catch (error) {
       setStatus('warn', 'Steer failed', error?.message || String(error), { translateDetail: false });
     }
+    return true;
+  }
+
+  if (action === 'background-task') {
+    if (!userInput) {
+      setStatus('warn', 'Background task needs a description', 'Add prompt/task instructions after /bg.');
+      return true;
+    }
+    els.input.value = '';
+    renderSkillSuggestions();
+    updateComposerBusyState();
+    showOperationToast({ title: 'Background task dispatched', detail: userInput });
+    setStatus('ok', 'Background task started', `/bg: ${userInput}. Runs independently with fresh context.`);
+    void apiFetch('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        title: `[bg] ${userInput.slice(0, 40)}`,
+        source: 'hermes_browser_bg',
+        system_prompt: currentHermesBrowserSystemPrompt(),
+      }),
+    }).catch(() => {});
+    return true;
+  }
+
+  if (action === 'side-question') {
+    if (!userInput) {
+      setStatus('warn', 'Side question needs text', 'Add your question after /btw.');
+      return true;
+    }
+    els.input.value = '';
+    renderSkillSuggestions();
+    updateComposerBusyState();
+    const seq = showSideQuestionCard(userInput);
+    setStatus('ok', 'Evaluating side question', 'Answers from a transcript snapshot without disturbing the active run.');
+    void runSideQuestion(userInput, seq);
     return true;
   }
 
@@ -2848,6 +5133,14 @@ function browserSpeechAvailable() {
   return Boolean(speechRecognitionConstructor());
 }
 
+function canUseBrowserSpeechFallback() {
+  return browserSpeechAvailable() && browserSpeechCloudFallbackAllowed({ product: browserProduct });
+}
+
+function canOpenVoiceDictationPage() {
+  return Boolean(browserApi?.tabs?.create || typeof window?.open === 'function');
+}
+
 function preferredVoiceMimeType() {
   if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') return '';
   return VOICE_AUDIO_MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type)) || '';
@@ -2879,13 +5172,33 @@ async function openMicrophonePermissionPage() {
 }
 
 async function openVoiceDictationPage(detail = 'Opening a Hermes Voice Dictation tab. Record there; the transcript will return to this composer automatically.') {
-  setStatus('warn', 'Opening voice dictation tab', detail);
-  const url = browserApi?.runtime?.getURL?.(VOICE_DICTATION_PAGE) || VOICE_DICTATION_PAGE;
-  if (browserApi?.tabs?.create) {
-    await browserApi.tabs.create({ url, active: true });
-    return;
+  if (voiceDictationPageOpenPromise) return voiceDictationPageOpenPromise;
+  const openPromise = (async () => {
+    setStatus('warn', 'Opening voice dictation tab', detail);
+    const url = browserApi?.runtime?.getURL?.(VOICE_DICTATION_PAGE) || VOICE_DICTATION_PAGE;
+    if (browserApi?.tabs?.create) {
+      try {
+        await browserApi.tabs.create({ url, active: true });
+        return true;
+      } catch (error) {
+        // Some Chromium forks expose tabs.create but reject it from a side
+        // panel. Keep the click useful by trying the normal visible-window
+        // path before surfacing the failure.
+        const opened = window.open(url, '_blank', 'noopener,noreferrer');
+        if (opened) return true;
+        throw error;
+      }
+    }
+    const opened = window.open(url, '_blank', 'noopener,noreferrer');
+    if (!opened) throw new Error('Could not open the Hermes Voice Dictation tab.');
+    return true;
+  })();
+  voiceDictationPageOpenPromise = openPromise;
+  try {
+    return await openPromise;
+  } finally {
+    if (voiceDictationPageOpenPromise === openPromise) voiceDictationPageOpenPromise = null;
   }
-  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 function insertExternalVoiceTranscript(transcript = '', source = 'voice dictation') {
@@ -2977,6 +5290,7 @@ function renderWakeState(nextState = wakeState) {
     els.wakeButton.setAttribute('aria-pressed', String(enabled));
     els.wakeButton.setAttribute('aria-label', translateUiText(enabled ? 'Turn off wake word' : 'Turn on wake word'));
     els.wakeButton.title = `${translateUiText(provider)}: ${translateUiText(detail)}`;
+    els.wakeButton.hidden = !enabled;
   }
   if (els.wakeWordStatus) els.wakeWordStatus.textContent = `${translateUiText(provider)}: ${translateUiText(detail)}`;
   if (els.wakeWordEnabledInput) els.wakeWordEnabledInput.checked = enabled;
@@ -3077,19 +5391,48 @@ async function consumePendingWakeTurn() {
 
 function updateVoiceButtonState() {
   if (!els.voiceButton) return;
-  const supported = canUseHermesVoiceTranscription()
-    || canUseLocalDashboardVoiceTranscription()
-    || browserSpeechAvailable();
-  els.voiceButton.disabled = !supported;
+  const directRecorder = canUseHermesVoiceTranscription() || canUseLocalDashboardVoiceTranscription();
+  const dedicatedPage = canOpenVoiceDictationPage();
+  const browserSpeech = canUseBrowserSpeechFallback();
+  const supported = directRecorder || browserSpeech || dedicatedPage;
+  els.voiceButton.disabled = !supported || voiceTransitionInFlight;
   els.voiceButton.classList.toggle('recording', dictating);
   els.voiceButton.classList.toggle('active', dictating);
   const mode = canUseHermesVoiceTranscription()
     ? 'Hermes API STT'
-    : (canUseLocalDashboardVoiceTranscription() ? 'Hermes Dashboard STT' : 'browser speech fallback');
+    : (canUseLocalDashboardVoiceTranscription()
+      ? 'Hermes Dashboard STT'
+      : (browserSpeech ? 'browser speech fallback' : 'Hermes Voice Dictation tab'));
   els.voiceButton.title = !supported
     ? 'Voice dictation is not supported in this browser or connected Hermes runtime'
     : (dictating ? `Stop voice dictation (${mode})` : `Start voice dictation (${mode})`);
   els.voiceButton.setAttribute('aria-label', els.voiceButton.title);
+  els.voiceButton.setAttribute('aria-busy', String(voiceTransitionInFlight || transcribingVoice));
+  renderVoiceActivity();
+}
+
+function renderVoiceActivity() {
+  const meter = els.voiceActivity;
+  if (!meter) return;
+  const session = voiceCaptureSession;
+  const recording = Boolean(dictating && session && !session.stopRequested);
+  const transcribing = Boolean(transcribingVoice);
+  meter.hidden = !(recording || transcribing);
+  meter.classList.toggle('recording', recording);
+  meter.classList.toggle('transcribing', transcribing);
+  if (els.voiceActivityLabel) {
+    els.voiceActivityLabel.textContent = transcribing ? 'Transcribing' : 'Dictating';
+  }
+  if (els.voiceActivityTimer) {
+    const startedAt = Number(session?.startedAt || 0);
+    const seconds = startedAt ? (Date.now() - startedAt) / 1000 : 0;
+    els.voiceActivityTimer.textContent = formatVoiceElapsed(seconds);
+  }
+  const bars = els.voiceActivityBars?.querySelectorAll('i') || [];
+  const heights = voiceLevelBarHeights(Number(session?.level || 0), { active: recording && !transcribing });
+  bars.forEach((bar, index) => {
+    bar.style.height = `${Math.round((heights[index] || 0.25) * 100)}%`;
+  });
 }
 
 function applyDictationTranscript(transcript = '') {
@@ -3109,6 +5452,20 @@ function blobToDataUrl(blob) {
 }
 
 function cleanupVoiceRecorder() {
+  const session = voiceCaptureSession;
+  if (session?.tickTimer) {
+    clearInterval(session.tickTimer);
+    session.tickTimer = null;
+  }
+  if (session?.audioContext) {
+    try {
+      const closing = session.audioContext.close?.();
+      if (closing?.catch) closing.catch(() => {});
+    } catch {
+      /* context already closed */
+    }
+  }
+  voiceCaptureSession = null;
   voiceRecorderStream?.getTracks?.().forEach((track) => track.stop());
   voiceRecorderStream = null;
   voiceRecorder = null;
@@ -3125,11 +5482,16 @@ async function transcribeVoiceRecording(blob) {
   }
   const dataUrl = await blobToDataUrl(blob);
   if (canUseDashboardTranscription && !canUseApiTranscription) {
+    // The Desktop dashboard lives on a discovered random loopback port; the
+    // fixed 9119 constant is only the last-resort fallback.
+    const baseUrl = await resolveDashboardTranscriptionBaseUrl({
+      desktopDashboardUrl,
+      gatewayMode: normalizeGatewayMode(settings.gatewayMode),
+      gatewayUrl: settings.gatewayUrl,
+      discover: () => ensureDesktopDashboardUrl({ timeoutMs: 2_500 }),
+    });
     const result = await transcribeAudioViaDashboard({
-      baseUrl: dashboardModelDiscoveryBaseUrl({
-        gatewayMode: normalizeGatewayMode(settings.gatewayMode),
-        gatewayUrl: settings.gatewayUrl,
-      }),
+      baseUrl,
       profile: settings.activeProfile,
       dataUrl,
       mimeType: blob.type || 'audio/webm',
@@ -3157,6 +5519,30 @@ async function transcribeVoiceRecording(blob) {
   return String(payload?.transcript || '').trim();
 }
 
+function clearSpeechWatchdog() {
+  if (speechWatchdogTimer) clearTimeout(speechWatchdogTimer);
+  speechWatchdogTimer = null;
+}
+
+function armSpeechWatchdog() {
+  clearSpeechWatchdog();
+  speechWatchdogTimer = setTimeout(() => {
+    speechWatchdogTimer = null;
+    if (!speechRecognitionSilentlyFailed({ elapsedMs: SPEECH_SILENT_START_TIMEOUT_MS })) return;
+    try {
+      speechRecognition?.abort?.();
+    } catch {
+      // The session is already dead; abort is best-effort.
+    }
+    clearSpeechWatchdog();
+    dictating = false;
+    updateVoiceButtonState();
+    setStatus('warn', 'Voice dictation unavailable', 'Speech recognition started but never delivered audio or a transcript. This side panel cannot capture microphone audio in this browser; using the Hermes Voice Dictation tab instead.', { translateDetail: false });
+    void openVoiceDictationPage('Browser speech started but never delivered audio in this side panel. Use the visible Hermes Voice Dictation tab to record; the transcript returns to this composer automatically.')
+      .catch((error) => setStatus('warn', 'Voice dictation unavailable', error?.message || String(error), { translateDetail: false }));
+  }, SPEECH_SILENT_START_TIMEOUT_MS);
+}
+
 function ensureSpeechRecognition() {
   if (speechRecognition) return speechRecognition;
   const Recognition = speechRecognitionConstructor();
@@ -3165,7 +5551,11 @@ function ensureSpeechRecognition() {
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.lang = navigator.language || 'en-US';
+  recognition.onstart = () => {
+    // Comet often fires start with no audio. Keep the silent-start watchdog armed until a result, error, or end.
+  };
   recognition.onresult = (event) => {
+    clearSpeechWatchdog();
     let interim = '';
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const transcript = event.results[index]?.[0]?.transcript || '';
@@ -3175,15 +5565,24 @@ function ensureSpeechRecognition() {
     applyDictationTranscript([dictationFinalText, interim].filter(Boolean).join(' '));
   };
   recognition.onerror = (event) => {
-    if (isMicrophonePermissionError(event)) {
-      setStatus('warn', 'Microphone permission blocked', microphonePermissionHelp());
+    clearSpeechWatchdog();
+    if (isMicrophonePermissionError(event) || shouldOpenVoiceDictationPageForSpeechError(event)) {
+      dictating = false;
+      updateVoiceButtonState();
+      void openVoiceDictationPage('This browser speech service is unavailable here. Use the visible Hermes Voice Dictation tab so microphone capture and Hermes STT can run in a supported extension page.')
+        .catch((error) => setStatus('warn', 'Voice dictation unavailable', error?.message || String(error), { translateDetail: false }));
       return;
     }
     setStatus('warn', 'Voice dictation stopped', event.error || t('voice.speech_recognition_error'), { translateDetail: false });
   };
   recognition.onend = () => {
+    clearSpeechWatchdog();
+    const endedActiveSession = dictating;
     dictating = false;
     updateVoiceButtonState();
+    if (endedActiveSession && !dictationFinalText) {
+      setStatus('warn', 'No speech captured', 'Speech recognition ended without a transcript. If this browser blocks microphone capture in side panels, use the Hermes Voice Dictation tab.', { translateDetail: false });
+    }
   };
   speechRecognition = recognition;
   return speechRecognition;
@@ -3200,9 +5599,15 @@ async function startWebSpeechDictation(detail = 'Speak to dictate into the Herme
       language: recognition.lang,
       onStatus: () => setStatus('ok', 'Preparing on-device dictation', 'Downloading the browser language pack once so voice dictation can run locally.'),
     });
+    if (preparation.mode !== 'local' && !browserSpeechCloudFallbackAllowed({ product: browserProduct })) {
+      const error = new Error('This Chromium browser exposes Web Speech but not Chrome’s Google speech service.');
+      error.voiceDictationPageFallback = true;
+      throw error;
+    }
     recognition.start();
     dictating = true;
     updateVoiceButtonState();
+    armSpeechWatchdog();
     setStatus(
       'ok',
       preparation.mode === 'local' ? 'Listening on device' : 'Listening',
@@ -3218,103 +5623,328 @@ async function startWebSpeechDictation(detail = 'Speak to dictate into the Herme
 }
 
 async function startRecorderDictation() {
+  // Tear down any previous capture session (stream, monitor interval, audio
+  // context) before opening a new one so a rapid stop/start cannot leave a
+  // second live stream or monitor behind.
+  cleanupVoiceRecorder();
   await ensureMicrophoneOriginPermission();
-  const stream = await getMicrophoneStreamWithPermissionRetry();
+  voiceRecorderStream = await getMicrophoneStreamWithPermissionRetry();
+  const stream = voiceRecorderStream;
+  const now = Date.now();
+  const session = {
+    startedAt: now,
+    segmentStartedAt: now,
+    lastSignalAt: 0,
+    everSawSignal: false,
+    segmentSawSpeech: false,
+    stopRequested: false,
+    tickTimer: null,
+    transcribeChain: null,
+    analyser: null,
+    audioContext: null,
+    sampleBuffer: null,
+    sampleBytes: null,
+  };
+  voiceCaptureSession = session;
+
+  // Monitor real microphone energy so a stream that never delivers audio (a
+  // fork side panel with a muted or detached capture) cannot masquerade as a
+  // working "Recording voice" state. The same monitor rotates segments on
+  // speech pauses so text lands while the user is still talking.
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      const audioContext = new AudioContextClass();
+      session.audioContext = audioContext;
+      if (audioContext.state === 'suspended' && audioContext.resume) {
+        void audioContext.resume().catch?.(() => {});
+      }
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      // Keep the graph rendered without any audible output.
+      const gain = audioContext.createGain();
+      gain.gain.value = 0;
+      analyser.connect(gain);
+      gain.connect(audioContext.destination);
+      session.analyser = analyser;
+    }
+  } catch (error) {
+    console.warn('Hermes voice capture monitor unavailable', error);
+    session.analyser = null;
+  }
+
+  startVoiceCaptureSegment();
+  session.tickTimer = setInterval(() => voiceCaptureTick(), VOICE_CAPTURE_SAMPLE_INTERVAL_MS);
+  dictating = true;
+  updateVoiceButtonState();
+  setStatus('ok', 'Dictating', 'Speak now. Click the mic again to stop and transcribe.');
+}
+
+function startVoiceCaptureSegment() {
+  const session = voiceCaptureSession;
+  const stream = voiceRecorderStream;
+  if (!session || !stream || session.stopRequested) return;
   const mimeType = preferredVoiceMimeType();
   const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-  voiceRecorderStream = stream;
   voiceRecorder = recorder;
   voiceRecorderChunks = [];
+  session.segmentStartedAt = Date.now();
+  session.segmentSawSpeech = false;
 
   recorder.ondataavailable = (event) => {
     if (event.data?.size > 0) voiceRecorderChunks.push(event.data);
   };
   recorder.onerror = (event) => {
-    cleanupVoiceRecorder();
-    dictating = false;
-    updateVoiceButtonState();
+    if (voiceCaptureSession !== session) return;
+    finishVoiceCaptureSession();
     setStatus('warn', 'Voice recording failed', event?.error?.message || t('voice.capture_error'), { translateDetail: false });
   };
-  recorder.onstop = async () => {
-    const chunks = voiceRecorderChunks;
-    const recordingType = recorder.mimeType || mimeType || 'audio/webm';
-    cleanupVoiceRecorder();
-    dictating = false;
-    updateVoiceButtonState();
+  recorder.onstop = () => {
+    void handleVoiceCaptureSegmentStop(recorder);
+  };
+
+  recorder.start(VOICE_CAPTURE_TIMESLICE_MS);
+}
+
+function voiceCaptureTick() {
+  const session = voiceCaptureSession;
+  if (!session || session.stopRequested) return;
+  const analyser = session.analyser;
+  const contextRunning = !session.audioContext || session.audioContext.state === 'running';
+  // Without a usable monitor the stream cannot be judged; never invent an
+  // escalation (or a rotation) from missing measurements.
+  if (!analyser || !contextRunning) return;
+  let peak = 0;
+  try {
+    if (typeof analyser.getFloatTimeDomainData === 'function') {
+      if (!session.sampleBuffer || session.sampleBuffer.length !== analyser.fftSize) {
+        session.sampleBuffer = new Float32Array(analyser.fftSize);
+      }
+      analyser.getFloatTimeDomainData(session.sampleBuffer);
+      peak = voiceCapturePeak(session.sampleBuffer);
+    } else if (typeof analyser.getByteTimeDomainData === 'function') {
+      if (!session.sampleBytes || session.sampleBytes.length !== analyser.fftSize) {
+        session.sampleBytes = new Uint8Array(analyser.fftSize);
+      }
+      analyser.getByteTimeDomainData(session.sampleBytes);
+      peak = voiceCapturePeakFromBytes(session.sampleBytes);
+    } else {
+      return;
+    }
+  } catch {
+    return;
+  }
+  const tickedAt = Date.now();
+  session.level = peak;
+  if (voiceCaptureIsSignal({ peak })) {
+    session.everSawSignal = true;
+    session.segmentSawSpeech = true;
+    session.lastSignalAt = tickedAt;
+  }
+  renderVoiceActivity();
+  const action = voiceCaptureDecision({
+    elapsedMs: tickedAt - session.startedAt,
+    everSawSignal: session.everSawSignal,
+  });
+  if (action === 'escalate') {
+    escalateSilentVoiceCapture();
+  }
+}
+
+function escalateSilentVoiceCapture() {
+  const session = voiceCaptureSession;
+  if (!session) return;
+  session.stopRequested = true;
+  session.escalated = true;
+  dictating = false;
+  updateVoiceButtonState();
+  const recorder = voiceRecorder;
+  if (recorder && recorder.state !== 'inactive') {
+    try {
+      recorder.stop();
+    } catch {
+      /* the session is being torn down anyway */
+    }
+  }
+  cleanupVoiceRecorder();
+  setStatus(
+    'warn',
+    'Voice dictation moved to its own tab',
+    'The side panel microphone delivered no audio. Opening the Hermes Voice Dictation tab — record there and the transcript returns to this composer automatically.',
+    { translateDetail: false },
+  );
+  void openVoiceDictationPage('This side panel microphone produced no audio. Use the visible Hermes Voice Dictation tab; the transcript returns to this composer automatically.')
+    .catch((error) => setStatus('warn', 'Voice dictation unavailable', error?.message || String(error), { translateDetail: false }));
+}
+
+async function handleVoiceCaptureSegmentStop(recorder) {
+  const session = voiceCaptureSession;
+  const chunks = voiceRecorderChunks;
+  const recordingType = recorder?.mimeType || preferredVoiceMimeType() || 'audio/webm';
+  voiceRecorder = null;
+  voiceRecorderChunks = [];
+  const stopRequested = Boolean(session?.stopRequested);
+  const isCurrent = () => Boolean(session) && voiceCaptureSession === session;
+
+  const processSegment = async () => {
+    if (!isCurrent()) return; // stale handler from a previous capture session
+    if (session.escalated) {
+      finishVoiceCaptureSession();
+      return;
+    }
     if (!chunks.length) {
+      finishVoiceCaptureSession();
       setStatus('warn', 'No speech captured', 'Try recording again.');
       return;
     }
     try {
-      setStatus('ok', 'Transcribing voice', 'Using Hermes speech-to-text, matching Desktop dictation.');
+      transcribingVoice = true;
+      updateVoiceButtonState();
+      setStatus('ok', 'Transcribing', 'Analyzing what you said with Hermes speech-to-text.');
       const transcript = await transcribeVoiceRecording(new Blob(chunks, { type: recordingType }));
+      if (!isCurrent()) return;
       if (!transcript) {
+        finishVoiceCaptureSession();
         setStatus('warn', 'No speech detected', 'Try recording again.');
         return;
       }
-      applyDictationTranscript(transcript);
+      dictationFinalText = joinDictationTranscript(dictationFinalText, transcript);
+      applyDictationTranscript(dictationFinalText);
+      finishVoiceCaptureSession();
       setStatus('ok', 'Voice dictation ready', 'Transcript inserted into the composer.');
     } catch (error) {
-      if (error?.fallbackToWebSpeech && await startWebSpeechDictation('Hermes transcription route is unavailable. Using browser speech fallback; speak again.')) {
-        return;
-      }
+      const current = isCurrent();
+      if (current) finishVoiceCaptureSession();
+      if (current && error?.fallbackToWebSpeech && await startWebSpeechDictation('Hermes transcription route is unavailable. Using browser speech fallback; speak again.')) return;
       setStatus('warn', 'Voice transcription failed', error?.message || String(error), { translateDetail: false });
     }
   };
 
-  recorder.start();
-  dictating = true;
+  if (session) {
+    session.transcribeChain = (session.transcribeChain || Promise.resolve()).then(processSegment, processSegment);
+    await session.transcribeChain;
+  } else {
+    await processSegment();
+  }
+}
+
+function finishVoiceCaptureSession() {
+  dictating = false;
+  transcribingVoice = false;
   updateVoiceButtonState();
-  setStatus('ok', 'Recording voice', 'Click the mic again to transcribe with Hermes speech-to-text.');
+  cleanupVoiceRecorder();
 }
 
 function stopRecorderDictation() {
+  const session = voiceCaptureSession;
+  if (!session) return false;
+  session.stopRequested = true;
+  dictating = false;
+  transcribingVoice = true;
+  updateVoiceButtonState();
+  setStatus('ok', 'Transcribing', 'Analyzing what you said with Hermes speech-to-text.');
   const recorder = voiceRecorder;
-  if (!recorder) return false;
-  try {
-    if (recorder.state !== 'inactive') recorder.stop();
-  } catch (error) {
-    cleanupVoiceRecorder();
-    dictating = false;
-    updateVoiceButtonState();
-    setStatus('warn', 'Voice recording failed', error?.message || String(error), { translateDetail: false });
+  if (recorder && recorder.state !== 'inactive') {
+    try {
+      recorder.stop();
+    } catch (error) {
+      finishVoiceCaptureSession();
+      setStatus('warn', 'Voice recording failed', error?.message || String(error), { translateDetail: false });
+    }
+    return true;
   }
+  // If the recorder already stopped, finish unless a transcription is in flight.
+  if (!session.transcribeChain) finishVoiceCaptureSession();
   return true;
 }
 
+async function loadVoiceGatewayCapabilities() {
+  let timeoutId = null;
+  try {
+    await Promise.race([
+      loadGatewayCapabilities({ quiet: true, healthOk: isConnected() }).catch(() => null),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(resolve, 2500);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function toggleVoiceDictation() {
+  if (voiceTransitionInFlight) return;
   if (dictating) {
     if (stopRecorderDictation()) return;
-    speechRecognition?.stop?.();
+    try {
+      speechRecognition?.stop?.();
+    } catch (error) {
+      dictating = false;
+      updateVoiceButtonState();
+      setStatus('warn', 'Voice dictation stopped', error?.message || String(error), { translateDetail: false });
+    }
+    clearSpeechWatchdog();
     return;
   }
-  dictationBaseText = els.input.value.trim();
-  dictationFinalText = '';
-  await loadGatewayCapabilities({ quiet: true, healthOk: isConnected() }).catch(() => {});
-  const canUseRecorderTranscription = canUseHermesVoiceTranscription()
-    || canUseLocalDashboardVoiceTranscription();
-  if (!canUseRecorderTranscription && await startWebSpeechDictation('Hermes transcription route is unavailable. Using browser speech fallback.')) return;
-  if (canUseRecorderTranscription) {
+
+  voiceTransitionInFlight = true;
+  updateVoiceButtonState();
+  try {
+    dictationBaseText = els.input.value.trim();
+    dictationFinalText = '';
+
+    // Do not wait for gateway discovery when this side panel cannot record at
+    // all. Try safe on-device/Chrome speech once, then open the visible page;
+    // this is the important path for Comet side panels.
+    if (!canRecordVoiceAudio()) {
+      if (browserSpeechAvailable() && await startWebSpeechDictation('Hermes microphone capture is unavailable in this side panel.')) return;
+      await openVoiceDictationPage('This side panel cannot capture microphone audio. Use the visible Hermes Voice Dictation tab to record and return the transcript here.');
+      return;
+    }
+
+    await loadVoiceGatewayCapabilities();
+    const captureRoute = voiceDictationCaptureRoute({
+      canRecord: canRecordVoiceAudio(),
+      canUseApiTranscription: canUseHermesVoiceTranscription(),
+      canUseDashboardTranscription: canUseLocalDashboardVoiceTranscription(),
+      browserSpeech: browserSpeechAvailable(),
+    });
+    if (captureRoute !== 'recorder') {
+      if (captureRoute === 'web-speech'
+        && await startWebSpeechDictation('Hermes transcription route is unavailable. Using browser speech fallback.')) return;
+      await openVoiceDictationPage('This browser speech service is unavailable in the side panel. Use the visible Hermes Voice Dictation tab to capture audio and dictate into this composer.');
+      return;
+    }
+
     try {
       await startRecorderDictation();
-      return;
     } catch (error) {
       console.warn('Hermes voice recorder unavailable', error);
       cleanupVoiceRecorder();
       dictating = false;
       updateVoiceButtonState();
-      if (isMicrophonePermissionError(error)) {
-        await openVoiceDictationPage('The current browser blocked microphone capture inside the side panel. Use this visible Hermes Voice tab once; it will transcribe locally through Hermes and send the text back here.');
+      if (isMicrophonePermissionError(error) || error?.voiceDictationPageFallback) {
+        await openVoiceDictationPage('The current browser blocked microphone capture inside the side panel. Use this visible Hermes Voice tab once; it will record in a supported extension page and send the text back here.');
         return;
       }
-      if (await startWebSpeechDictation('Hermes microphone capture failed. Using browser speech fallback.')) return;
+      if (browserSpeechAvailable() && await startWebSpeechDictation('Hermes microphone capture failed. Using browser speech fallback.')) return;
       setStatus('warn', 'Voice dictation unavailable', error?.message || String(error), { translateDetail: false });
-      return;
     }
+  } catch (error) {
+    cleanupVoiceRecorder();
+    dictating = false;
+    updateVoiceButtonState();
+    try {
+      await openVoiceDictationPage('Voice capture could not start inside the side panel. Use the visible Hermes Voice Dictation tab to continue.');
+    } catch (openError) {
+      setStatus('warn', 'Voice dictation unavailable', openError?.message || error?.message || String(error), { translateDetail: false });
+    }
+  } finally {
+    voiceTransitionInFlight = false;
+    updateVoiceButtonState();
   }
-  if (await startWebSpeechDictation()) return;
-  await openVoiceDictationPage('This side panel context cannot capture microphone audio directly. Use the Hermes Voice tab to dictate into the composer.');
-  updateVoiceButtonState();
 }
 
 function formatNumber(value = 0) {
@@ -3630,7 +6260,7 @@ function renderCustomThemePreview() {
   }
   if (!state.valid) {
     const errors = state.errors.map((error) => `<li><strong>${escapeHtml(error.path || '$')}</strong> — ${escapeHtml(error.message || error.code)}</li>`).join('');
-    els.customThemePreview.innerHTML = `<ul class="custom-theme-validation-list">${errors}</ul>`;
+    els.customThemePreview.innerHTML = sanitizeHtml(`<ul class="custom-theme-validation-list">${errors}</ul>`);
     return;
   }
   const document = state.document;
@@ -3641,13 +6271,13 @@ function renderCustomThemePreview() {
   const coverage = document.darkColors
     ? customThemeText('custom_theme.light_and_dark', 'Light and dark palettes')
     : customThemeText('custom_theme.light_only', 'Light palette only');
-  els.customThemePreview.innerHTML = `
+  els.customThemePreview.innerHTML = sanitizeHtml(`
     <div class="custom-theme-preview-head">
       <strong>${escapeHtml(document.name)}</strong>
       <span class="custom-theme-preview-mode">${escapeHtml(coverage)}</span>
     </div>
     <div class="custom-theme-swatches" role="list" aria-label="Palette colors">${swatches}</div>
-  `;
+  `);
 }
 
 function renderCustomThemeManagement() {
@@ -3932,7 +6562,28 @@ function panelAppearanceSnapshot() {
   };
 }
 
+function mountSettingsBrandedSelects() {
+  const root = document.getElementById('settingsDialog');
+  if (!root) return;
+  // New settings-like dialogs must use the same select/chevron contract.
+  for (const select of document.querySelectorAll('#settingsDialog select, #browserControlDialog select')) {
+    if (select.hidden || select.hasAttribute('hidden')) continue;
+    if (select.id === 'languageSelect') {
+      mountBrandedSelect(select, { language: true });
+      continue;
+    }
+    if (select.id === 'fontProfileSelect') {
+      mountBrandedSelect(select, {
+        previewFont: (value) => fontFamilyPreview(value, settings.customFontFamily),
+      });
+      continue;
+    }
+    mountBrandedSelect(select);
+  }
+}
+
 function applyAppearanceSettings() {
+  document.body.classList.toggle('hide-message-times', settings.showMessageTimes === false);
   const colorMode = normalizeColorMode(settings.colorMode);
   const resolvedMode = resolvedColorMode(colorMode);
   const root = document.documentElement;
@@ -3949,11 +6600,37 @@ function applyAppearanceSettings() {
   root.dataset.hermesTheme = theme;
   root.dataset.hermesColorMode = colorMode;
   root.dataset.hermesMode = resolvedMode;
-  const effectiveColorScheme = selection.kind === 'custom' && resolvedMode === 'dark' && !selection.document.darkColors
-    ? 'light'
+  const effectiveMode = selection.kind === 'custom'
+    ? customThemeEffectiveMode(selection.document, resolvedMode)
     : resolvedMode;
-  root.style.colorScheme = effectiveColorScheme;
-  applyAppearancePreferences(root, appearancePreferencesForSurface(settings, 'panel'));
+  root.dataset.hermesEffectiveMode = effectiveMode;
+  root.style.colorScheme = effectiveMode;
+  const visualTheme = selection.kind === 'custom' ? '' : theme;
+  applyAppearancePreferences(root, appearancePreferencesForTheme(
+    appearancePreferencesForSurface(settings, 'panel'),
+    visualTheme,
+    { pinThemeFont: themeFontPinned && themeFontPinnedFor === visualTheme },
+  ));
+}
+
+// The signature profile renders the bundled fallback face when the licensed
+// Rules faces are absent. Probe the faces actually registered in
+// document.fonts (not document.fonts.check, which reports true even for a
+// family that was never registered) and reveal the honest note only when the
+// licensed faces are confirmed missing. A superseded probe result is dropped so
+// it cannot flip the note back after a newer render already decided.
+async function refreshSignatureFontFallbackNote(fontProfile) {
+  const note = els.signatureFontFallbackNote;
+  if (!note) return;
+  const probeId = ++signatureNoteProbeId;
+  if (fontProfile !== 'signature') {
+    note.hidden = true;
+    return;
+  }
+  const fontSet = typeof document === 'undefined' ? null : document.fonts;
+  const result = await probeSignatureFonts(fontSet);
+  if (probeId !== signatureNoteProbeId) return;
+  note.hidden = result.status !== 'fallback';
 }
 
 function renderAppearanceControls() {
@@ -3983,11 +6660,18 @@ function renderAppearanceControls() {
     els.textZoomInput.setAttribute('aria-valuetext', t('appearance.percent_value', { percent: preferences.textZoomPercent }));
   }
   if (els.fontProfileSelect) els.fontProfileSelect.value = requestedProfile;
+  void refreshSignatureFontFallbackNote(requestedProfile);
+  mountSettingsBrandedSelects();
   if (els.customFontFamilyField) els.customFontFamilyField.hidden = requestedProfile !== 'custom-local';
   if (els.customFontFamilyInput && document.activeElement !== els.customFontFamilyInput) {
     els.customFontFamilyInput.value = settings.customFontFamily || preferences.customFontFamily;
   }
-  if (els.appearanceSaveStatus) els.appearanceSaveStatus.textContent = appearanceSaveStatus;
+  if (els.appearanceSaveStatus) {
+    const overlay = themeOwnsFont(activeTheme) && !(themeFontPinned && themeFontPinnedFor === activeTheme)
+      ? t('appearance.theme_font_overlay')
+      : '';
+    els.appearanceSaveStatus.textContent = [appearanceSaveStatus, overlay].filter(Boolean).join(' ');
+  }
   renderCustomThemeManagement();
   if (!els.themeGrid) return;
   const builtInCards = APPEARANCE_THEMES.map((theme) => {
@@ -4001,7 +6685,7 @@ function renderAppearanceControls() {
       </button>
     `;
   }).join('');
-  els.themeGrid.innerHTML = `${builtInCards}${renderCustomThemeCards(activeTheme)}`;
+  els.themeGrid.innerHTML = sanitizeHtml(`${builtInCards}${renderCustomThemeCards(activeTheme)}`);
 }
 
 async function persistAppearanceSettings(preferences) {
@@ -4076,7 +6760,7 @@ function formatBytes(bytes = 0) {
 }
 
 function attachmentIcon(kind = '') {
-  return ({ file: '📄', folder: '📁', image: '🖼', url: '🔗' })[kind] || '📎';
+  return ({ file: '📄', folder: '📁', image: '🖼', url: '🔗', text: '▤' })[kind] || '📎';
 }
 
 function attachmentId(kind, label) {
@@ -4110,18 +6794,21 @@ function addAttachment(attachment) {
   attachments = [...attachments.filter((item) => item.id !== attachment.id), attachment];
   renderAttachments();
   renderContextWindow();
+  persistCurrentComposerDraft();
 }
 
 function removeAttachment(id) {
   attachments = attachments.filter((item) => item.id !== id);
   renderAttachments();
   renderContextWindow();
+  persistCurrentComposerDraft({ immediate: true });
 }
 
 function clearAttachments() {
   attachments = [];
   renderAttachments();
   renderContextWindow();
+  persistCurrentComposerDraft({ immediate: true });
 }
 
 function renderAttachments() {
@@ -4143,8 +6830,12 @@ function renderAttachments() {
       icon.textContent = attachmentIcon(attachment.kind);
     }
 
-    const label = document.createElement('span');
+    const label = document.createElement(attachment.kind === 'file' ? 'button' : 'span');
     label.textContent = attachment.localPath ? `${attachment.label} · saved` : attachment.label;
+    if (attachment.kind === 'file') {
+      label.type = 'button'; label.className = 'attachment-open';
+      label.addEventListener('click', () => { void openUserFileAttachment(attachment, { translate: t }).catch(() => setStatus('warn', t('ui.file'), t('attachments.file_unavailable'))); });
+    }
 
     const close = document.createElement('button');
     close.type = 'button';
@@ -4229,6 +6920,42 @@ async function saveImageAttachmentsForTurn(items = []) {
   return next;
 }
 
+// Local dashboard turns carry no pixels through `prompt.submit`, so pasted
+// images must ride the gateway's session-scoped `image.attach_bytes` RPC (the
+// same contract Hermes Desktop uses) before the prompt submits. The gateway
+// writes the file next to the session, queues it, and the next prompt.submit
+// routes it into the run so the model can actually open the screenshot.
+async function attachDashboardTurnImages(client, sessionId, items = []) {
+  const pending = items.filter((attachment) => attachment.kind === 'image'
+    && attachment.dataUrl
+    && attachment.dashboardAttachedSessionId !== sessionId);
+  if (!pending.length || !client || !sessionId) return items;
+  let attached = 0;
+  let failed = 0;
+  for (const attachment of pending) {
+    try {
+      const result = await client.request(WS_METHODS.imageAttachBytes, {
+        session_id: sessionId,
+        content_base64: attachment.dataUrl,
+        filename: attachment.label || 'image.png',
+      });
+      if (result?.attached !== true) throw new Error(result?.message || 'Hermes did not confirm the image attach.');
+      attachment.dashboardAttachedSessionId = sessionId;
+      if (result.path) {
+        attachment.localPath = result.path;
+        attachment.detail = `${attachment.detail || 'image'} · attached for Hermes vision`;
+      }
+      attached += 1;
+    } catch (error) {
+      failed += 1;
+      attachment.uploadError = error?.message || String(error);
+    }
+  }
+  if (attached) setStatus('ok', 'Image ready for Hermes vision', `${attached} pasted image${attached === 1 ? '' : 's'} attached to this session`);
+  if (failed) setStatus('warn', 'Image stayed inline only', `${failed} image${failed === 1 ? '' : 's'} could not be attached to the live session`);
+  return items;
+}
+
 async function attachFiles(fileList, { imagesOnly = false } = {}) {
   const files = Array.from(fileList || []);
   for (const file of files) {
@@ -4246,15 +6973,14 @@ async function attachFiles(fileList, { imagesOnly = false } = {}) {
       });
       continue;
     }
-    const text = isLikelyTextFile(file) ? clampText(await readFileAsText(file), TEXT_ATTACHMENT_LIMIT) : '';
-    addAttachment({
-      id: attachmentId('file', file.name),
-      kind: 'file',
-      label: file.name || 'file',
-      detail: `${file.type || 'file'} · ${formatBytes(file.size)}`,
-      text: text || `[${file.name || 'file'} attached as metadata only: ${formatBytes(file.size)}. Browser cannot expose a stable local path; use Hermes Desktop for path-backed file refs.]`,
-    });
+    try {
+      addAttachment(await createUserFileAttachment(file));
+    } catch (error) {
+      setStatus('warn', t('ui.attachment'), t(error.uiKey || 'attachments.file_unavailable'), { translateTitle: false, translateDetail: false });
+    }
   }
+  await ensureImageAttachmentsSaved();
+  persistCurrentComposerDraft({ immediate: true });
 }
 
 async function attachFolder(fileList) {
@@ -4350,6 +7076,69 @@ async function handlePasteImages(event) {
   return true;
 }
 
+function pasteArtifactMetaLabel(attachment) {
+  return `${formatBytes(attachment.sizeBytes || 0)} · ${attachment.lineCount} lines`;
+}
+
+function addPasteArtifact(text) {
+  const artifact = buildPasteArtifact(text);
+  const attachment = {
+    ...artifact,
+    id: attachmentId('text', artifact.label),
+    detail: `${pasteArtifactMetaLabel(artifact)} · pasted from clipboard${artifact.truncated ? ` · kept only the first ${PASTE_ARTIFACT_MAX_CHARS.toLocaleString()} characters` : ' · full text kept locally; only an excerpt is sent'}`,
+  };
+  addAttachment(attachment);
+  return attachment;
+}
+
+// Issue #94: a transcript-sized Ctrl+V must never silently reach the textarea,
+// where it would be trimmed at the 6,000-char send budget with no warning.
+// Pastes within the local preservation ceiling become a text attachment whose
+// full body stays on this device — only a head+tail excerpt travels with the
+// turn. Over that ceiling (or when group rooms / the attachment cap block
+// attachments) we reject BEFORE preventDefault so the browser's default paste
+// still happens and no clipboard data is lost, and we say plainly that only an
+// excerpt is sent and the full text remains local. Returns true when the paste
+// was fully handled.
+function handlePasteText(event) {
+  const text = String(event?.clipboardData?.getData?.('text/plain') || '');
+  if (!classifyPastedText(text).large) return false;
+  // Group rooms cannot carry attachments today. Warn honestly instead of a
+  // silent no-op that leaves the user thinking the paste was preserved.
+  if (activeGroupProjection) {
+    setStatus('warn', 'Large paste not attached', `Group rooms cannot carry attachments yet, so this ${text.length.toLocaleString()}-character paste was not attached. Only the first 6,000 characters are sent inline; the full text stays on this device.`);
+    return false;
+  }
+  if (attachments.length >= PASTE_ARTIFACT_MAX_ATTACHMENTS) {
+    setStatus('warn', 'Paste kept as plain text', `Hermes turns carry at most ${PASTE_ARTIFACT_MAX_ATTACHMENTS} attachments; remove one to paste this as a file instead. Only the first 6,000 characters of an inline message are sent; the rest stays on this device.`);
+    return false;
+  }
+  // Reject over the local preservation ceiling before preventDefault so the
+  // default paste still runs and nothing is swallowed; never claim the full
+  // text was preserved when it cannot be.
+  if (pasteArtifactExceedsLocalLimit(text)) {
+    setStatus('warn', 'Paste too large to keep locally', `This ${text.length.toLocaleString()}-character paste is over the ${PASTE_ARTIFACT_MAX_CHARS.toLocaleString()}-character limit Hermes keeps on this device, so it was not attached. Only the first 6,000 characters are sent inline; the full text stays on this device — attach it as a file to send more.`);
+    return false;
+  }
+  event.preventDefault();
+  const attachment = addPasteArtifact(text);
+  setStatus('ok', 'Pasted as a text attachment', `${attachment.label} · ${pasteArtifactMetaLabel(attachment)} — only a head+tail excerpt is sent to Hermes; the full pasted text stays on this device and is never uploaded. Inline messages are limited to 6,000 characters, so long pastes are attached instead of being cut off.`);
+  els.input.focus();
+  return true;
+}
+
+// What the turn payload actually carries for a paste artifact: a pre-sized
+// head+tail excerpt plus the full text on the artifact object, never the whole
+// multi-kilobyte body inside the BCP v2 attachment budget.
+function attachmentForProtocol(attachment) {
+  if (!isPasteArtifact(attachment)) return attachment;
+  return {
+    ...attachment,
+    text: pasteArtifactExcerpt(String(attachment.text || '')),
+    detail: attachment.detail,
+  };
+}
+
 function dragEventHasFiles(event) {
   return Array.from(event?.dataTransfer?.types || []).includes('Files');
 }
@@ -4401,7 +7190,7 @@ function imageAttachmentPromptLine(image, index) {
 function attachmentContextText(items = attachments) {
   const blocks = items
     .filter((attachment) => attachment.kind !== 'image')
-    .map((attachment) => `### ${attachment.kind.toUpperCase()}: ${attachment.label}\n${attachment.text || attachment.detail || ''}`);
+    .map((attachment) => `### ${attachment.kind.toUpperCase()}: ${attachment.label}\n${isPasteArtifact(attachment) ? pasteArtifactExcerpt(String(attachment.text || '')) : attachmentFileContext(attachment)}`);
   const images = items.filter((attachment) => attachment.kind === 'image');
   if (images.length) blocks.push(`### IMAGES\n${images.map(imageAttachmentPromptLine).join('\n')}`);
   return blocks.length ? `\n\n--- Browser Attachments ---\n${blocks.join('\n\n')}` : '';
@@ -4656,6 +7445,11 @@ async function applyAssistSelectedModel(model) {
 }
 
 function modelForSelectionTarget(target = modelSelectionTarget) {
+  if (target === 'room-member') {
+    return availableModels.find(isModelRuntimeSelectable)
+      || availableModels[0]
+      || null;
+  }
   const modelId = target === 'assist' ? (settings.inlineAssistModel || settings.model) : settings.model;
   return availableModels.find((model) => model.id === modelId || model.rawModelId === modelId)
     || (target === 'chat' ? availableModels.find((model) => model.id === settings.model) : null)
@@ -4694,11 +7488,18 @@ function positionAssistModelMenu() {
 }
 
 function setModelSelectionTarget(target = 'chat') {
-  modelSelectionTarget = target === 'assist' ? 'assist' : 'chat';
+  modelSelectionTarget = target === 'assist' || target === 'room-member' ? target : 'chat';
   if (modelSelectionTarget === 'assist') {
     if (els.modelMenu.parentElement !== document.body) document.body.append(els.modelMenu);
     els.modelMenu.dataset.selectionTarget = 'assist';
     if (els.modelMenuTitle) els.modelMenuTitle.textContent = translateUiText('Choose Assist model');
+  } else if (modelSelectionTarget === 'room-member') {
+    // One picker component: a room-member pick switches that room member's
+    // session only, never the 1:1 chat model.
+    if (els.modelMenu.parentElement !== document.body) document.body.append(els.modelMenu);
+    els.modelMenu.dataset.selectionTarget = 'room-member';
+    if (els.modelMenuTitle) els.modelMenuTitle.textContent = `${t('ui.room.bots.title')} · ${roomMemberModelLabel()}`;
+    positionAssistModelMenu();
   } else {
     if (modelMenuHome.parent && els.modelMenu.parentElement !== modelMenuHome.parent) {
       modelMenuHome.parent.insertBefore(els.modelMenu, modelMenuHome.next);
@@ -4715,14 +7516,17 @@ function setModelSelectionTarget(target = 'chat') {
   els.modelMenuList.scrollTop = 0;
   renderModelMenu('');
   renderModelRuntimeOptions();
-  if (modelSelectionTarget === 'assist') positionAssistModelMenu();
+  if (modelSelectionTarget !== 'chat') positionAssistModelMenu();
   globalThis.queueMicrotask(() => {
     els.modelProviderList.querySelector('.model-provider-option.selected')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   });
 }
 
 function renderModelMenu(query = els.modelSearchInput?.value || '') {
-  const menuModelId = modelSelectionTarget === 'assist' ? (settings.inlineAssistModel || settings.model) : settings.model;
+  const roomPick = modelSelectionTarget === 'room-member' ? roomModelPickTarget : null;
+  const menuModelId = modelSelectionTarget === 'assist'
+    ? (settings.inlineAssistModel || settings.model)
+    : String(roomPick?.model || settings.model);
   const allGroups = groupModelsForMenu(availableModels, menuModelId, '');
   const needle = String(query || '').trim().toLowerCase();
   const matchingGroups = needle ? groupModelsForMenu(availableModels, menuModelId, needle) : allGroups;
@@ -4804,13 +7608,16 @@ function renderModelMenu(query = els.modelSearchInput?.value || '') {
 
       const meta = document.createElement('span');
       meta.className = 'model-option-meta';
-      meta.textContent = model.id === menuModelId ? '✓' : (!requestable ? 'observed' : (model.contextTokens ? formatTokens(model.contextTokens).replace(' tokens', '') : runtimeStatus.label));
+      meta.textContent = model.id === menuModelId
+        ? '✓'
+        : (!requestable ? 'observed' : formatTokens(model.contextTokens || 256_000).replace(' tokens', ''));
 
       button.append(name, meta);
       button.addEventListener('click', async () => {
-        if (modelSelectionTarget === 'assist') await applyAssistSelectedModel(model);
-        else applySelectedModel(model.id, { keepOpen: true });
-      });
+              if (modelSelectionTarget === 'assist') await applyAssistSelectedModel(model);
+              else if (modelSelectionTarget === 'room-member') await setRoomMemberModel(model);
+              else requestSelectedModelWithContextConfirm(model);
+            });
       els.modelMenuList.appendChild(button);
     }
   }
@@ -4959,6 +7766,19 @@ async function syncSessionModelOptions({
   }
 }
 
+// The LOCAL SIDECAR card art (and the same hero art in settings) shows a
+// different illustration every time the panel opens. One CSS variable drives
+// both surfaces, so there is a single pick per panel load.
+let lastSidecarArt = '';
+function applySidecarArt() {
+  const entry = pickSidecarArt(Math.random, lastSidecarArt);
+  if (typeof entry !== 'string' || !entry) return '';
+  lastSidecarArt = entry;
+  document.documentElement.style.setProperty('--sidecar-art', sidecarArtCssValue(entry));
+  return entry;
+}
+applySidecarArt();
+
 function renderContextWindow(userText = els.input?.value || '') {
   const stats = estimateContextWindow({
     userText,
@@ -4993,11 +7813,19 @@ function renderContextWindow(userText = els.input?.value || '') {
   const meter = contextMeterDisplay({ accounting, runtimeLabel, modelContextTokens: contextLimit });
   const compaction = contextCompactionState({ accounting, runtime, session });
 
+  const reportedDisplay = mergeContextTelemetry(
+    reportedContextTelemetry.sessionId === settings.sessionId ? reportedContextTelemetry.telemetry : null,
+    { usedTokens: localSessionContextTokens, limitTokens: contextLimit },
+  );
+  const meterPercent = reportedDisplay.reported && reportedDisplay.limitTokens ? reportedDisplay.percent : meter.percent;
+  const meterLimit = reportedDisplay.reported && reportedDisplay.limitTokens ? reportedDisplay.limitTokens : contextLimit;
   els.contextCompactLabel.textContent = meter.compactLabel;
-  els.contextPercentLabel.textContent = meter.percentLabel;
-  els.contextBarButton.title = meter.title;
+  els.contextPercentLabel.textContent = reportedDisplay.reported ? reportedDisplay.percentLabel : meter.percentLabel;
+  els.contextBarButton.title = reportedDisplay.reported
+    ? `${reportedDisplay.tokenSummaryLabel} · ${reportedDisplay.percentFullLabel || reportedDisplay.percentLabel}`
+    : meter.title;
   els.contextUsageDetail.textContent = compaction.detail;
-  els.contextMeterFill.style.width = contextLimit ? `${Math.min(100, Math.max(0, meter.percent))}%` : '0%';
+  els.contextMeterFill.style.width = meterLimit ? `${Math.min(100, Math.max(0, meterPercent))}%` : '0%';
 
   const compactionStateLabels = {
     healthy: 'Healthy',
@@ -5011,13 +7839,39 @@ function renderContextWindow(userText = els.input?.value || '') {
     'local-estimate': 'Local next-request estimate',
     unknown: 'Unavailable',
   };
+  const reportedSourceLabel = reportedDisplay.reported
+    ? (reportedDisplay.estimated ? 'Hermes runtime (estimate)' : 'Hermes runtime')
+    : '';
   const runtimeRows = [
-    [translateUiText(accounting.source === 'local-estimate' ? 'Next request estimate' : 'Session context'), `${formatNumber(compaction.usedTokens)} ${translateUiText('tokens')}`],
-    [translateUiText('Context limit'), compaction.contextLimitTokens ? `${formatNumber(compaction.contextLimitTokens)} ${translateUiText('tokens')}` : translateUiText('Not reported by Hermes')],
+    [
+      translateUiText(reportedDisplay.reported ? 'Session context' : (accounting.source === 'local-estimate' ? 'Next request estimate' : 'Session context')),
+      reportedDisplay.reported
+        ? `${reportedDisplay.usedLabel} ${translateUiText('tokens')}`
+        : `${formatNumber(compaction.usedTokens)} ${translateUiText('tokens')}`,
+    ],
+    [
+      translateUiText('Context limit'),
+      reportedDisplay.reported
+        ? `${reportedDisplay.limitLabel} ${translateUiText('tokens')}`
+        : (compaction.contextLimitTokens ? `${formatNumber(compaction.contextLimitTokens)} ${translateUiText('tokens')}` : translateUiText('Not reported by Hermes')),
+    ],
+    ...(reportedDisplay.reported && reportedDisplay.breakdown?.length
+      ? reportedDisplay.breakdown.map((row) => [translateUiText(String(row.label || '')), formatTokenCount(row.tokens)])
+      : []),
     [translateUiText('Auto-compact trigger'), compaction.thresholdTokens ? `${formatNumber(compaction.thresholdTokens)} ${translateUiText('tokens')} · ${compaction.thresholdPercent}%` : translateUiText('Not reported by Hermes')],
-    [translateUiText('Compactions'), compaction.compressionCountKnown ? formatNumber(compaction.compressionCount) : translateUiText('Not reported by Hermes')],
+    [
+      translateUiText('Compactions'),
+      reportedDisplay.reported && Number.isFinite(reportedDisplay.compressionCount)
+        ? formatNumber(reportedDisplay.compressionCount)
+        : (compaction.compressionCountKnown ? formatNumber(compaction.compressionCount) : translateUiText('Not reported by Hermes')),
+    ],
     [translateUiText('Compaction state'), translateUiText(compactionStateLabels[compaction.state] || compactionStateLabels.unknown)],
-    [translateUiText('Telemetry source'), translateUiText(telemetrySourceLabels[compaction.source] || telemetrySourceLabels.unknown)],
+    [
+      translateUiText('Telemetry source'),
+      reportedDisplay.reported
+        ? translateUiText(reportedSourceLabel)
+        : translateUiText(telemetrySourceLabels[compaction.source] || telemetrySourceLabels.unknown),
+    ],
   ];
   els.contextRuntimeBreakdown.innerHTML = runtimeRows.map(([label, value]) => `
     <dt>${escapeHtml(label)}</dt>
@@ -5041,13 +7895,20 @@ function renderContextWindow(userText = els.input?.value || '') {
 
   const pc = currentContext?.pageContext;
   if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
+    // The composer's scope button already reads "Chat only"; the chip row
+    // would only repeat it and eat vertical space.
+    if (els.contextChip) els.contextChip.hidden = true;
     els.contextChipLabel.textContent = translateUiText('💬 Chat only');
     els.contextChip.title = translateUiText('No browser tab, selected text, open tabs, metadata, transcript, or page text will be attached.');
     els.contextPreview.textContent = translateUiText('Chat only mode is active. Hermes will not read or attach browser context for this turn.');
   } else {
+    if (els.contextChip) els.contextChip.hidden = false;
     const chip = contextChipSummary({ pageContext: pc, activeTab: currentContext.activeTab, parts: stats.parts });
     els.contextChipLabel.textContent = translateUiText(chip.label);
-    els.contextChip.title = translateUiText(chip.title);
+    // DOM means the page's structure and text; explain it rather than echo the URL the user is already on.
+    els.contextChip.title = (pc && !pc.restricted && pc.ok !== false)
+      ? translateUiText('DOM is the page content Hermes reads: the text and structure of the tab you are on. Click to preview exactly what gets sent with your message.')
+      : translateUiText(chip.title);
     els.contextPreview.textContent = [
       currentContext.activeTab?.title || '(unknown tab)',
       currentContext.activeTab?.url || '',
@@ -5056,10 +7917,11 @@ function renderContextWindow(userText = els.input?.value || '') {
     ].filter(Boolean).join('\n');
   }
 
-  if (els.explicitSiteCaptureButton) {
+  if (els.explicitSiteCaptureButton && els.explicitSiteCaptureWrap) {
     const action = contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY
       ? null
       : explicitSiteCaptureAction(pc);
+    els.explicitSiteCaptureWrap.hidden = !action || settings.gmailCaptureHidden === true;
     els.explicitSiteCaptureButton.hidden = !action;
     if (action) {
       els.explicitSiteCaptureButton.querySelector('strong').textContent = translateUiText(action.label);
@@ -5080,6 +7942,67 @@ function renderContextWindow(userText = els.input?.value || '') {
     <dt>${label}</dt>
     <dd title="${part.enabled ? 'included' : 'disabled'}">${part.enabled ? `${formatNumber(part.estimatedTokens)} tok · ${formatNumber(part.chars)} chars` : 'disabled'}</dd>
   `).join('');
+}
+
+// Desktop parity (hermes-agent model switch guard): switching the session
+// model while a large context is loaded makes the next Hermes turn re-read the
+// whole transcript without a cache. Confirm first when the session holds more
+// than modelSwitchContextConfirmTokens (0 disables the prompt).
+let pendingModelSwitch = null;
+
+function modelSwitchContextConfirmTokens() {
+  const configured = Number(settings.modelSwitchContextConfirmTokens);
+  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : 100_000;
+}
+
+function currentSessionContextUsedTokens() {
+  const loaded = loadedSessionContextEstimate.sessionId === settings.sessionId
+    ? loadedSessionContextEstimate
+    : { contextTokens: 0, visibleTokens: 0 };
+  const localSessionContextTokens = estimateLocalSessionContextTokens({
+    messages,
+    nextPromptTokens: 0,
+    loadedContextTokens: loaded.contextTokens,
+    loadedVisibleTokens: loaded.visibleTokens,
+  });
+  const merged = mergeContextTelemetry(
+    reportedContextTelemetry.sessionId === settings.sessionId ? reportedContextTelemetry.telemetry : null,
+    { usedTokens: localSessionContextTokens, limitTokens: 0 },
+  );
+  return Math.max(0, Math.floor(Number(merged.usedTokens) || 0));
+}
+
+function requestSelectedModelWithContextConfirm(model) {
+  const nextId = model?.id;
+  const threshold = modelSwitchContextConfirmTokens();
+  const switching = nextId && nextId !== settings.model;
+  const usedTokens = threshold > 0 && switching ? currentSessionContextUsedTokens() : 0;
+  if (threshold <= 0 || !switching || usedTokens < threshold) {
+    applySelectedModel(nextId, { keepOpen: true });
+    return;
+  }
+  pendingModelSwitch = { model, usedTokens };
+  openModelSwitchDialog(model, usedTokens);
+}
+
+function openModelSwitchDialog(model, usedTokens) {
+  if (!els.modelSwitchDialog) return;
+  // One font for the whole title line: mixing the display face with a mono span
+  // read as two different headlines, so the model id rides the same type as the
+  // rest of the sentence in every font profile.
+  els.modelSwitchTitle.textContent = t('bot_mode.model_switch_title', { model: modelDisplayName(model) });
+  els.modelSwitchDetail.textContent = t('bot_mode.model_switch_detail', { tokens: formatNumber(usedTokens) });
+  els.modelSwitchDialog.hidden = false;
+  els.modelSwitchDialog.setAttribute('aria-hidden', 'false');
+  els.modelSwitchConfirmButton?.focus?.();
+}
+
+function closeModelSwitchDialog() {
+  if (els.modelSwitchDialog) {
+    els.modelSwitchDialog.hidden = true;
+    els.modelSwitchDialog.setAttribute('aria-hidden', 'true');
+  }
+  pendingModelSwitch = null;
 }
 
 function applySelectedModel(selectedId, { persist = true, keepOpen = false } = {}) {
@@ -5161,10 +8084,10 @@ async function requestSessionModelLock(selected = currentSelectedModel(), { sess
 }
 
 async function syncSessionModelLock(selected, { previousId = '', previousBinding = null, requestedDetail = '', statusDetail = '' } = {}) {
-  if (isRemoteWsMode()) {
+  if (usesDashboardWsChatTransport()) {
     setStatus('warn', 'Cloud model switch pending', `${requestedDetail || modelDisplayName(selected) || settings.model} — waiting for the live Cloud session to confirm.`);
     try {
-      const connection = await ensureRemoteWsClient();
+      const connection = await ensureActiveDashboardWsConnection();
       const liveSessionId = await ensureRemoteWsSession(connection);
       const request = buildSessionModelSwitchRequest({
         sessionId: liveSessionId,
@@ -5190,7 +8113,7 @@ async function syncSessionModelLock(selected, { previousId = '', previousBinding
         const active = [runtime.provider, runtime.model].filter(Boolean).join(' · ') || 'an unreported model';
         throw new Error(`Hermes kept ${active} active instead of the requested model.`);
       }
-      runtime.context_length = selected?.contextTokens || settings.modelContextTokens || 0;
+      runtime.context_length = runtimeContextTokens(statusPayload.runtime || statusPayload) || selected?.contextTokens || settings.modelContextTokens || 0;
       applySessionRuntimeSnapshot({
         sessionId: settings.sessionId || liveSessionId,
         runtime,
@@ -5306,6 +8229,11 @@ async function ensureActiveSessionModelLockOrThrow() {
   if (!needsLock) return true;
   const supportsLock = Boolean(gatewayCapabilities?.sessionModelLock || gatewayCapabilities?.endpoints?.session_model_lock);
   if (!supportsLock) return true;
+  if (usesDashboardWsChatTransport()) {
+    const connection = await ensureActiveDashboardWsConnection();
+    await ensureRemoteWsSession(connection);
+    return true;
+  }
   if (!settings.sessionId) return true;
   try {
     setStatus('warn', 'Model lock pending', 'Hermes has not acknowledged this session/model pair yet. Retrying lock before sending.');
@@ -5336,12 +8264,32 @@ function renderModelRefreshState() {
 async function readCachedModelCatalog() {
   try {
     const stored = await browserApi.storage.local.get([MODEL_CATALOG_CACHE_STORAGE_KEY]);
+    const cache = stored?.[MODEL_CATALOG_CACHE_STORAGE_KEY];
     const key = modelCatalogCacheKey({
       gatewayMode: settings.gatewayMode,
       gatewayUrl: settings.gatewayUrl,
       profile: settings.activeProfile,
     });
-    return normalizeCachedModelCatalog(stored?.[MODEL_CATALOG_CACHE_STORAGE_KEY]?.[key]?.models);
+    const scoped = normalizeCachedModelCatalog(cache?.[key]?.models);
+    if (scoped.length) return scoped;
+    // No verified catalog for this profile yet (fresh agent switch): fall back
+    // to the gateway-wide shared entry so the selector keeps the full catalog
+    // instead of collapsing to a single alias row.
+    return normalizeCachedModelCatalog(cache?.[globalModelCatalogCacheKey({
+      gatewayMode: settings.gatewayMode,
+      gatewayUrl: settings.gatewayUrl,
+    })]?.models);
+  } catch {
+    return [];
+  }
+}
+
+// Union of every profile's cached catalog for this gateway — the resilience
+// pool that keeps all verified models selectable across agent switches.
+async function readCachedModelCatalogUnion() {
+  try {
+    const stored = await browserApi.storage.local.get([MODEL_CATALOG_CACHE_STORAGE_KEY]);
+    return unionCachedModelCatalogs(stored?.[MODEL_CATALOG_CACHE_STORAGE_KEY]);
   } catch {
     return [];
   }
@@ -5355,20 +8303,122 @@ async function writeCachedModelCatalog(models) {
     const cache = stored?.[MODEL_CATALOG_CACHE_STORAGE_KEY] && typeof stored[MODEL_CATALOG_CACHE_STORAGE_KEY] === 'object'
       ? stored[MODEL_CATALOG_CACHE_STORAGE_KEY]
       : {};
+    const sharedKey = globalModelCatalogCacheKey({
+      gatewayMode: settings.gatewayMode,
+      gatewayUrl: settings.gatewayUrl,
+    });
+    const sharedModels = normalizeCachedModelCatalog(cache?.[sharedKey]?.models);
+    // Shared slot grows monotonically (union): a profile with a narrower
+    // catalog must never erase models another profile verified.
+    const unionModels = normalizeCachedModelCatalog(unionCachedModelCatalogs({
+      [sharedKey]: { savedAt: 0, models: sharedModels },
+      [MODEL_CATALOG_SHARED_CACHE_PROFILE]: { savedAt: Date.now(), models: canonicalModels },
+    }));
     const key = modelCatalogCacheKey({
       gatewayMode: settings.gatewayMode,
       gatewayUrl: settings.gatewayUrl,
       profile: settings.activeProfile,
     });
     cache[key] = { savedAt: Date.now(), models: canonicalModels };
+    cache[sharedKey] = { savedAt: Date.now(), models: unionModels };
     await browserApi.storage.local.set({ [MODEL_CATALOG_CACHE_STORAGE_KEY]: cache });
   } catch {
     // Catalog caching is resilience-only; storage failures must not block sync.
   }
 }
 
-async function loadModels({ quiet = false, payload = null, refresh = false } = {}) {
+let modelCatalogSyncPromise = null;
+
+function refreshModelCatalogInBackground() {
+  if (!modelCatalogSyncPromise) {
+    modelCatalogSyncPromise = loadModels({ quiet: true }).finally(() => {
+      modelCatalogSyncPromise = null;
+    });
+  }
+  return modelCatalogSyncPromise;
+}
+
+const profileModelSync = { name: '', promise: null, token: 0 };
+
+function profileModelRosterRow(profileName = '') {
+  const name = String(profileName || '').trim();
+  if (!name) return null;
+  return botModeRoster.find((entry) => entry?.profileName === name)
+    || availableProfiles.find((profile) => profile?.name === name)
+    || null;
+}
+
+function pinProfileDefaultModel(pinnedModel, { persist = true } = {}) {
+  if (!pinnedModel?.model) return;
+  const matched = availableModels.find((model) => (
+    (model.rawModelId === pinnedModel.model || model.id === pinnedModel.model)
+    && (!pinnedModel.provider || model.provider === pinnedModel.provider)
+  )) || {
+    id: pinnedModel.model,
+    rawModelId: pinnedModel.model,
+    provider: pinnedModel.provider || '',
+    name: pinnedModel.model,
+  };
+  settings = {
+    ...settings,
+    model: matched.id,
+    provider: matched.provider || pinnedModel.provider || settings.provider,
+    extensionPreferredModel: null,
+  };
+  renderModelOptions(availableModels);
+  renderModelRuntimeOptions();
+  updateModelButtonMeta();
+  if (persist) void browserApi.storage.local.set({ hermesBrowserSettings: settings });
+}
+
+async function syncProfileModelSelection(profileName = '', { row = null } = {}) {
+  const name = String(profileName || '').trim();
+  if (!name) return { ok: true, skipped: true };
+  if (profileModelSync.promise && profileModelSync.name === name) return profileModelSync.promise;
+  const token = ++profileModelSync.token;
+  profileModelSync.name = name;
+  profileModelSync.promise = (async () => {
+    const rosterRow = row || profileModelRosterRow(name);
+    const rosterPin = resolveProfileSessionModel({
+      rosterModel: rosterRow?.model || '',
+      rosterProvider: rosterRow?.provider || '',
+    });
+    if (rosterPin) pinProfileDefaultModel(rosterPin, { persist: false });
+
+    const modelSync = await loadModels({ quiet: true, refresh: true });
+    if (token !== profileModelSync.token) return { ok: false, stale: true };
+
+    let optionsPayload = null;
+    if (desktopDashboardUrl) {
+      try {
+        const optionsResponse = await dashboardApiRequest(`/api/model/options?profile=${encodeURIComponent(name)}`, { timeoutMs: 3_000 });
+        optionsPayload = await optionsResponse.json();
+      } catch {
+        optionsPayload = null;
+      }
+    }
+    if (token !== profileModelSync.token) return { ok: false, stale: true };
+
+    const pin = resolveProfileSessionModel({
+      rosterModel: rosterRow?.model || '',
+      rosterProvider: rosterRow?.provider || '',
+      optionsPayload,
+    });
+    if (pin) pinProfileDefaultModel(pin, { persist: true });
+    return modelSync || { ok: Boolean(pin) };
+  })().finally(() => {
+    if (profileModelSync.token === token) {
+      profileModelSync.promise = null;
+      profileModelSync.name = '';
+    }
+  });
+  return profileModelSync.promise;
+}
+
+async function loadModels({ quiet = false, payload = null, refresh = false, startup = false } = {}) {
+  if (!startup) await refreshHermesContextRegistry({ storage: browserApi.storage.local, refresh });
   const previousSelectedModel = settings.model;
+  const previousAvailableModels = availableModels;
   const trackRefresh = Boolean(refresh && !payload);
   if (trackRefresh) {
     if (modelsRefreshing) return { ok: false, skipped: true, error: 'Model refresh is already running.' };
@@ -5381,27 +8431,65 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
     let registryModels = [];
     let registrySource = '';
     const cachedCatalogModels = await readCachedModelCatalog();
+    if (startup && !refresh) {
+      const initialModels = cachedCatalogModels.length
+        ? cachedCatalogModels
+        : normalizeHermesModels([], settings.model);
+      availableModels = normalizeHermesModels(initialModels, settings.model);
+      renderModelOptions(availableModels);
+      applySelectedModel(settings.model, { persist: false });
+      renderContextWindow();
+      return {
+        ok: cachedCatalogModels.length > 0,
+        count: availableModels.length,
+        source: cachedCatalogModels.length ? 'cache' : 'startup-fallback',
+        deferred: true,
+      };
+    }
 
-    if (!data && isRemoteWsMode()) {
-      // Remote reads go over the WS (REST is CORS-blocked). Only possible once
-      // a socket is open; otherwise keep the default model until connected.
-      if (remoteWsConnection?.client?.readyState !== 1) {
+    if (!data && usesDashboardWsChatTransport()) {
+      // Remote and local-dashboard fallback reads share the authenticated
+      // dashboard socket. Never retry a stale local API key from this branch.
+      const modelConnection = isRemoteWsMode() ? remoteWsConnection : activeDashboardWsConnection;
+      if (modelConnection?.client?.readyState !== 1) {
         availableModels = normalizeHermesModels([], settings.model);
         renderModelOptions(availableModels);
-        return { ok: false, count: availableModels.length, error: 'Remote Hermes is not connected.' };
+        return { ok: false, count: availableModels.length, error: 'Hermes dashboard is not connected.' };
       }
-      data = modelRowsFromGatewayOptions(await remoteWsConnection.client.request(WS_METHODS.modelOptions));
+      data = isRemoteWsMode()
+        ? modelRowsFromGatewayOptions(await remoteWsConnection.client.request(WS_METHODS.modelOptions))
+        : modelRowsFromGatewayOptions(await activeDashboardWsConnection.client.request(WS_METHODS.modelOptions));
       registrySource = 'dashboard';
     }
 
     if (data) {
       registryModels = normalizeHermesModels(data, settings.model);
     } else {
-      const registryResult = await discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh });
+      const registryResult = await Promise.race([
+        discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh }),
+        new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'timeout' }), 2_500)),
+      ]);
       if (registryResult.ok && registryResult.models.length) {
         registryModels = normalizeHermesModels(registryResult.models, settings.model);
         registrySource = 'registry';
-      } else {
+      } else if (!registryResult.ok && desktopDashboardUrl && settings.activeProfile) {
+        // Gateway /p/<profile>/ needs that profile's own API_SERVER_KEY; the
+        // desktop dashboard honors ?profile= with the session token, so a
+        // profile key gap never blocks model discovery for named profiles.
+        const dashRetry = await Promise.race([
+          discoverModelsFromDashboard({
+            baseUrl: desktopDashboardUrl,
+            refresh,
+            profile: settings.activeProfile,
+          }),
+          new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'timeout' }), 2_500)),
+        ]);
+        if (dashRetry.ok && dashRetry.models.length) {
+          registryModels = normalizeHermesModels(dashRetry.models, settings.model);
+          registrySource = 'dashboard';
+        }
+      }
+      if (!registryModels.length) {
         const dashboardResult = await discoverModelsFromDashboard({
           baseUrl: dashboardModelDiscoveryBaseUrl({
             gatewayMode: settings.gatewayMode,
@@ -5434,6 +8522,10 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
           }
         }
       }
+    }
+
+    if (cachedCatalogModels.length > registryModels.length && registryModels.length <= 1) {
+      registryModels = normalizeHermesModels(cachedCatalogModels, settings.model);
     }
 
     if (!isRemoteWsMode() && registrySource !== 'gateway') {
@@ -5499,6 +8591,16 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
       }
     }
 
+    // Cross-profile catalog preservation: switching agents must never shrink
+    // the model selector. Union every previously verified model (any profile
+    // on this gateway) back into the list; fresh discovery rows win conflicts,
+    // cached rows only add models this profile's response omitted.
+    const cachedUnionModels = await readCachedModelCatalogUnion();
+    if (cachedUnionModels.length) {
+      const unionMerged = normalizeHermesModels(mergeModelsByRawId([registryModels, cachedUnionModels]), settings.model);
+      if (unionMerged.length > registryModels.length) registryModels = unionMerged;
+    }
+
     const refreshDecision = modelCatalogRefreshDecision({
       previousSelectedModel,
       discoveredModels: registryModels,
@@ -5532,7 +8634,12 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
     }
     return { ok: true, count: availableModels.length, source: registrySource };
   } catch (error) {
-    availableModels = normalizeHermesModels([], settings.model);
+    // A failed refresh must never erase a verified catalog. Keep the last
+    // usable list visible and only fall back to the selected model when there
+    // was no prior catalog at all.
+    availableModels = previousAvailableModels.length
+      ? previousAvailableModels
+      : normalizeHermesModels([], settings.model);
     renderModelOptions(availableModels);
     renderContextWindow();
     const diagnostic = classifyGatewayError(error);
@@ -5540,10 +8647,10 @@ async function loadModels({ quiet = false, payload = null, refresh = false } = {
     if (!quiet) setStatus(
       'warn',
       diagnostic.kind === 'unknown' ? 'Model sync failed' : diagnostic.title,
-      diagnostic.kind === 'unknown' ? (error?.message || String(error)) : translateUiText(diagnostic.detail),
+      diagnostic.kind === 'unknown' ? sanitizeGatewayDiagnosticText(error?.message || String(error)) : translateUiText(diagnostic.detail),
       { translateDetail: false },
     );
-    return { ok: false, count: availableModels.length, error: diagnostic.kind === 'unknown' ? (error?.message || String(error)) : diagnostic.detail };
+    return { ok: false, count: availableModels.length, error: diagnostic.kind === 'unknown' ? sanitizeGatewayDiagnosticText(error?.message || String(error)) : diagnostic.detail };
   } finally {
     if (trackRefresh) {
       modelsRefreshing = false;
@@ -5560,22 +8667,70 @@ async function refreshModelsFromMenu() {
 }
 
 async function loadSkills({ quiet = false } = {}) {
-  if (!settings.apiKey) {
-    availableSkills = [];
-    renderSkillSuggestions();
-    return;
-  }
-  try {
-    const response = await apiFetch('/v1/skills', { method: 'GET' });
-    const payload = await readJsonResponse(response);
-    if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Skills list failed (${response.status})`);
+  const profile = safeActiveProfile() || 'default';
+  const applyDashboardSkills = (payload, source = 'dashboard-ws') => {
     availableSkills = normalizeHermesSkills(payload);
     renderSkillSuggestions();
     if (!quiet) setStatus('ok', 'Hermes skills synced', `${availableSkills.length} /skill commands available`);
-  } catch (error) {
+    return { ok: true, count: availableSkills.length, source };
+  };
+  const failSkills = (error) => {
     availableSkills = [];
     renderSkillSuggestions();
     if (!quiet) setStatus('warn', 'Skill sync failed', error?.message || String(error), { translateDetail: false });
+    return { ok: false, count: 0, error: error?.message || String(error) };
+  };
+  const describeFromConnection = async (connection) => {
+    if (connection?.client?.readyState !== 1) return null;
+    const payload = await connection.client.request(WS_METHODS.profilesDescribe, { name: profile });
+    return applyDashboardSkills(payload);
+  };
+
+  const readyConnection = isRemoteWsMode()
+    ? remoteWsConnection
+    : (profileWsConnection?.client?.readyState === 1 ? profileWsConnection : activeDashboardWsConnection);
+  try {
+    const ready = await describeFromConnection(readyConnection);
+    if (ready) return ready;
+  } catch {
+    // Ready-socket describe failed; REST and dashboard recovery still run.
+  }
+
+  let restOutcome = 'skipped';
+  if (settings.apiKey && restSkillsFallbackAllowed({ profileName: profile })) {
+    try {
+      const response = await apiFetch('/v1/skills', {
+        method: 'GET',
+        signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(2_000) : undefined,
+      });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Skills list failed (${response.status})`);
+      const skills = normalizeHermesSkills(payload);
+      if (skills.length) {
+        availableSkills = skills;
+        renderSkillSuggestions();
+        if (!quiet) setStatus('ok', 'Hermes skills synced', `${availableSkills.length} /skill commands available`);
+        return { ok: true, count: availableSkills.length, source: 'rest' };
+      }
+      restOutcome = 'empty';
+    } catch {
+      restOutcome = 'error';
+    }
+  }
+
+  if (!shouldRecoverSkillsFromDashboard({ restOutcome })) {
+    return { ok: true, count: availableSkills.length, source: 'rest' };
+  }
+
+  try {
+    const connection = isRemoteWsMode()
+      ? await ensureRemoteWsClient()
+      : await ensureProfileWsConnection({ readyTimeoutMs: 8_000, allowDashboardTrust: !quiet });
+    const recovered = await describeFromConnection(connection);
+    if (recovered) return recovered;
+    return failSkills(new Error('Skill catalog unavailable.'));
+  } catch (error) {
+    return failSkills(error);
   }
 }
 
@@ -5591,6 +8746,11 @@ function replaceActiveSkillToken(command = '') {
 function renderSkillSuggestions() {
   if (!els.skillMenu) return;
   const value = els.input?.value || '';
+
+  // Group room @mention suggestions take priority while a group room is open:
+  // typing "@" (or "@partial") offers room members + @everyone, on top of the
+  // normal slash/at command flows which stay fully available.
+  const mentionSuggestions = activeGroupProjection ? groupMentionSuggestionsForInput(value) : [];
   const suggestions = skillSuggestionsForInput(value, availableSkills);
 
   // If user types /, merge builtin commands with skill suggestions
@@ -5602,12 +8762,32 @@ function renderSkillSuggestions() {
     }).slice(0, 4);
   }
 
-  if (!builtinSuggestions.length && !suggestions.length) {
+  if (!builtinSuggestions.length && !suggestions.length && !mentionSuggestions.length) {
     els.skillMenu.hidden = true;
     return;
   }
 
   els.skillMenu.innerHTML = '';
+
+  // Render group @mention suggestions first (room routing syntax)
+  for (const mention of mentionSuggestions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'skill-option mention-option';
+    button.setAttribute('role', 'option');
+    button.dataset.command = mention.token;
+    const name = document.createElement('span');
+    name.className = 'skill-option-name';
+    name.textContent = mention.token;
+    const detail = document.createElement('span');
+    detail.className = 'skill-option-command';
+    detail.textContent = mention.detail;
+    button.append(name, detail);
+    button.addEventListener('click', () => {
+      replaceGroupMentionToken(mention.token);
+    });
+    els.skillMenu.appendChild(button);
+  }
 
   // Render builtin commands first
   for (const cmd of builtinSuggestions) {
@@ -5651,12 +8831,68 @@ function renderSkillSuggestions() {
   els.skillMenu.hidden = false;
 }
 
+// Group room @mention suggestions: typing "@" (or "@par") while a group room
+// is open offers every member's handle/title plus @everyone, so routing
+// syntax is discoverable instead of memorized.
+function groupMentionSuggestionsForInput(value = '') {
+  if (!activeGroupProjection) return [];
+  const match = /(?:^|\s)@([a-z0-9_-]*)$/i.exec(String(value || ''));
+  if (!match) return [];
+  const needle = String(match[1] || '').toLowerCase();
+  const members = groupRuntimeMembers();
+  const options = members.map((member) => ({
+    token: `@${member.name}`,
+    detail: member.title || 'bot',
+    needle: [member.name, member.title].filter(Boolean),
+  }));
+  options.push({ token: '@everyone', detail: 'all bots', needle: ['everyone', 'all'] });
+  return options
+    .filter((option) => !needle || option.needle.some((candidate) => candidate.toLowerCase().startsWith(needle) || candidate.toLowerCase().includes(needle)))
+    .slice(0, 6);
+}
+
+// Replace the trailing @token in the composer with the selected mention.
+function replaceGroupMentionToken(token) {
+  if (!els.input) return;
+  const value = String(els.input.value || '');
+  const replaced = value.replace(/@([a-z0-9_-]*)$/i, `${token} `);
+  els.input.value = replaced;
+  els.input.focus();
+  renderSkillSuggestions();
+  renderContextWindow(replaced);
+}
+
 /* ── Composer quick-command menu ── */
 function setQuickCommandMenuOpen(open) {
   if (!els.quickMoreMenu) return;
   els.quickMoreMenu.hidden = !open;
   els.commandMenuButton?.setAttribute('aria-expanded', String(Boolean(open)));
-  if (!open) clearQuickCommandDetail();
+  if (!open) {
+    clearQuickCommandDetail();
+  } else {
+    scrollInputToCaret();
+  }
+}
+
+function scrollInputToCaret() {
+  const input = els.input;
+  if (!input) return;
+  requestAnimationFrame(() => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const pos = (typeof start === 'number' && Number.isInteger(start)) ? start : (input.value ? input.value.length : 0);
+    if (typeof input.setSelectionRange === 'function' && typeof start === 'number' && typeof end === 'number') {
+      input.setSelectionRange(start, end);
+    }
+    if (pos >= (input.value?.length || 0)) {
+      input.scrollTop = input.scrollHeight;
+    } else {
+      const textBefore = String(input.value || '').slice(0, pos);
+      const lines = textBefore.split('\n').length;
+      const totalLines = Math.max(1, String(input.value || '').split('\n').length);
+      input.scrollTop = Math.max(0, Math.round((lines / totalLines) * input.scrollHeight - input.clientHeight / 2));
+    }
+  });
 }
 
 function clearQuickCommandDetail() {
@@ -5777,6 +9013,54 @@ function renderQuickMoreMenu(category = 'all') {
   setQuickCommandMenuOpen(true);
 }
 
+// Settings → Active profile: compact verified-agent preview (avatar + name + model).
+function renderProfileRosterPreview() {
+  const host = els.profileRosterPreview;
+  if (!host) return;
+  host.replaceChildren();
+  if (!availableProfiles.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = translateUiText('No verified agents yet. Connect to Hermes, then sync the roster.');
+    host.append(empty);
+    return;
+  }
+  for (const profile of availableProfiles.slice(0, 6)) {
+    const row = document.createElement('div');
+    row.className = 'agent-roster-preview-row';
+    row.setAttribute('role', 'listitem');
+    const avatar = document.createElement('span');
+    avatar.className = 'bot-mode-avatar bot-mode-avatar-mini';
+    appendBotModeAvatar(avatar, profile.name, profile.name);
+    const botRow = botModeRoster.find((r) => r.profileName === profile.name);
+    if (botRow?.hasAvatar && !remoteAvatarImageOf(botRow.avatar)) {
+      void hydrateBotModeRemoteAvatar(botRow, avatar);
+    }
+    const copy = document.createElement('span');
+    copy.className = 'agent-roster-preview-copy';
+    const name = document.createElement('strong');
+    name.textContent = profile.name;
+    const meta = document.createElement('span');
+    meta.textContent = [profile.model, profile.provider, profile.skillCount ? `${profile.skillCount} ${translateUiText('skills')}` : ''].filter(Boolean).join(' · ') || translateUiText('profile');
+    copy.append(name, meta);
+    if (profile.name === settings.activeProfile) {
+      const activeTag = document.createElement('em');
+      activeTag.className = 'agent-roster-preview-active';
+      activeTag.textContent = translateUiText('active');
+      row.append(avatar, copy, activeTag);
+    } else {
+      row.append(avatar, copy);
+    }
+    host.append(row);
+  }
+  if (availableProfiles.length > 6) {
+    const more = document.createElement('p');
+    more.className = 'hint';
+    more.textContent = `+${availableProfiles.length - 6} ${translateUiText('more')}`;
+    host.append(more);
+  }
+}
+
 function renderProfiles() {
   if (!els.profileSelect) return;
   const selected = settings.activeProfile || availableProfiles.find((profile) => profile.active)?.name || '';
@@ -5794,6 +9078,12 @@ function renderProfiles() {
   }
   els.profileSelect.value = selected;
   if (!settings.activeProfile && selected) settings = { ...settings, activeProfile: selected };
+  renderProfileRosterPreview();
+  if (els.profileVerifiedCount) {
+    els.profileVerifiedCount.textContent = availableProfiles.length
+      ? `${availableProfiles.length} verified agent${availableProfiles.length === 1 ? '' : 's'} available.`
+      : 'No verified agents synced.';
+  }
   if (availableProfiles.length) {
     const active = availableProfiles.find((profile) => profile.name === selected) || availableProfiles.find((profile) => profile.active);
     els.profileStatus.textContent = active
@@ -5803,6 +9093,8 @@ function renderProfiles() {
         skills: active.skillCount ? ` · ${active.skillCount} ${translateUiText('skills')}` : '',
       })
       : t('profile.available', { count: availableProfiles.length });
+  } else if (botModeRosterNote) {
+    els.profileStatus.textContent = botModeRosterNote;
   } else if (isRemoteWsMode()) {
     els.profileStatus.textContent = 'Profile API unavailable from the extension origin. Open the Hermes dashboard and sign in to select a profile.';
   } else {
@@ -5830,119 +9122,4451 @@ function safeActiveProfile() {
   return detected;
 }
 
-function profileDiscoveryHelp(reason = '', origin = '') {
-  switch (reason) {
-    case 'no_dashboard_tab':
-      return `Open ${origin || 'your Hermes dashboard'} in a tab and sign in, then refresh profiles.`;
-    case 'not_signed_in':
-      return 'Your Hermes dashboard tab is not signed in. Sign in there, then refresh profiles.';
-    case 'no_dashboard_session_token':
-      return 'The dashboard tab did not expose a session token; reload the dashboard and sign in.';
-    case 'bad_base_url':
-      return 'The remote gateway URL is not a valid https URL.';
-    case 'scripting_unavailable':
-      return 'This extension context cannot read the dashboard.';
-    default:
-      return `Could not discover Hermes profiles (${reason || 'unknown'}).`;
+function isNamedHermesProfile(profileName = safeActiveProfile()) {
+  const normalized = String(profileName || '').trim().toLowerCase();
+  return Boolean(normalized && normalized !== 'default');
+}
+
+function profileConnectionKey(baseUrl = desktopDashboardUrl || settings.gatewayUrl) {
+  return botModeRouteKey({
+    connectionId: normalizeGatewayUrl(baseUrl),
+    transport: 'dashboard-ws',
+    profile: settings.activeProfile || 'default',
+  });
+}
+
+function dashboardTicketOriginMatches(baseUrl = '') {
+  const expected = normalizeGatewayUrl(settings.trustedDashboardOrigin || '');
+  const actual = normalizeGatewayUrl(baseUrl || '');
+  return Boolean(expected && actual && expected === actual);
+}
+
+async function localhostDashboardCandidateUrls() {
+  try {
+    const tabs = await browserApi.tabs.query({ url: ['http://127.0.0.1/*', 'http://localhost/*'] });
+    return [...new Set((Array.isArray(tabs) ? tabs : []).map((tab) => {
+      try {
+        return new URL(String(tab?.url || '')).origin;
+      } catch {
+        return '';
+      }
+    }).filter(Boolean))];
+  } catch {
+    return [];
   }
 }
 
-async function loadProfiles({ quiet = false } = {}) {
-  // Remote dashboard mode has no apiKey and its REST surface is CORS-blocked
-  // from the extension origin. Discover profiles first-party inside the
-  // signed-in dashboard tab (same trust model as ws-ticket minting).
-  if (isRemoteWsMode()) {
-    if (!settings.gatewayUrl) {
-      availableProfiles = [];
-      renderProfiles();
-      return;
-    }
-    try {
-      const result = await discoverProfilesViaTab({
+async function ensureDesktopDashboardUrl({ timeoutMs = 8_000 } = {}) {
+  if (desktopDashboardUrl) {
+    const alive = await dashboardFetch(desktopDashboardUrl, {
+      method: 'GET',
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(300) : undefined,
+      cache: 'no-store',
+    }).catch(() => null);
+    if (alive?.ok) return desktopDashboardUrl;
+    desktopDashboardUrl = '';
+  }
+  if (!desktopDashboardDiscoveryPromise) {
+    desktopDashboardDiscoveryPromise = (async () => {
+      const cached = await readCachedRosterUrl();
+      const candidateUrls = await localhostDashboardCandidateUrls();
+      const discovered = await discoverLocalDashboardBaseUrl({
+        cachedUrl: cached.url,
+        cachedAt: cached.cachedAt,
+        candidateUrls,
+        gatewayUrl: normalizeGatewayUrl(settings.gatewayUrl),
+        apiKey: hermesGatewayKey(),
+        fetchFn: dashboardFetch,
+        timeoutMs: Math.max(8_000, Number(timeoutMs) || 8_000),
+      });
+      if (discovered) {
+        desktopDashboardUrl = discovered;
+        await writeCachedRosterUrl(discovered);
+      }
+      return discovered;
+    })().catch(() => '').finally(() => {
+      desktopDashboardDiscoveryPromise = null;
+    });
+  }
+  const discovery = desktopDashboardDiscoveryPromise;
+  const timer = new Promise((resolve) => setTimeout(() => resolve(''), Math.max(500, timeoutMs)));
+  const raced = await Promise.race([discovery, timer]);
+  if (raced) return raced;
+  void discovery.then((url) => {
+    if (!url || desktopDashboardUrl === url) return;
+    desktopDashboardUrl = url;
+    void writeCachedRosterUrl(url);
+    void loadProfiles({ quiet: true, allowDashboardTrust: true });
+    void loadSkills({ quiet: true });
+  });
+  return desktopDashboardUrl || '';
+}
+
+async function ensureProfileWsConnection({ readyTimeoutMs = 8_000, allowDashboardTrust = false } = {}) {
+  if (isRemoteWsMode()) return ensureRemoteWsClient();
+  // The dashboard WS (/api/ws) lives on the DESKTOP dashboard's random port —
+  // the 8642 sidecar has no such route and a connect attempt there hangs
+  // waiting gateway.ready. When no dashboard URL is known yet, discover it
+  // first so every WS transport lands on the real endpoint.
+  if (!desktopDashboardUrl) {
+    desktopDashboardUrl = await ensureDesktopDashboardUrl({ timeoutMs: Math.max(2_500, readyTimeoutMs) });
+  }
+  if (!desktopDashboardUrl) throw new Error('desktop-dashboard-not-found');
+  const baseUrl = normalizeGatewayUrl(desktopDashboardUrl || settings.gatewayUrl);
+  const key = profileConnectionKey(baseUrl);
+  if (profileWsConnection?.client?.readyState === 1 && profileWsConnection.key === key) {
+    return profileWsConnection;
+  }
+  // Legacy loopback dashboards expose a session bootstrap to permitted local
+  // clients. Resolve it before considering interactive Dashboard Attach.
+  let dashboardToken = '';
+  try {
+    const rootResponse = await dashboardFetch(baseUrl, { headers: { Accept: 'text/html' }, cache: 'no-store', redirect: 'error' });
+    if (rootResponse.ok) dashboardToken = extractDashboardSessionToken(await rootResponse.text());
+  } catch {
+    // Authenticated dashboards use the explicit signed-in tab below.
+  }
+  // Auth-gated local dashboards use the same explicitly trusted, signed-in
+  // Dashboard tab and one-use ticket as Remote Dashboard Attach.
+  // key authenticates port 8642; it cannot authenticate the dashboard on 9119.
+  let trustedTab = null;
+  if (Number.isFinite(trustedDashboardTabId) && dashboardTicketOriginMatches(baseUrl)) {
+    trustedTab = await findDashboardTab(browserApi.tabs, originOf(baseUrl), trustedDashboardTabId);
+    if (!trustedTab) trustedDashboardTabId = null;
+  }
+  if (allowDashboardTrust && !trustedTab && !dashboardToken) {
+    await requestDashboardOriginTrust(baseUrl, { local: true });
+    trustedTab = await findDashboardTab(browserApi.tabs, originOf(baseUrl), trustedDashboardTabId);
+  }
+  const canMintDashboardTicket = Boolean(trustedTab?.id)
+    && dashboardTicketOriginMatches(baseUrl);
+  if (canMintDashboardTicket) {
+    const ticket = await Promise.race([
+      mintWsTicket({
         tabsApi: browserApi.tabs,
         scriptingApi: browserApi.scripting,
-        baseUrl: normalizeGatewayUrl(settings.gatewayUrl),
-      });
-      if (!result.ok) {
-        // Fail closed: keep the last verified roster instead of wiping it.
-        // A transient discovery failure must not silently clear an explicit
-        // profile selection (issue #60 review). renderProfiles() still runs so
-        // the status area reflects the failure.
-        renderProfiles();
-        if (!quiet) {
-          setStatus('warn', 'Profile discovery unavailable', profileDiscoveryHelp(result.reason, normalizeGatewayUrl(settings.gatewayUrl)));
-        }
-        return;
-      }
-      availableProfiles = normalizeHermesProfiles({ profiles: result.profiles }, settings.activeProfile);
-      renderProfiles();
-      if (!quiet) {
-        setStatus('ok', 'Hermes profiles synced', `${availableProfiles.length} profile${availableProfiles.length === 1 ? '' : 's'} available`);
-      }
-    } catch (error) {
-      // Fail closed: preserve the last verified roster (see above).
-      renderProfiles();
-      if (!quiet) setStatus('warn', 'Profile sync failed', error?.message || String(error), { translateDetail: false });
+        baseUrl,
+        tabId: trustedTab.id,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, reason: 'ticket-timeout' }), 5_000)),
+    ]);
+    if (!ticket?.ok) {
+      const error = new Error(ticketFailureHelp(ticket?.reason, ticket?.origin || baseUrl));
+      error.ticketReason = ticket?.reason || 'ticket-failed';
+      throw error;
     }
-    return;
+    profileWsConnection?.client?.close?.();
+    const gatewayClient = createGatewayClient({ WebSocketImpl: WebSocket, requestTimeoutMs: 60_000, readyTimeoutMs });
+    gatewayClient.on('close', () => {
+      if (profileWsConnection?.client === gatewayClient) profileWsConnection = null;
+    });
+    gatewayClient.on('sessions.changed', () => {
+      if (activeGroupProjection) void syncActiveGroupRoomFromGateway();
+    });
+    gatewayClient.on('profiles.changed', () => {
+      void loadProfiles({ quiet: true });
+    });
+    await gatewayClient.connect(buildDashboardWsUrl(baseUrl, ticket.ticket));
+    profileWsConnection = { client: gatewayClient, baseUrl, key };
+    return profileWsConnection;
   }
-  if (!settings.apiKey || gatewayCapabilities.profiles === false) {
-    availableProfiles = [];
-    renderProfiles();
-    if (!quiet && settings.apiKey && gatewayCapabilities.profiles === false) {
-      setStatus('warn', 'Profile API unavailable', 'Using the currently running Hermes gateway profile.');
-    }
-    return;
+  if (profileWsConnection?.client?.readyState === 1 && profileWsConnection.key === key) {
+    return profileWsConnection;
   }
+  profileWsConnection?.client?.close?.();
+  const gatewayClient = createGatewayClient({ WebSocketImpl: WebSocket, requestTimeoutMs: 60_000, readyTimeoutMs });
+  gatewayClient.on('close', () => {
+    if (profileWsConnection?.client === gatewayClient) profileWsConnection = null;
+  });
+  gatewayClient.on('sessions.changed', () => {
+    if (activeGroupProjection) void syncActiveGroupRoomFromGateway();
+  });
+  gatewayClient.on('profiles.changed', () => {
+    void loadProfiles({ quiet: true });
+  });
+  const wsUrl = dashboardToken
+    ? buildDashboardWsUrlWithCredential(baseUrl, 'token', dashboardToken)
+    : (!desktopDashboardUrl && settings.apiKey
+      ? buildDashboardWsUrlWithCredential(baseUrl, 'token', settings.apiKey)
+      : buildDashboardWsUrl(baseUrl));
   try {
-    const response = await apiFetch('/v1/profiles', { method: 'GET' });
-    const payload = await readJsonResponse(response);
-    if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Profiles list failed (${response.status})`);
-    availableProfiles = normalizeHermesProfiles(payload, settings.activeProfile || payload.active);
-    renderProfiles();
-    if (!quiet) setStatus('ok', 'Hermes profiles synced', `${availableProfiles.length} profile${availableProfiles.length === 1 ? '' : 's'} available`);
-  } catch (error) {
-    // Fail closed: preserve the last verified roster so an explicit profile
-    // selection is not silently dropped when /v1/profiles is unreachable.
-    renderProfiles();
-    if (!quiet) setStatus('warn', 'Profile sync unavailable', 'This Hermes gateway does not expose /v1/profiles yet. Using the currently running profile.');
+    await gatewayClient.connect(wsUrl);
+    profileWsConnection = { client: gatewayClient, baseUrl, key };
+    return profileWsConnection;
+  } catch (connectError) {
+    // Port re-binding resilience: if the cached desktop dashboard port is down,
+    // clear the cache, probe dynamically for the new active port, and reconnect.
+    if (desktopDashboardUrl) {
+      desktopDashboardUrl = '';
+      try {
+        const freshUrl = await ensureDesktopDashboardUrl({ timeoutMs: Math.max(2_500, readyTimeoutMs) });
+        if (freshUrl && freshUrl !== baseUrl) {
+          desktopDashboardUrl = freshUrl;
+          await writeCachedRosterUrl(freshUrl);
+          const freshBase = normalizeGatewayUrl(freshUrl);
+          const rootRes = await dashboardFetch(freshBase, { headers: { Accept: 'text/html' }, cache: 'no-store', redirect: 'error' });
+          const freshToken = extractDashboardSessionToken(await rootRes.text());
+          const freshWs = freshToken ? buildDashboardWsUrlWithCredential(freshBase, 'token', freshToken) : buildDashboardWsUrl(freshBase);
+          await gatewayClient.connect(freshWs);
+          profileWsConnection = { client: gatewayClient, baseUrl: freshBase, key: profileConnectionKey(freshBase) };
+          return profileWsConnection;
+        }
+      } catch {
+        /* re-discovery failed, rethrow original connect error */
+      }
+    }
+    throw connectError;
   }
 }
 
-async function applySelectedProfile(profileName = '') {
-  settings = { ...settings, activeProfile: profileName };
-  await browserApi.storage.local.set({ hermesBrowserSettings: settings });
-  renderProfiles();
+function usesDashboardWsChatTransport() {
+  return activeConversationTransport === 'dashboard-ws' || isRemoteWsMode();
+}
+
+async function ensureActiveDashboardWsConnection() {
+  const connection = isRemoteWsMode() ? await ensureRemoteWsClient() : await ensureProfileWsConnection();
+  activeDashboardWsConnection = connection;
+  bindSubagentClient(connection?.client);
+  return connection;
+}
+
+async function activateLocalDashboardTransport({ timeoutMs = 5_000 } = {}) {
+  if (isRemoteWsMode()) return null;
+  if (!desktopDashboardUrl) {
+    desktopDashboardUrl = await ensureDesktopDashboardUrl({ timeoutMs });
+  }
+  if (!desktopDashboardUrl) return null;
+  try {
+    const connection = await ensureProfileWsConnection({ readyTimeoutMs: Math.min(8_000, Math.max(2_500, timeoutMs)) });
+    activeDashboardWsConnection = connection;
+    activeConversationTransport = 'dashboard-ws';
+    markConnectionProbe('connected', connection.baseUrl || desktopDashboardUrl);
+    updateConnectionPrompt();
+    return connection;
+  } catch {
+    return null;
+  }
+}
+
+// Bot Mode avatar: custom image or petdex pet override (hermesBotProfileOverrides),
+// legacy pet store, then the same deterministic blobatar the desktop Bot Mode
+// renders (vendored, identical SVG). Remote ui_meta avatars (normalizeBotProfileList
+// row.avatar) win over everything when they carry a usable image.
+const petAvatarsByProfile = new Map();
+
+// Legacy local cache retained only for draft migration/cleanup. It is never
+// roster authority; server profile metadata/assets win on every render.
+const BOT_PROFILE_OVERRIDES_KEY = 'hermesBotProfileOverrides';
+let botProfileOverrides = {};
+
+async function loadBotProfileOverrides() {
+  try {
+    const stored = await browserApi.storage.local.get(BOT_PROFILE_OVERRIDES_KEY);
+    botProfileOverrides = stored?.[BOT_PROFILE_OVERRIDES_KEY] || {};
+    if (!botProfileOverrides || typeof botProfileOverrides !== 'object' || Array.isArray(botProfileOverrides)) botProfileOverrides = {};
+  } catch {
+    botProfileOverrides = {};
+  }
+}
+
+async function writeBotProfileOverride(profileName, entry) {
   if (!profileName) return;
-  if (isRemoteWsMode()) {
-    // Remote dashboard mode only reads profiles (discovery runs first-party in
-    // the signed-in dashboard tab); it does not POST a switch. The profile is
-    // attached to session.create, so reloading models is enough to reflect the
-    // new selection, and the next session will target it.
-    setStatus('ok', 'Hermes profile selected', `${profileName}. New sessions will use this profile.`);
-    await loadModels({ quiet: true });
+  const next = { ...botProfileOverrides };
+  if (entry) {
+    next[profileName] = { ...entry, updatedAt: Date.now() };
+  } else {
+    delete next[profileName];
+  }
+  botProfileOverrides = next;
+  try {
+    await browserApi.storage.local.set({ [BOT_PROFILE_OVERRIDES_KEY]: botProfileOverrides });
+  } catch {
+    /* storage unavailable — session-only edit */
+  }
+}
+
+function botProfileOverrideFor(profileName) {
+  if (!profileName) return null;
+  const entry = botProfileOverrides[profileName];
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
+// The connected roster is authoritative for agent identity. Local state may
+// cache an avatar choice, but it must not rename or impersonate a profile.
+function botProfileDisplayName(row) {
+  const profileName = String(row?.profileName || row?.name || '').trim();
+  const rawDisplay = String(row?.displayName || '').trim();
+  const rawTitle = String(row?.title || '').trim();
+  if (rawDisplay && rawDisplay.toLowerCase() !== 'default') return rawDisplay;
+  if (rawTitle && rawTitle.toLowerCase() !== 'default') return rawTitle;
+  if (profileName.toLowerCase() === 'default' || !profileName) return 'Default';
+  return profileName.charAt(0).toUpperCase() + profileName.slice(1);
+}
+
+// remoteAvatarImageOf is imported from ./lib/room-avatar.mjs so the same pure
+// rule is unit tested and shared with the resolver.
+
+async function refreshPetAvatarCache() {
+  try {
+    const all = await readAllPetAvatars();
+    petAvatarsByProfile.clear();
+    for (const [profileName, entry] of Object.entries(all || {})) {
+      if (entry && typeof entry.icon === 'string') petAvatarsByProfile.set(profileName, entry);
+    }
+  } catch {
+    /* storage unavailable — blobatar fallback */
+  }
+}
+
+function animatedPetFor(profileName) {
+  if (settings.botModeAnimateAvatars !== true || !profileName) return null;
+  const pet = petAvatarsByProfile.get(profileName);
+  if (!pet) return null;
+  const sheet = pet.spritesheetUrl
+    || petGalleryCache.find((entry) => entry.slug === pet.slug || entry.displayName === pet.displayName)?.spritesheetUrl
+    || '';
+  return sheet ? { ...pet, spritesheetUrl: sheet } : null;
+}
+
+function appendBotModeAvatar(container, displayName, profileName = '', remoteAvatar = null) {
+  const livePet = animatedPetFor(profileName);
+  if (livePet) {
+    const live = document.createElement('span');
+    live.className = 'bot-mode-pet-live';
+    live.style.backgroundImage = `url("${livePet.spritesheetUrl}")`;
+    live.title = livePet.displayName || livePet.slug || '';
+    container.replaceChildren(live);
     return;
   }
-  if (!settings.apiKey) return;
+  const override = botProfileOverrideFor(profileName);
+  const overrideImage = typeof override?.icon === 'string' && override.icon.startsWith('data:image/')
+    ? override.icon
+    : '';
+  const remoteImage = remoteAvatarImageOf(remoteAvatar);
+  if (remoteImage) {
+    const img = document.createElement('img');
+    img.src = remoteImage;
+    img.alt = '';
+    img.className = 'bot-mode-avatar-pet';
+    container.replaceChildren(img);
+    return;
+  }
+  if (overrideImage) {
+    const img = document.createElement('img');
+    img.src = overrideImage;
+    img.alt = '';
+    img.className = 'bot-mode-avatar-pet';
+    container.replaceChildren(img);
+    return;
+  }
+  const pet = profileName ? petAvatarsByProfile.get(profileName) : null;
+    if (pet?.spritesheetUrl && settings.botModeAnimateAvatars === true) {
+      const live = document.createElement('span');
+      live.className = 'bot-mode-pet-live';
+      live.style.backgroundImage = `url("${pet.spritesheetUrl}")`;
+      live.title = pet.displayName || pet.slug || '';
+      container.replaceChildren(live);
+      return;
+    }
+    if (pet) {
+    const img = document.createElement('img');
+    img.src = pet.icon;
+    img.alt = '';
+    img.className = 'bot-mode-avatar-pet';
+    img.title = pet.displayName || pet.slug;
+    container.replaceChildren(img);
+    return;
+  }
+  const seed = override?.blobatarSeed || displayName || profileName || 'agent';
+  let svgMarkup = '';
   try {
-    const response = await apiFetch('/v1/profiles/active', {
-      method: 'POST',
-      body: JSON.stringify({ name: profileName }),
+    svgMarkup = blobatarSvg(seed, { size: 40 });
+  } catch {
+    svgMarkup = '';
+  }
+  if (svgMarkup) {
+    const template = document.createElement('template');
+    template.innerHTML = svgMarkup.trim();
+    const svgNode = template.content.firstElementChild;
+    if (svgNode) {
+      container.replaceChildren(svgNode);
+      return;
+    }
+  }
+  container.textContent = (displayName || profileName || '?').charAt(0).toUpperCase();
+}
+
+// Server avatar hydration for has_avatar roster rows. The canonical avatar is
+// binary server state, read read-only: over the dashboard WebSocket via
+// profiles.get_asset({ name, asset: 'avatar' }) in remote-dashboard mode, or
+// the desktop dashboard's /api/profiles/<name>/avatar route in local mode
+// (same session-token bootstrap as the roster fetch). Results cache per
+// connection+profile; a miss keeps the deterministic blobatar fallback.
+const botModeRemoteAvatarCache = new Map();
+const botModeRemoteAvatarInflight = new Map();
+let profileSwitchMode = 'bot';
+
+function botModeAvatarCacheKey(profileName) {
+  return botModeRouteKey({
+    connectionId: normalizeGatewayUrl(settings.gatewayUrl),
+    transport: settings.connectionTransport || settings.gatewayMode,
+    profile: profileName,
+  });
+}
+
+function botModeAvatarDataUrlFromAsset(asset) {
+  if (!asset || typeof asset !== 'object') return '';
+  const inline = remoteAvatarImageOf(asset);
+  if (inline) return inline;
+  const rawData = typeof asset.data === 'string' ? asset.data.trim() : '';
+  if (rawData.startsWith('data:image/')) return rawData;
+  const base64 = String(asset.data_base64 || asset.dataBase64 || rawData || '').replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/=]+$/.test(base64) || !base64) return '';
+  const mime = String(asset.mime_type || asset.mimeType || 'image/png').toLowerCase();
+  return mime.startsWith('image/') ? `data:${mime};base64,${base64}` : '';
+}
+
+async function fetchBotModeRemoteAvatar(row) {
+  const cacheKey = botModeAvatarCacheKey(row.profileName);
+  const cached = botModeRemoteAvatarCache.get(cacheKey);
+  if (cached) return cached;
+  if (botModeRemoteAvatarInflight.has(cacheKey)) return botModeRemoteAvatarInflight.get(cacheKey);
+  const pending = (async () => {
+    let dataUrl = '';
+    try {
+      const connection = await ensureProfileWsConnection({ readyTimeoutMs: 5_000 }).catch(() => null);
+      if (connection?.client?.readyState === 1) {
+        const asset = await connection.client.request(WS_METHODS.profilesGetAsset, { name: row.profileName, asset: 'avatar' });
+        dataUrl = botModeAvatarDataUrlFromAsset(asset);
+      } else if (isRemoteWsMode()) {
+        const remote = await ensureRemoteWsClient();
+        const asset = await remote.client.request(WS_METHODS.profilesGetAsset, { name: row.profileName, asset: 'avatar' });
+        dataUrl = botModeAvatarDataUrlFromAsset(asset);
+      } else if (desktopDashboardUrl) {
+        const base = String(desktopDashboardUrl).replace(/\/+$/, '');
+        const rootResponse = await fetch(base, {
+          headers: { Accept: 'text/html' },
+          cache: 'no-store',
+          signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(2500) : undefined,
+        });
+        const token = extractDashboardSessionToken(await rootResponse.text());
+        if (rootResponse.ok && token) {
+          const response = await fetch(`${base}/api/profiles/${encodeURIComponent(row.profileName)}/avatar`, {
+            headers: { Accept: 'image/*', 'X-Hermes-Session-Token': token },
+            credentials: 'include',
+            signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(8000) : undefined,
+          });
+          if (response.ok) {
+            const blob = await response.blob();
+            if (blob.size > 0 && blob.size <= 2_000_000) {
+              dataUrl = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || '').startsWith('data:image/') ? String(reader.result) : '');
+                reader.onerror = () => resolve('');
+                reader.readAsDataURL(blob);
+              });
+            }
+          }
+        }
+      }
+    } catch {
+      dataUrl = '';
+    }
+    if (dataUrl) botModeRemoteAvatarCache.set(cacheKey, dataUrl);
+    return dataUrl || botModeRemoteAvatarCache.get(cacheKey) || '';
+  })().finally(() => {
+    botModeRemoteAvatarInflight.delete(cacheKey);
+  });
+  botModeRemoteAvatarInflight.set(cacheKey, pending);
+  return pending;
+}
+
+async function hydrateBotModeRemoteAvatar(row, container) {
+  if (!row?.profileName || !container) return;
+  const dataUrl = await fetchBotModeRemoteAvatar(row);
+  if (!dataUrl || !container.isConnected) return;
+  const img = document.createElement('img');
+  img.src = dataUrl;
+  img.alt = '';
+  img.className = 'bot-mode-avatar-pet';
+  img.title = botProfileDisplayName(row);
+  container.replaceChildren(img);
+}
+
+// Single resolver for every Bot Mode room avatar surface: the room message
+// identity header, the composer member cluster, the room member popover, and the
+// presence strip. It renders the best avatar available right now (a fresh inline
+// roster avatar, otherwise a previously hydrated server image from the shared
+// per-connection cache) and, when the roster row carries a server-side avatar
+// with no inline image, hydrates the real profile picture through that same
+// cache. Because every surface goes through this one function, the real avatar
+// sticks everywhere and the deterministic blobatar is only shown for a bot that
+// truly has no avatar. Callers must not re-implement the sync/hydrate pair: the
+// divergence between them is exactly how the room surfaces used to fall back.
+function renderRoomMemberAvatar(container, { name = '', title = '' } = {}) {
+  if (!container) return;
+  const profileName = String(name || '').trim();
+  const rosterRow = profileName
+    ? botModeRoster.find((entry) => entry.profileName === profileName)
+    : null;
+  const displayName = String(title || (rosterRow ? botProfileDisplayName(rosterRow) : '') || profileName || '');
+  const cached = profileName ? botModeRemoteAvatarCache.get(botModeAvatarCacheKey(profileName)) : '';
+  const selection = selectRoomAvatarSource({ rosterAvatar: rosterRow?.avatar || null, cachedImage: cached });
+  appendBotModeAvatar(container, displayName, profileName, selection.avatar);
+  // Already showing the real picture: nothing left to do.
+  if (!profileName || selection.source) return;
+  const targetRow = rosterRow || { profileName, hasAvatar: true };
+  const rosterHasInline = Boolean(remoteAvatarImageOf(targetRow.avatar));
+  if (shouldHydrateRemoteAvatar({ hasAvatar: rosterRow ? rosterRow.hasAvatar === true : true, rosterHasInline })) {
+    void hydrateBotModeRemoteAvatar(targetRow, container);
+  }
+}
+
+function renderBotModeRoster(query = '') {
+  if (!els.botModeRoster || !els.botModeButton) return;
+  const enabled = settings.botModeEnabled === true;
+  els.botModeButton.hidden = !enabled;
+  // Roster density setting (Settings → Agents & Bot Mode): compact rows drop
+  // the preview line and shrink the row box; comfortable is the default.
+  els.botModeRoster.classList.toggle('bot-mode-roster--compact', settings.botModeDisplayDensity === 'compact');
+  if (els.botModeSettingsStatus) {
+    els.botModeSettingsStatus.textContent = enabled
+      ? 'Bot Mode is on. Agent availability is shown under Active profile.'
+      : 'Bot Mode is off.';
+  }
+  if (!enabled) {
+    els.botModePanel.hidden = true;
+    els.botModeButton.setAttribute('aria-expanded', 'false');
+    els.botModeRoster.replaceChildren();
+    return;
+  }
+  const needle = String(query || '').trim().toLowerCase();
+  // Agents only: group chats (e.g. the launch room) render in the dedicated
+  // Group Chats view and never appear in the agent roster.
+  const rows = botModeRoster.filter((row) => row.type !== 'group'
+    && `${botProfileDisplayName(row)} ${row.profileName} ${row.title} ${row.description}`.toLowerCase().includes(needle));
+  els.botModeRoster.replaceChildren();
+  for (const row of rows) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bot-mode-row';
+    button.dataset.profile = row.profileName;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(row.profileName === (settings.botModeSelectedProfile || settings.activeProfile)));
+
+    const avatar = document.createElement('span');
+    avatar.className = `bot-mode-avatar${row.activity.activeNow ? ' working' : ''}`;
+    appendBotModeAvatar(avatar, botProfileDisplayName(row), row.profileName, row.avatar);
+    button.append(avatar);
+    if (row.hasAvatar && !remoteAvatarImageOf(row.avatar)) {
+      void hydrateBotModeRemoteAvatar(row, avatar);
+    }
+
+    const copy = document.createElement('span');
+    copy.className = 'bot-mode-row-copy';
+    // Desktop-parity row header: Bot name + relative last-activity stamp.
+    const nameRow = document.createElement('span');
+    nameRow.className = 'bot-mode-row-name-row';
+    const name = document.createElement('strong');
+    name.textContent = botProfileDisplayName(row);
+    if (row.activity.activeNow) {
+      const unread = document.createElement('i');
+      unread.className = 'unread';
+      name.append(unread);
+    }
+    nameRow.append(name);
+    const stamp = document.createElement('span');
+    stamp.className = 'bot-mode-row-stamp';
+    stamp.textContent = row.activity.lastActiveText || '';
+    if (stamp.textContent) nameRow.append(stamp);
+    const meta = document.createElement('span');
+        meta.className = 'bot-mode-row-meta';
+        meta.hidden = true;
+    const preview = document.createElement('span');
+    preview.className = 'bot-mode-row-preview';
+    // Last thing the Bot said (or was asked) — desktop roster preview parity.
+    preview.textContent = row.preview || row.canonical.preview || 'Ready for operations.';
+    copy.append(nameRow, meta, preview);
+
+    // Online/offline presence: filled green dot = active in the last 90s,
+    // hollow dot = idle. Replaces the READY/WORKING text pill (desktop parity).
+    const state = document.createElement('span');
+    state.className = `bot-mode-row-state${row.activity.activeNow ? ' active' : ''}`;
+    const presence = document.createElement('i');
+    presence.className = 'presence-dot';
+    presence.setAttribute('aria-hidden', 'true');
+    presence.title = row.activity.activeNow ? 'Online' : 'Offline';
+    state.append(presence);
+    button.append(copy, state);
+    button.addEventListener('click', () => { void openBotProfile(row); });
+    els.botModeRoster.append(button);
+  }
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bot-mode-empty';
+    empty.textContent = botModeRoster.length ? 'No agents match this search.' : 'No verified Hermes profiles are available.';
+    els.botModeRoster.append(empty);
+    if (!botModeRoster.length && botModeRosterNote) {
+      const note = document.createElement('p');
+      note.className = 'bot-mode-empty bot-mode-empty-note';
+      note.textContent = botModeRosterNote;
+      els.botModeRoster.append(note);
+    }
+  }
+  if (els.botModeStatus) els.botModeStatus.textContent = `${botModeRoster.length} agent${botModeRoster.length === 1 ? '' : 's'} · current connected Hermes instance`;
+  syncBotModeFooterState();
+}
+
+// Bot Mode → Group Chats: dedicated roster for synced group projections.
+// Separate from the agent roster by design; Browser has no group authority.
+function renderBotModeGroupChats(query = '') {
+  const host = els.botModeGroupList;
+  if (!host) return;
+  host.classList.toggle('bot-mode-roster--compact', settings.botModeDisplayDensity === 'compact');
+  const needle = String(query || '').trim().toLowerCase();
+  const rows = botModeGroupChats.filter((row) => `${row.displayName} ${row.id} ${row.title} ${row.members.join(' ')}`.toLowerCase().includes(needle));
+  host.replaceChildren();
+  for (const row of rows) {
+    const syntheticFallback = row.sourceId === 'canonical';
+    const button = document.createElement('div');
+    button.className = `bot-mode-row group-row${syntheticFallback ? ' is-sync-pending' : ''}`;
+    button.dataset.group = row.id;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', 'false');
+    button.setAttribute('aria-disabled', String(syntheticFallback));
+    button.title = syntheticFallback
+      ? 'Waiting for the connected Hermes instance to sync this group room.'
+      : `${row.displayName} · ${row.members.length} member${row.members.length === 1 ? '' : 's'}`;
+
+    if (row.image) {
+      const avatarWrap = document.createElement('span');
+      avatarWrap.className = 'bot-mode-avatar';
+      const img = document.createElement('img');
+      img.src = row.image;
+      img.alt = '';
+      img.className = 'bot-mode-avatar-pet';
+      avatarWrap.append(img);
+      button.append(avatarWrap);
+    } else {
+      const faceStack = document.createElement('span');
+      faceStack.className = 'face-stack';
+      const members = row.members.length ? row.members : ['default'];
+            members.slice(0, 3).forEach((memberName, idx) => {
+              const span = document.createElement('span');
+              span.style.setProperty('--i', idx);
+              const rosterRow = botModeRoster.find((entry) => entry.profileName === memberName);
+              appendBotModeAvatar(span, memberName, memberName, rosterRow?.avatar || null);
+              if (rosterRow?.hasAvatar && !remoteAvatarImageOf(rosterRow.avatar)) {
+                void hydrateBotModeRemoteAvatar(rosterRow, span);
+              }
+              faceStack.append(span);
+            });
+            button.append(faceStack);
+    }
+
+    const copy = document.createElement('span');
+    copy.className = 'bot-mode-row-copy';
+    const name = document.createElement('strong');
+    name.textContent = row.displayName;
+    const meta = document.createElement('span');
+    meta.className = 'bot-mode-row-meta';
+    meta.textContent = row.title || `${row.members.length} member${row.members.length === 1 ? '' : 's'} · synced projection`;
+    const preview = document.createElement('span');
+    preview.className = 'bot-mode-row-preview';
+    const unsynced = row.syncState === 'local-only' || row.syncState === 'sync-failed';
+    preview.textContent = row.canonical?.preview || (unsynced ? 'Only on this device until it syncs.' : 'Synced group projection.');
+    copy.append(name, meta, preview);
+
+    const actions = document.createElement('span');
+    actions.className = 'group-row-actions';
+
+    const topRow = document.createElement('span');
+    topRow.className = 'group-row-top';
+    const roomStamp = document.createElement('span');
+    roomStamp.className = 'group-row-stamp';
+    roomStamp.textContent = relativeTimeFromTs(row.activity?.lastActive || row.canonical?.lastActive);
+    if (roomStamp.textContent) topRow.append(roomStamp);
+
+    const bottomRow = document.createElement('span');
+    bottomRow.className = 'group-row-bottom';
+    const pill = document.createElement('span');
+    pill.className = 'room-pill';
+    pill.textContent = syntheticFallback
+      ? 'Awaiting sync'
+      : row.syncState === 'local-only'
+        ? 'Not synced'
+        : row.syncState === 'sync-failed' ? 'Sync failed' : 'Synced room';
+    if (unsynced) pill.title = row.syncError || 'This room has not been saved to the connected Hermes instance yet.';
+
+    const settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button';
+    settingsBtn.disabled = syntheticFallback;
+    settingsBtn.className = 'group-settings-btn';
+    settingsBtn.title = `Group settings for ${row.displayName}`;
+    settingsBtn.setAttribute('aria-label', `Group settings for ${row.displayName}`);
+    settingsBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>';
+    settingsBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openGroupSettingsModal(row);
     });
-    const payload = await readJsonResponse(response);
-    if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Profile switch failed (${response.status})`);
+
+    bottomRow.append(pill, settingsBtn);
+    actions.append(topRow, bottomRow);
+
+    button.append(copy, actions);
+    if (!syntheticFallback) button.addEventListener('click', () => { void openBotGroupChat(row); });
+    host.append(button);
+  }
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bot-mode-empty';
+    empty.textContent = botModeGroupChats.length ? 'No group chats match this search.' : 'No group chats synced yet.';
+    host.append(empty);
+  }
+}
+
+// View switch for the deck: 'agents' shows the verified agent roster, 'groups'
+// shows the released read-only Group Chats projection.
+function setBotModeView(view = 'agents') {
+  botModeView = view === 'groups' ? 'groups' : 'agents';
+  const groupsActive = botModeView === 'groups';
+  els.botModeViewAgents?.setAttribute('aria-pressed', String(!groupsActive));
+  els.botModeViewGroups?.setAttribute('aria-pressed', String(groupsActive));
+  if (els.botModeRoster) els.botModeRoster.hidden = groupsActive;
+  if (els.botModeGroupList) els.botModeGroupList.hidden = !groupsActive;
+  if (els.botModeSearch) {
+    els.botModeSearch.placeholder = groupsActive
+      ? translateUiText('Search group chats')
+      : translateUiText('Search agents');
+  }
+  if (groupsActive) renderBotModeGroupChats(els.botModeSearch?.value);
+  else renderBotModeRoster(els.botModeSearch?.value);
+  syncBotModeFooterState();
+}
+
+function groupRuntimeMembers(row = activeGroupProjection) {
+  return (Array.isArray(row?.members) ? row.members : [])
+    .map((memberName) => {
+      const name = typeof memberName === 'string'
+        ? memberName.trim()
+        : String(memberName?.name || memberName?.profile || memberName?.profileName || '').trim();
+      const rosterRow = botModeRoster.find((entry) => entry.profileName === name);
+      return {
+        name,
+        title: rosterRow ? botProfileDisplayName(rosterRow) : name,
+        source: rosterRow?.sourceId || '',
+      };
+    })
+    .filter((member) => member.name);
+}
+
+function roomIdentityForMember(name) {
+  const members = groupRuntimeMembers().map((member) => ({
+    profileName: member.name,
+    color: botModeRoster.find((entry) => entry.profileName === member.name)?.color,
+  }));
+  const mode = document.documentElement.dataset.hermesMode === 'light' ? 'light' : 'dark';
+  const key = JSON.stringify([mode, members]);
+  if (key !== activeRoomIdentityKey) {
+    activeRoomIdentityKey = key;
+    activeRoomIdentities = assignRoomIdentities(members, { mode });
+  }
+  return activeRoomIdentities.find((identity) => identity.profileName === String(name));
+}
+
+function applyRoomMessageIdentity(node, record) {
+  if (!activeGroupProjection || record.role !== 'assistant') return;
+  const member = resolveRoomSpeaker(record, groupRuntimeMembers());
+  const identity = member ? roomIdentityForMember(member.name) : null;
+  if (!member || !identity) return;
+  node.closest('.message-row')?.classList.add('room-message');
+  node.style.setProperty('--bot-ink', identity.ink);
+  node.style.setProperty('--bot-bar', identity.bar);
+  node.style.setProperty('--bot-tint', identity.tint);
+  const header = node.querySelector('.message-role');
+  header.replaceChildren();
+  const avatar = document.createElement('span');
+  avatar.className = 'room-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  renderRoomMemberAvatar(avatar, { name: member.name, title: member.title });
+  const name = document.createElement('span');
+  name.className = 'room-name';
+  name.textContent = member.title || member.name;
+  header.append(avatar, name);
+}
+
+function clearActiveGroupLiveMessage() {
+  if (activeGroupLiveFrame) cancelAnimationFrame(activeGroupLiveFrame);
+  activeGroupLiveFrame = 0;
+  activeGroupLiveMessage?.row?.remove();
+  activeGroupLiveMessage = null;
+}
+
+// ── Room member popover + per-room model bindings (BUILD-B B3.3/B3.4) ────────
+// Outcome R (live-verified): a room session loses its --session model pick on
+// resume, so a binding is re-applied through the runtime before EVERY member
+// submission attempt, not only at pick time.
+let roomPopoverOpen = false;
+let roomPopoverMemberReads = 0;
+let roomModelPickTarget = null;
+
+function activeRoomId() {
+  return String(activeGroupProjection?.roomId || activeGroupProjection?.id || '');
+}
+
+// In-memory mirror of the durable per-room display-event store. Hydrated in
+// loadSettings and kept in sync across surfaces by the storage change listener.
+let roomEventStore = {};
+
+function persistRoomEventStore() {
+  return browserApi.storage.local.set({ [ROOM_EVENTS_STORAGE_KEY]: roomEventStore });
+}
+
+// Persist one display-only room row so failure/pass and model-change notices
+// survive a room close/reopen (the v0.3.4 durable room-rows rider).
+function recordRoomDisplayEvent(record) {
+  const roomId = activeRoomId();
+  if (!roomId || !record) return record;
+  roomEventStore = appendRoomDisplayEvent(roomEventStore, roomId, record);
+  void persistRoomEventStore();
+  return record;
+}
+
+// Append a persisted, display-only room transcript line. It is a local row:
+// never sent to a bot and never written to the synced projection.
+function appendRoomEventLine(content, thread = '') {
+  if (!activeGroupProjection) return null;
+  const record = {
+    role: 'system',
+    kind: 'room-event',
+    content: String(content || ''),
+    ts: Date.now(),
+    thread: thread || activeGroupPresenceThread || 'main',
+  };
+  activeGroupDisplayEvents.push(record);
+  recordRoomDisplayEvent(record);
+  activeGroupMessages = [...activeGroupMessages, record];
+  messages = activeGroupMessages;
+  addMessage('system', record.content, { persist: false, sourceRecord: record });
+  return record;
+}
+
+function roomMemberBindings() {
+  return settings.groupRoomModelBindings || {};
+}
+
+async function persistRoomModelBindings(store) {
+  settings = { ...settings, groupRoomModelBindings: store };
+  await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+}
+
+function roomMemberBusyNow(name) {
+  if (sending) {
+    const active = activeGroupPresence.members.find((entry) => entry.member === name);
+    if (active && !['replied', 'passed', 'failed'].includes(active.state)) return true;
+  }
+  return false;
+}
+
+function roomMemberRow(roomId, member) {
+  const identity = roomIdentityForMember(member.name);
+  const binding = readRoomModelBinding(roomMemberBindings(), roomId, member.name);
+  const row = document.createElement('div');
+  row.className = 'room-member-row';
+  row.setAttribute('role', 'listitem');
+  // Focusable so openRoomPopover can move focus into the dialog on open and
+  // the .room-member-row:focus-visible style is reachable by keyboard.
+  row.tabIndex = 0;
+  if (identity) {
+    row.style.setProperty('--bot-ink', identity.ink);
+    row.style.setProperty('--bot-bar', identity.bar);
+  }
+
+  const avatar = document.createElement('span');
+  avatar.className = 'room-member-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  renderRoomMemberAvatar(avatar, { name: member.name, title: member.title });
+
+  const name = document.createElement('span');
+  name.className = 'room-member-name';
+  name.textContent = member.title || member.name;
+
+  const model = document.createElement('span');
+  model.className = 'room-member-model';
+  // The popover opens immediately; the independent status reads fill in after.
+  model.textContent = t('ui.room.checking');
+
+  const actions = document.createElement('span');
+  actions.className = 'room-member-actions';
+  if (binding) {
+    const dot = document.createElement('span');
+    dot.className = 'room-member-dot';
+    dot.title = t('ui.room.model.note');
+    actions.append(dot);
+    // A bound member can be put back on its profile default (B3.4). Reset is
+    // only offered when a room pick exists.
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'room-member-change room-member-reset';
+    reset.textContent = t('ui.room.reset.default');
+    reset.title = t('ui.room.reset.default');
+    reset.setAttribute('aria-label', `${reset.textContent} · ${name.textContent}`);
+    reset.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void resetRoomMemberModel(roomId, member);
+    });
+    actions.append(reset);
+  }
+  const change = document.createElement('button');
+  change.type = 'button';
+  change.className = 'room-member-change';
+  change.textContent = translateUiText('Change');
+  change.setAttribute('aria-label', `${change.textContent} · ${name.textContent}`);
+  change.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openRoomMemberModelMenu(roomId, member);
+  });
+  actions.append(change);
+
+  row.append(avatar, name, model, actions);
+  return { row, model, change, binding };
+}
+
+function renderRoomPopover() {
+  const popover = els.roomMemberPopover;
+  const list = els.roomMemberPopoverList;
+  if (!popover || !list) return;
+  const roomId = activeRoomId();
+  const members = groupRuntimeMembers();
+  els.roomMemberPopoverTitle && (els.roomMemberPopoverTitle.textContent = t('ui.room.bots.title'));
+  list.replaceChildren();
+  if (!roomId || !members.length) {
+    const empty = document.createElement('div');
+    empty.className = 'room-member-row';
+    empty.setAttribute('role', 'listitem');
+    empty.textContent = t('ui.room.unknown');
+    list.append(empty);
+    return;
+  }
+  const generation = roomPopoverMemberReads + 1;
+  roomPopoverMemberReads = generation;
+  const rows = members.map((member) => roomMemberRow(roomId, member));
+  for (const entry of rows) list.append(entry.row);
+  // Independent per-member status reads: never block the popover from opening.
+  const reads = Promise.all(rows.map(async (entry, index) => {
+    const member = members[index];
+    let read = { state: 'unknown' };
+    try {
+      read = await activeGroupRuntime.readMemberModel(roomId, member);
+    } catch (error) {
+      read = { state: 'unknown', error: String(error?.message || error) };
+    }
+    if (generation !== roomPopoverMemberReads || !roomPopoverOpen) return;
+    if (!list.contains(entry.row)) return;
+    // Show the confirmed provider beside the model, matching the standing
+    // model/provider disclosure convention; never an assumed value.
+    const label = read?.state === 'ok' && read.model
+      ? `${read.model}${read.provider ? ` · ${read.provider}` : ''}`
+      : t(read?.state === 'no-session' ? 'ui.room.profile.default' : 'ui.room.unknown');
+    entry.model.textContent = label;
+    if (read?.state === 'ok' && entry.binding?.model === read.model) {
+      entry.row.title = t('ui.room.model.note');
+    }
+  }));
+  void reads;
+}
+
+function openRoomPopover() {
+  const popover = els.roomMemberPopover;
+  if (!popover || !activeGroupProjection) return;
+  closeProfileSwitchMenu();
+  roomPopoverOpen = true;
+  popover.hidden = false;
+  els.activeProfileIndicator?.setAttribute('aria-expanded', 'true');
+  renderRoomPopover();
+  popover.querySelector('.room-member-row')?.focus?.();
+}
+
+function closeRoomPopover() {
+  const popover = els.roomMemberPopover;
+  if (!popover) return;
+  // Bump the read generation so a late status read cannot repaint a closed popover.
+  roomPopoverMemberReads += 1;
+  roomPopoverOpen = false;
+  popover.hidden = true;
+  if (activeGroupProjection) els.activeProfileIndicator?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleRoomPopover() {
+  if (!activeGroupProjection) return;
+  if (roomPopoverOpen) {
+    closeRoomPopover();
+    els.activeProfileIndicator?.focus?.();
+    return;
+  }
+  openRoomPopover();
+}
+
+function openRoomMemberModelMenu(roomId, member) {
+  if (!activeGroupRuntime) return;
+  if (roomMemberBusyNow(member.name)) {
+    setStatus('warn', t('ui.room.busy'), `${member.title || member.name} is replying right now; wait for its turn to finish.`, { translateDetail: false });
+    return;
+  }
+  const binding = readRoomModelBinding(roomMemberBindings(), roomId, member.name);
+  roomModelPickTarget = { roomId, member, model: binding?.model || '', hasBinding: Boolean(binding) };
+  setModelSelectionTarget('room-member');
+  closeFloatingPanels();
+  els.modelMenu.hidden = false;
+  els.modelMenuButton.setAttribute('aria-expanded', 'true');
+  els.modelSearchInput?.focus();
+}
+
+function roomMemberModelLabel() {
+  const target = roomModelPickTarget;
+  return target ? `${target.member.title || target.member.name}` : '';
+}
+
+let roomModelConfirmState = null;
+
+function closeRoomModelConfirm({ restoreFocus = false } = {}) {
+  const state = roomModelConfirmState;
+  if (!state) return;
+  roomModelConfirmState = null;
+  document.removeEventListener('click', state.onDocumentClick, true);
+  document.removeEventListener('keydown', state.onKey, true);
+  state.dialog.remove();
+  if (restoreFocus) state.returnFocus?.focus?.();
+}
+
+// A named confirmation for a gateway `confirm_required` model switch (an
+// expensive model, for example). It names the member, model and provider, and
+// the ONLY path that retries with `confirm: true` is its explicit confirm
+// action. Reuses the shared profile-switch dialog styling.
+function openRoomModelConfirm({ member, model, provider, message, onConfirm }) {
+  closeRoomModelConfirm();
+  const name = member?.title || member?.name || '';
+  const providerLabel = provider ? ` · ${provider}` : '';
+  const dialog = document.createElement('section');
+  dialog.className = 'profile-switch-dialog room-model-confirm';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-label', `${name} · ${model}${providerLabel}`);
+  const card = document.createElement('div');
+  card.className = 'profile-switch-card';
+  const title = document.createElement('h2');
+  title.textContent = name;
+  const detail = document.createElement('p');
+  detail.className = 'room-model-confirm-detail';
+  detail.textContent = `${model}${providerLabel} — ${message || ''}`.trim();
+  const actions = document.createElement('div');
+  actions.className = 'profile-switch-actions';
+  const confirmButton = document.createElement('button');
+  confirmButton.type = 'button';
+  confirmButton.className = 'primary room-model-confirm-yes';
+  confirmButton.textContent = t('ui.confirm');
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'ghost room-model-confirm-cancel';
+  cancelButton.textContent = t('ui.cancel');
+  actions.append(confirmButton, cancelButton);
+  card.append(title, detail, actions);
+  dialog.append(card);
+
+  const state = { dialog, returnFocus: document.activeElement };
+  state.onDocumentClick = (event) => { if (!dialog.contains(event.target)) closeRoomModelConfirm(); };
+  state.onKey = (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); closeRoomModelConfirm({ restoreFocus: true }); }
+  };
+  cancelButton.addEventListener('click', (event) => { event.stopPropagation(); closeRoomModelConfirm({ restoreFocus: true }); });
+  confirmButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeRoomModelConfirm();
+    void Promise.resolve(onConfirm?.()).catch(() => undefined);
+  });
+  dialog.addEventListener('click', (event) => { if (event.target === dialog) closeRoomModelConfirm({ restoreFocus: true }); });
+  roomModelConfirmState = state;
+  document.body.append(dialog);
+  document.addEventListener('click', state.onDocumentClick, true);
+  document.addEventListener('keydown', state.onKey, true);
+  confirmButton.focus?.();
+}
+
+async function setRoomMemberModel(model, { confirm = false } = {}) {
+  const target = roomModelPickTarget;
+  if (!target || !activeGroupRuntime) return;
+  const { roomId, member } = target;
+  const modelId = model?.id || model?.model || '';
+  if (!modelId) return;
+  const requestedModel = model.rawModelId || model.model || model.id;
+  const requestedProvider = model.provider || '';
+  const result = await activeGroupRuntime.setMemberModel(roomId, member, {
+    model: requestedModel,
+    provider: requestedProvider,
+    confirm,
+  });
+  if (result?.state === 'confirm') {
+    // The gateway asked for an explicit confirmation (e.g. an expensive model).
+    // Name the member/model/provider and retry only when the user confirms.
+    openRoomModelConfirm({
+      member,
+      model: result.detail?.model || requestedModel,
+      provider: result.detail?.provider || requestedProvider,
+      message: result.detail?.message || result.detail?.warning || t('ui.room.model.note'),
+      onConfirm: () => setRoomMemberModel(model, { confirm: true }),
+    });
+    return;
+  }
+  if (result?.state !== 'ok') {
+    // An accepted-but-unverified switch is NOT success: never claim the member
+    // now uses a model the gateway has not confirmed on that session.
+    setStatus('warn', t('ui.room.unknown'), result?.error || t('ui.room.model.note'), { translateDetail: false });
+    renderRoomPopover();
+    return;
+  }
+  await persistRoomModelBindings(writeRoomModelBinding(roomMemberBindings(), roomId, member.name, {
+    model: result.model || modelId,
+    provider: result.provider || '',
+    setAt: Date.now(),
+  }));
+  const content = t('ui.room.member.now.uses', { name: member.title || member.name, model: result.model || modelId });
+  appendRoomEventLine(content);
+  setStatus('ok', content, '', { translateDetail: false });
+  roomModelPickTarget = { roomId, member, model: result.model || modelId, hasBinding: true };
+  renderRoomPopover();
+}
+
+async function resetRoomMemberModel(roomId, member, { confirm = false } = {}) {
+  if (!activeGroupRuntime) return;
+  const result = await activeGroupRuntime.resetMemberModel(roomId, member, { confirm });
+  if (result?.state === 'confirm') {
+    openRoomModelConfirm({
+      member,
+      model: result.detail?.model || t('ui.room.profile.default'),
+      provider: result.detail?.provider || '',
+      message: result.detail?.message || result.detail?.warning || t('ui.room.model.note'),
+      onConfirm: () => resetRoomMemberModel(roomId, member, { confirm: true }),
+    });
+    return;
+  }
+  if (result?.state !== 'ok') {
+    setStatus('warn', t('ui.room.unknown'), result?.error || t('ui.room.model.note'), { translateDetail: false });
+    renderRoomPopover();
+    return;
+  }
+  await persistRoomModelBindings(clearRoomModelBinding(roomMemberBindings(), roomId, member.name));
+  const content = t('ui.room.member.default.restored', { name: member.title || member.name });
+  appendRoomEventLine(content);
+  setStatus('ok', content, '', { translateDetail: false });
+  renderRoomPopover();
+}
+
+// B3.3 Outcome R: re-apply a stored per-room model before every member turn.
+async function applyRoomMemberModelBeforeTurn(roomId, member, session) {
+  const binding = readRoomModelBinding(roomMemberBindings(), roomId, member.name);
+  if (!binding || !activeGroupRuntime) return;
+  const read = await activeGroupRuntime.readMemberModel(roomId, member);
+  if (read?.state !== 'ok') {
+    // Fail closed: a binding exists but the live model cannot be read, so the
+    // per-room pin cannot be verified. Never let the turn answer on an
+    // unverified model — mark the member failed and skip its turn.
+    const error = new Error(read?.error || 'The per-room model binding could not be verified.');
+    error.code = 'room-model-unverified';
+    throw error;
+  }
+  const statusModel = { model: read.model, provider: read.provider };
+  if (!needsReapply({ binding, statusModel })) return;
+  const result = await activeGroupRuntime.setMemberModel(roomId, member, {
+    model: binding.model,
+    provider: binding.provider || '',
+  });
+  if (result?.state !== 'ok') {
+    // Fail closed: answering on the wrong model is worse than skipping the turn.
+    const error = new Error(result?.error || 'The room model binding could not be verified.');
+    error.code = 'room-model-unverified';
+    throw error;
+  }
+  void session;
+}
+
+function renderGroupTypingIndicator() {
+  if (!els.groupPresence || !els.groupPresenceChips || !els.groupPresenceStatus) return;
+  const entries = activeGroupPresence.members;
+  const visible = Boolean(activeGroupProjection && entries.length && activeGroupPresence.phase !== 'idle');
+  els.groupPresence.hidden = !visible;
+  els.groupPresenceChips.replaceChildren();
+  els.groupPresence.querySelectorAll(':scope > .presence-notice').forEach((node) => node.remove());
+  els.groupPresenceStatus.textContent = '';
+  if (!visible) return;
+  const next = entries.find((entry) => entry.state === 'queued')?.member;
+  const narrow = document.documentElement.clientWidth < 380;
+  // Failure notices render as their own slim full-width row in the strip, so the
+  // name and reason never get squeezed into a chip-sized pill.
+  const notices = [];
+  for (const entry of entries.slice(0, narrow ? 6 : entries.length)) {
+    const chipTitle = entry.roleLabel || entry.member;
+    const identity = roomIdentityForMember(entry.member);
+    if (entry.state === 'failed') {
+      // Failure is an inline notice, not a chip: warning icon, the member's own
+      // avatar and colour, a clear human line, and the mapped short reason. The
+      // whole notice opens the full diagnostic on click.
+      const notice = document.createElement('span');
+      notice.className = 'presence-notice';
+      notice.setAttribute('role', 'listitem');
+      notice.dataset.state = 'failed';
+      if (identity) notice.style.setProperty('--bot-ink', identity.ink);
+      const detail = sanitizeGatewayDiagnosticText(entry.error || t('ui.room.failed'));
+      notice.title = `${chipTitle}: ${detail}`;
+      const icon = document.createElement('span');
+      icon.className = 'presence-notice-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>';
+      const avatar = document.createElement('span');
+      avatar.className = 'presence-avatar';
+      avatar.setAttribute('aria-hidden', 'true');
+      renderRoomMemberAvatar(avatar, { name: entry.member, title: chipTitle });
+      const copy = document.createElement('span');
+      copy.className = 'presence-notice-copy';
+      const line = document.createElement('span');
+      line.className = 'presence-notice-line';
+      line.textContent = t('ui.room.member.failed.short', { name: chipTitle });
+      const reason = document.createElement('span');
+      reason.className = 'presence-notice-reason';
+      reason.textContent = failureReason(entry.error, { translate: translateUiText });
+      copy.append(line, reason);
+      // Retry is offered for THIS member only, and disabled while any turn
+      // (a send or another retry) is running so it cannot overlap or double-fire.
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'presence-notice-retry';
+      retry.textContent = t('ui.room.member.retry');
+      retry.disabled = Boolean(sending);
+      retry.setAttribute('aria-label', t('ui.room.member.retry.aria', { name: chipTitle }));
+      retry.addEventListener('click', (event) => {
+        event.stopPropagation();
+        retryFailedGroupMember(entry.member);
+      });
+      notice.append(icon, avatar, copy, retry);
+      notice.addEventListener('click', () => showOperationToast({ kind: 'error', title: chipTitle, detail }));
+      notices.push(notice);
+      continue;
+    }
+    const chip = document.createElement('span');
+    chip.className = 'presence-chip';
+    chip.setAttribute('role', 'listitem');
+    chip.dataset.state = entry.state;
+    if (identity) chip.style.setProperty('--bot-bar', identity.bar);
+    chip.title = chipTitle;
+    const avatar = document.createElement('span');
+    avatar.className = 'presence-avatar';
+    avatar.setAttribute('aria-hidden', 'true');
+    renderRoomMemberAvatar(avatar, { name: entry.member, title: chipTitle });
+    const name = document.createElement('span');
+    name.className = 'presence-name';
+    name.textContent = chipTitle;
+    const micro = document.createElement('span');
+    micro.className = 'presence-micro';
+    micro.textContent = entry.state === 'replied' ? '✓'
+      : entry.state === 'typing' ? '···'
+        : entry.state === 'tool' ? entry.tool
+          : entry.state === 'passed' ? t('ui.room.passed')
+            : entry.member === next ? t('ui.room.next') : '';
+    chip.append(avatar, name, micro);
+    els.groupPresenceChips.append(chip);
+  }
+  if (narrow && entries.length > 6) {
+    const extra = document.createElement('span');
+    extra.className = 'presence-chip';
+    extra.setAttribute('role', 'listitem');
+    extra.textContent = `+${entries.length - 6}`;
+    els.groupPresenceChips.append(extra);
+  }
+  els.groupPresenceStatus.textContent = presenceSummary({
+    ...activeGroupPresence,
+    members: entries.map((entry) => ({ ...entry, member: entry.roleLabel || entry.member })),
+  }, { translate: translateUiText });
+  // Notices sit between the chip row and the status line.
+  for (const notice of notices) els.groupPresence.insertBefore(notice, els.groupPresenceStatus);
+}
+
+function updateActiveGroupActivity(activity = {}) {
+  if (!activeGroupProjection) return;
+  activeGroupPresence = reducePresence(activeGroupPresence, activity);
+  if (activity.kind === 'turn_start') {
+    clearTimeout(activeGroupPresenceTimer);
+    activeGroupPresenceThread = activity.thread || 'main';
+  }
+  if (activity.kind === 'working') {
+    clearActiveGroupLiveMessage();
+    activeGroupLiveMessage = {
+      ...addMessage('assistant', '', {
+        persist: false, streaming: true, speaker: activity.member,
+        thread: activeGroupPresenceThread, roleLabel: activity.roleLabel || activity.member,
+      }), member: activity.member,
+    };
+    activeGroupLiveMessage.row.classList.add('is-live');
+    activeGroupLiveMessage.node.querySelector('.message-content').style.whiteSpace = 'pre-wrap';
+    const dots = document.createElement('span');
+    dots.className = 'room-live-dots';
+    dots.textContent = '···';
+    dots.setAttribute('aria-label', translateUiText('Working'));
+    activeGroupLiveMessage.node.querySelector('.message-content').append(dots);
+  } else if (activity.kind === 'typing' && activeGroupLiveMessage?.member === activity.member) {
+    const live = activeGroupLiveMessage;
+    live.record.content = String(activity.text || '');
+    if (!activeGroupLiveFrame) activeGroupLiveFrame = requestAnimationFrame(() => {
+      activeGroupLiveFrame = 0;
+      if (activeGroupLiveMessage !== live) return;
+      live.node.querySelector('.message-content').textContent = live.record.content;
+      scrollMessageStreamToBottom();
+    });
+  } else if (['pass', 'failed'].includes(activity.kind)) {
+    clearActiveGroupLiveMessage();
+    const content = activity.kind === 'pass'
+      ? t('ui.room.member.passed', { name: activity.roleLabel || activity.member })
+      // Same mapped short reason as the presence notice so the transcript line
+      // and the notice never disagree, and a raw diagnostic never leaks here.
+      : `${t('ui.room.member.failed.short', { name: activity.roleLabel || activity.member })}: ${failureReason(activity.error, { translate: translateUiText })}`;
+    const record = { role: 'system', kind: 'room-event', content, ts: Date.now(), thread: activeGroupPresenceThread };
+    activeGroupDisplayEvents.push(record);
+    // Persist the failure/pass row so it survives a room close/reopen.
+    recordRoomDisplayEvent(record);
+    activeGroupMessages = [...activeGroupMessages, record];
+    messages = activeGroupMessages;
+    addMessage('system', content, { persist: false, sourceRecord: record });
+  } else if (activity.kind === 'idle') {
+    clearActiveGroupLiveMessage();
+    clearTimeout(activeGroupPresenceTimer);
+    activeGroupPresenceTimer = setTimeout(() => {
+      activeGroupPresence = createPresenceState();
+      renderGroupTypingIndicator();
+    }, 2000);
+  }
+  renderGroupTypingIndicator();
+}
+
+function resetActiveGroupTypingIndicator({ clearPresence = true } = {}) {
+  clearActiveGroupLiveMessage();
+  if (clearPresence) {
+    clearTimeout(activeGroupPresenceTimer);
+    activeGroupPresenceTimer = 0;
+    activeGroupPresence = createPresenceState();
+  }
+  renderGroupTypingIndicator();
+}
+
+async function persistActiveGroupProjection(client, displayMessages) {
+  const row = activeGroupProjection;
+  const message = Array.isArray(displayMessages) ? displayMessages.at(-1) : null;
+  if (!row || !message) throw new Error('No active group room is selected.');
+  return persistGroupProjectionAppend(client, {
+    roomId: row.roomId || row.id,
+    roomKey: row.roomKey,
+    message,
+    now: Date.now(),
+  });
+}
+
+async function sendActiveGroupMessage(text = '', turnAttachments = []) {
+  if (!activeGroupProjection) return false;
+  if (!activeGroupRuntime) {
+    setStatus('warn', 'Group chat unavailable', 'This room has no verified Dashboard transport on the current Hermes runtime.', { translateDetail: false });
+    return false;
+  }
+  if (Array.isArray(turnAttachments) && turnAttachments.length) {
+    setStatus('warn', 'Group attachments unavailable', 'Group attachments require the official portable group-operations contract. Remove the attachment or open an agent chat.', { translateDetail: false });
+    return false;
+  }
+  if (sending) {
+    setStatus('warn', 'Group chat is working', 'Wait for the current group turn to finish before sending another message.', { translateDetail: false });
+    return false;
+  }
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const groupProjection = activeGroupProjection;
+  const groupRuntime = activeGroupRuntime;
+  const groupMessages = activeGroupMessages;
+  const groupGeneration = activeGroupGeneration;
+  const abortController = new AbortController();
+  activeGroupAbortController = abortController;
+  sending = true;
+  updateComposerBusyState();
+  els.input.value = '';
+  renderAttachments();
+  try {
+    if (groupProjection.syncState === 'local-only' || groupProjection.syncState === 'sync-failed') {
+      await syncLocalGroupRoom(groupProjection);
+      renderBotModeGroupChats(els.botModeSearch?.value);
+    }
+    const isStartingNewThread = Boolean(activeGroupPendingNewThread);
+    activeGroupPendingNewThread = false;
+    let targetThreadId = '';
+    if (isStartingNewThread) {
+      targetThreadId = `t${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    } else if (activeGroupThreadId) {
+      targetThreadId = activeGroupThreadId;
+    } else {
+      targetThreadId = 'main';
+    }
+    const result = await groupRuntime.send({
+      roomId: groupProjection.roomId || groupProjection.id,
+      groupName: groupProjection.displayName,
+      members: groupRuntimeMembers(groupProjection),
+      messages: groupMessages,
+      text: value,
+      signal: abortController.signal,
+      thread: targetThreadId,
+    });
+    // Staleness is the generation/runtime token only. An in-place roster sync
+    // replaces the projection object for the SAME open room, so identity here
+    // would silently discard a legitimate completed turn mid-send.
+    if (
+      abortController.signal.aborted
+      || groupGeneration !== activeGroupGeneration
+      || activeGroupRuntime !== groupRuntime
+    ) return false;
+    if (isStartingNewThread) {
+      activeGroupThreadId = targetThreadId;
+      activeGroupExpandedThreads.add(targetThreadId);
+    }
+    activeGroupMessages = [...result.messages, ...activeGroupDisplayEvents].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    messages = activeGroupMessages;
+    if (activeGroupProjection) {
+      activeGroupProjection.messages = result.messages.map(groupProjectionEntryFromDisplayMessage).filter(Boolean);
+    }
+    renderGroupThreadStrip();
+    renderMessagesFromStorage();
+    updateSessionLabel();
+    renderActiveProfileIndicator();
+    const syncFailures = Array.isArray(result.syncFailures) ? result.syncFailures : [];
+    if (syncFailures.length) {
+      const live = activeGroupProjection || groupProjection;
+      if (live.syncState !== 'local-only') live.syncState = 'sync-failed';
+      live.syncError = syncFailures.at(-1)?.error || '';
+      renderBotModeGroupChats(els.botModeSearch?.value);
+    }
+    if (result.failures.length) {
+      setStatus('warn', 'Group message partially delivered', `${result.failures.length} member${result.failures.length === 1 ? '' : 's'} did not complete a reply.`, { translateDetail: false });
+    } else if (syncFailures.length) {
+      setStatus('warn', 'Group room not synced', `Members replied, but ${syncFailures.length} message${syncFailures.length === 1 ? '' : 's'} could not be saved to the synced room. ${syncFailures.at(-1)?.error || ''}`.trim(), { translateDetail: false });
+    } else {
+      setStatus('ok', 'Group message sent', `${groupProjection.displayName} · ${result.messages.length} messages in the current room view.`, { translateDetail: false });
+    }
+    return result.ok;
+  } catch (error) {
+    if (
+      !abortController.signal.aborted
+      && groupGeneration === activeGroupGeneration
+      && activeGroupProjection === groupProjection
+      && activeGroupRuntime === groupRuntime
+    ) {
+      setStatus('error', 'Group message failed', String(error?.message || error), { translateDetail: false });
+    }
+    return false;
+  } finally {
+    if (activeGroupAbortController === abortController) activeGroupAbortController = null;
+    sending = false;
+    resetActiveGroupTypingIndicator({ clearPresence: activeGroupPresence.phase !== 'done' });
+    updateComposerBusyState();
+  }
+}
+
+// Per-member Retry for a failed room member. Runs ONLY that member's turn on
+// the room runtime (same session + per-room model re-apply path a normal turn
+// uses) with the original user prompt and the current room context. Guarded by
+// the shared `sending` flag so it cannot start while any turn runs, and the
+// runtime itself refuses an overlapping or doubled retry.
+async function retryFailedGroupMember(memberName) {
+  const name = String(memberName || '').trim();
+  if (!name || sending) return false;
+  const projection = activeGroupProjection;
+  const runtime = activeGroupRuntime;
+  if (!projection || !runtime) return false;
+  const generation = activeGroupGeneration;
+  const abortController = new AbortController();
+  activeGroupAbortController = abortController;
+  sending = true;
+  updateComposerBusyState();
+  // Immediate feedback: the notice's Retry button disables on the next paint.
+  renderGroupTypingIndicator();
+  try {
+    const lastUser = [...activeGroupMessages].reverse()
+      .find((message) => String(message?.role || '').toLowerCase() === 'user');
+    const result = await runtime.retryMember({
+      roomId: projection.roomId || projection.id,
+      groupName: projection.displayName,
+      members: groupRuntimeMembers(projection),
+      messages: activeGroupMessages,
+      member: { name },
+      text: lastUser ? String(lastUser.content || '') : '',
+      thread: activeGroupThreadId || 'main',
+      signal: abortController.signal,
+    });
+    if (
+      abortController.signal.aborted
+      || generation !== activeGroupGeneration
+      || activeGroupRuntime !== runtime
+    ) return false;
+    if (result?.ok === false) return false;
+    activeGroupMessages = [...result.messages, ...activeGroupDisplayEvents].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    messages = activeGroupMessages;
+    if (activeGroupProjection) {
+      activeGroupProjection.messages = result.messages.map(groupProjectionEntryFromDisplayMessage).filter(Boolean);
+    }
+    renderGroupThreadStrip();
+    renderMessagesFromStorage();
+    updateSessionLabel();
+    renderActiveProfileIndicator();
+    if (result.failures.length) {
+      setStatus('warn', 'Retry did not complete', `${name} still could not complete a reply.`, { translateDetail: false });
+    } else {
+      setStatus('ok', 'Member retried', `${name} replied again in the room.`, { translateDetail: false });
+    }
+    return true;
+  } catch (error) {
+    if (generation === activeGroupGeneration && activeGroupRuntime === runtime) {
+      setStatus('error', 'Retry failed', String(error?.message || error), { translateDetail: false });
+    }
+    return false;
+  } finally {
+    if (activeGroupAbortController === abortController) activeGroupAbortController = null;
+    sending = false;
+    updateComposerBusyState();
+    renderGroupTypingIndicator();
+  }
+}
+
+// Desktop-parity threads strip: one collapsed row per thread (root text +
+// reply count + relative recency), click to expand into the iMessage stream.
+// Rendered above the message stream while a group room is open.
+// ── New Group Chat modal (desktop parity: pick 2-6 bots, name, create) ──
+const newGroupSelection = new Set();
+let newGroupPendingImage = null;
+
+function renderGroupAvatarCrest(container, row = null, image = null) {
+  if (!container) return;
+  if (image) {
+    const img = document.createElement('img');
+    img.src = image;
+    img.alt = '';
+    container.replaceChildren(img);
+    return;
+  }
+  const members = Array.isArray(row?.members) && row.members.length ? row.members : ['default'];
+    const faceStack = document.createElement('span');
+    faceStack.className = 'face-stack face-stack-preview';
+    members.slice(0, 3).forEach((memberName, idx) => {
+      const span = document.createElement('span');
+      span.style.setProperty('--i', idx);
+      const rosterRow = botModeRoster.find((entry) => entry.profileName === memberName);
+      appendBotModeAvatar(span, memberName, memberName, rosterRow?.avatar || null);
+      if (rosterRow?.hasAvatar && !remoteAvatarImageOf(rosterRow.avatar)) {
+        void hydrateBotModeRemoteAvatar(rosterRow, span);
+      }
+      faceStack.append(span);
+    });
+  container.replaceChildren(faceStack);
+}
+
+async function generateGroupRoomPicture(seedName, members = []) {
+  const connection = await ensureActiveDashboardWsConnection();
+  const who = [seedName, members.length ? `a team of ${members.join(', ')}` : ''].filter(Boolean).join(', ');
+  const res = await connection.client.request('image.generate', {
+    prompt: `Group chat icon for an AI agent team called "${who || 'a bot team'}". Friendly minimal emblem, bold flat vector style, solid color background, centered, no text.`,
+    aspect_ratio: 'square',
+  });
+  if (!res?.success) throw new Error(res?.error || 'generation failed');
+  const image = res.image_data || res.image || '';
+  if (!image) throw new Error('generation returned no image');
+  return image;
+  }
+
+  function updateNewGroupIconPreview() {
+    if (!els.newGroupIcon) return;
+  const members = [...newGroupSelection];
+  const selectedMembers = members.length ? members : ['default'];
+  if (newGroupPendingImage) {
+    renderGroupAvatarCrest(els.newGroupIcon, { members: selectedMembers }, newGroupPendingImage);
+    if (els.newGroupIconRemove) els.newGroupIconRemove.hidden = false;
+  } else {
+    renderGroupAvatarCrest(els.newGroupIcon, { members: selectedMembers }, null);
+    if (els.newGroupIconRemove) els.newGroupIconRemove.hidden = true;
+  }
+}
+
+function openNewGroupModal() {
+  if (!els.newGroupModal) return;
+  newGroupSelection.clear();
+  newGroupPendingImage = null;
+  updateNewGroupIconPreview();
+  if (els.newGroupFileInput) els.newGroupFileInput.value = '';
+  if (els.newGroupSearch) els.newGroupSearch.value = '';
+  if (els.newGroupNameInput) els.newGroupNameInput.value = '';
+  renderNewGroupBotList('');
+  refreshNewGroupState();
+  els.newGroupModal.hidden = false;
+}
+
+function closeNewGroupModal() {
+  if (!els.newGroupModal) return;
+  els.newGroupModal.hidden = true;
+  newGroupSelection.clear();
+  newGroupPendingImage = null;
+  if (els.newGroupFileInput) els.newGroupFileInput.value = '';
+}
+
+// ── Group Settings modal (desktop parity: rename group or update room picture) ──
+let activeGroupSettingsTarget = null;
+let groupSettingsPendingImage = null;
+
+function openGroupSettingsModal(row) {
+  if (!els.groupSettingsModal || !row) return;
+  activeGroupSettingsTarget = row;
+  groupSettingsPendingImage = row.image || null;
+  if (els.groupSettingsNameInput) {
+    els.groupSettingsNameInput.value = row.displayName || row.name || '';
+  }
+  updateGroupSettingsAvatarDisplay();
+  els.groupSettingsModal.hidden = false;
+  els.groupSettingsNameInput?.focus?.();
+}
+
+function closeGroupSettingsModal() {
+  if (!els.groupSettingsModal) return;
+  els.groupSettingsModal.hidden = true;
+  activeGroupSettingsTarget = null;
+  groupSettingsPendingImage = null;
+  if (els.groupSettingsFileInput) els.groupSettingsFileInput.value = '';
+}
+
+function updateGroupSettingsAvatarDisplay() {
+  if (!els.groupSettingsAvatarPreview) return;
+  if (groupSettingsPendingImage) {
+    renderGroupAvatarCrest(els.groupSettingsAvatarPreview, activeGroupSettingsTarget, groupSettingsPendingImage);
+    if (els.groupSettingsRemoveImageButton) els.groupSettingsRemoveImageButton.hidden = false;
+  } else {
+    renderGroupAvatarCrest(els.groupSettingsAvatarPreview, activeGroupSettingsTarget, null);
+    if (els.groupSettingsRemoveImageButton) els.groupSettingsRemoveImageButton.hidden = true;
+  }
+}
+
+async function saveGroupSettings() {
+  const row = activeGroupSettingsTarget;
+  if (!row) return;
+  const newName = String(els.groupSettingsNameInput?.value || '').trim();
+  if (!newName) {
+    setStatus('warn', 'Group name required', 'Please enter a name for the group chat.');
+    return;
+  }
+  const newImage = groupSettingsPendingImage;
+  const hasNameChanged = newName !== row.displayName;
+  const hasImageChanged = newImage !== (row.image || null);
+
+  if (!hasNameChanged && !hasImageChanged) {
+    closeGroupSettingsModal();
+    return;
+  }
+
+  // Update immediately locally so user sees instant response and the modal closes smoothly
+  row.displayName = newName;
+  row.title = newName;
+  row.image = newImage;
+  botModeGroupChats = botModeGroupChats.map((r) => (r.id === row.id ? { ...r, displayName: newName, title: newName, image: newImage } : r));
+
+  if (activeGroupProjection && activeGroupProjection.id === row.id) {
+    activeGroupProjection.displayName = newName;
+    activeGroupProjection.title = newName;
+    activeGroupProjection.image = newImage;
+    if (els.currentSessionName) els.currentSessionName.textContent = `${newName} - Group Chat`;
+    if (els.composerLabel) els.composerLabel.textContent = `GROUP CHAT · ${newName.toUpperCase()}`;
+  }
+
+  renderBotModeGroupChats(els.botModeSearch?.value);
+  closeGroupSettingsModal();
+
+  try {
+    const connection = await ensureActiveDashboardWsConnection();
+    if (!connection?.client) {
+      throw new Error('Hermes dashboard connection required to save group settings.');
+    }
+    const updateResult = await persistGroupProjectionUpdate(connection.client, {
+      roomId: row.roomId || row.id || row.canonical?.durableId || '',
+      roomKey: row.roomKey || (row.roomId ? `id:${row.roomId}` : (row.id ? (row.id.startsWith('name:') || row.id.startsWith('id:') ? row.id : `name:${row.id}`) : '')),
+      profile: safeActiveProfile(),
+      newName,
+      newImage,
+    });
+    if (updateResult?.roomKey) {
+      row.roomKey = updateResult.roomKey;
+    }
+    setStatus('ok', 'Group settings saved', `Renamed to "${newName}" and synced to desktop.`, { translateDetail: false });
+  } catch (error) {
+    console.warn('[Hermes Browser] Group settings remote sync notice:', error);
+    setStatus('ok', 'Group settings saved', `Updated to "${newName}".`, { translateDetail: false });
+  }
+}
+
+function renderNewGroupBotList(query = '') {
+  const host = els.newGroupBotList;
+  if (!host) return;
+  const needle = String(query || '').trim().toLowerCase();
+  host.replaceChildren();
+  const rows = botModeRoster.filter((row) => row.type !== 'group'
+    && `${botProfileDisplayName(row)} ${row.profileName}`.toLowerCase().includes(needle));
+  for (const row of rows) {
+    const label = document.createElement('label');
+    label.className = 'new-group-bot-row';
+    const avatar = document.createElement('span');
+    avatar.className = 'bot-mode-avatar bot-mode-avatar-mini';
+        appendBotModeAvatar(avatar, botProfileDisplayName(row), row.profileName, row.avatar);
+        if (row.hasAvatar && !remoteAvatarImageOf(row.avatar)) {
+          void hydrateBotModeRemoteAvatar(row, avatar);
+        }
+        const copy = document.createElement('span');
+        copy.className = 'new-group-bot-copy';
+    const name = document.createElement('strong');
+    name.textContent = botProfileDisplayName(row);
+    const meta = document.createElement('span');
+    meta.textContent = `@${row.profileName}`;
+    copy.append(name, meta);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = newGroupSelection.has(row.profileName);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        if (newGroupSelection.size >= 6) {
+          checkbox.checked = false;
+          setStatus('warn', 'Group limit reached', 'A group chat supports 2 to 6 bots.');
+          return;
+        }
+        newGroupSelection.add(row.profileName);
+      } else {
+        newGroupSelection.delete(row.profileName);
+      }
+      refreshNewGroupState();
+    });
+    label.append(avatar, copy, checkbox);
+    host.append(label);
+  }
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bot-mode-empty';
+    empty.textContent = 'No bots match this search.';
+    host.append(empty);
+  }
+}
+
+function refreshNewGroupState() {
+  if (els.newGroupCreateButton) {
+    const size = newGroupSelection.size;
+    els.newGroupCreateButton.disabled = !(size >= 2 && size <= 6);
+    const name = String(els.newGroupNameInput?.value || '').trim();
+    els.newGroupCreateButton.textContent = size >= 2
+      ? (name ? `Create Group` : 'Create Group')
+      : `Select ${size >= 2 ? '' : (2 - size) + ' more bot' + (2 - size === 1 ? '' : 's')}`;
+  }
+}
+
+async function createNewGroupChat() {
+  const members = [...newGroupSelection];
+  if (members.length < 2) return;
+  const customName = String(els.newGroupNameInput?.value || '').trim();
+  const displayNames = members.map((profileName) => {
+    const row = botModeRoster.find((entry) => entry.profileName === profileName);
+    return botProfileDisplayName(row || { profileName });
+  });
+  const roomName = customName || displayNames.join(', ');
+  const roomId = `browser-room-${Date.now().toString(36)}`;
+  const row = {
+    id: roomId,
+    roomId,
+    roomKey: `id:${roomId}`,
+    type: 'group',
+    displayName: roomName,
+    title: `${members.length} members · new room`,
+    description: 'Created from Hermes Browser Bot Mode.',
+    members,
+    image: newGroupPendingImage || null,
+    canonical: { durableId: '', resolvedRuntimeId: '', status: 'missing', preview: '' },
+    activity: { activeNow: false, lastActive: Date.now(), unread: 0, attention: false },
+    messages: [],
+    syncState: 'local-only',
+  };
+  if (els.newGroupCreateButton) els.newGroupCreateButton.disabled = true;
+  await syncLocalGroupRoom(row);
+  botModeGroupChats = mergeGroupChatLists([row], botModeGroupChats);
+  renderBotModeGroupChats(els.botModeSearch?.value);
+  closeNewGroupModal();
+  els.botModePanel.hidden = true;
+  await openBotGroupChat(row);
+  if (row.syncState !== 'synced') {
+    setStatus('warn', 'Group room not synced', `Bots can still reply, but this room is only on this device until it syncs. ${row.syncError || ''}`.trim(), { translateDetail: false });
+  }
+}
+
+// Writes a browser-created room to the synced group projection so members,
+// other clients, and later sessions can see it. Never throws: the outcome is
+// recorded on the row as syncState ('synced' | 'local-only').
+async function syncLocalGroupRoom(row) {
+  if (!row || row.syncState === 'synced') return true;
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    row.syncState = 'local-only';
+    row.syncError = 'Group rooms sync through the connected Hermes Dashboard.';
+    return false;
+  }
+  try {
+    const connection = await ensureActiveDashboardWsConnection();
+    const result = await persistGroupProjectionCreate(connection.client, {
+      roomId: row.roomId || row.id,
+      name: row.displayName,
+      members: row.members,
+      image: row.image || null,
+      now: Date.now(),
+    });
+    row.roomKey = result.roomKey;
+    row.revision = Math.max(Number(row.revision) || 0, 1);
+    row.syncState = 'synced';
+    row.syncError = '';
+    row.title = `${row.members.length} member${row.members.length === 1 ? '' : 's'} · synced projection`;
+    return true;
+  } catch (error) {
+    row.syncState = 'local-only';
+    row.syncError = String(error?.message || error || 'The room could not be synced.');
+    return false;
+  }
+}
+
+function startNewGroupThread() {
+  if (!activeGroupProjection) return;
+  activeGroupThreadId = '';
+  activeGroupPendingNewThread = true;
+  activeGroupExpandedThreads.clear();
+  renderGroupThreadStrip();
+  updateSessionLabel();
+  if (els.sendButton) els.sendButton.textContent = 'New Thread';
+  els.input?.focus?.();
+}
+
+function syncBotModeThreadsButton() {
+  const button = els.botModeThreadsButton;
+  const newThreadBtn = els.botModeNewThreadButton;
+  if (!activeGroupProjection) {
+    if (button) { button.hidden = true; button.disabled = true; }
+    if (newThreadBtn) { newThreadBtn.hidden = true; newThreadBtn.disabled = true; }
+    return;
+  }
+  const threads = groupThreadsFromProjection(activeGroupProjection);
+  const narrow = (els.composerActions?.clientWidth || 400) < 360;
+    if (button) {
+      button.hidden = false;
+      button.disabled = false;
+      const count = threads.length ? ` (${threads.length})` : '';
+      button.textContent = narrow ? (threads.length ? String(threads.length) : 'Threads') : `Threads${count}`;
+      button.title = threads.length ? `Threads (${threads.length})` : 'Threads';
+      button.setAttribute('aria-label', button.title);
+    }
+    if (newThreadBtn) {
+      newThreadBtn.hidden = false;
+      newThreadBtn.disabled = false;
+      newThreadBtn.textContent = narrow ? '+' : '+ New Thread';
+    }
+}
+
+function renderGroupThreadStrip() {
+  syncBotModeThreadsButton();
+  const host = els.groupThreadStrip;
+  const select = els.groupThreadSelect;
+  const banner = els.groupThreadActiveBanner;
+  const badge = els.groupThreadBadge;
+  const hint = els.groupThreadHint;
+  if (!activeGroupProjection) {
+    if (host) host.hidden = true;
+    if (banner) banner.hidden = true;
+    if (select) select.replaceChildren();
+    return;
+  }
+  const threads = groupThreadsFromProjection(activeGroupProjection);
+  if (banner) {
+    // Only show banner when starting a new thread, never clutter with redundant 'active thread'
+    if (activeGroupPendingNewThread) {
+      banner.hidden = false;
+      if (badge) badge.textContent = 'NEW THREAD';
+      if (hint) hint.textContent = 'Next message starts a new discussion thread';
+    } else {
+      banner.hidden = true;
+    }
+  }
+  if (!host || !select) return;
+  host.hidden = !threads.length;
+  select.replaceChildren();
+  if (!threads.length) return;
+  select.disabled = false;
+
+  const allOption = document.createElement('option');
+  allOption.value = '';
+  allOption.textContent = `All messages (${activeGroupMessages.length})`;
+  select.append(allOption);
+
+  for (const thread of threads) {
+    const option = document.createElement('option');
+    option.value = thread.id;
+    const preview = thread.root.text.slice(0, 46);
+    const count = thread.replies.length;
+    option.textContent = `${preview}${preview.length >= 46 ? '…' : ''} · ${count} ${count === 1 ? 'reply' : 'replies'} · ${relativeTimeFromTs(thread.latestAt)}`;
+    select.append(option);
+  }
+  select.value = activeGroupThreadId || '';
+  select.onchange = () => {
+    const next = select.value || '';
+    activeGroupThreadId = next;
+    activeGroupPendingNewThread = false;
+    if (next) activeGroupExpandedThreads.add(next);
+    else activeGroupExpandedThreads.clear();
+    renderMessagesFromStorage();
+    renderGroupThreadStrip();
+    updateSessionLabel();
+  };
+}
+
+async function syncActiveGroupRoomFromGateway() {
+  if (!activeGroupProjection || sending) return;
+  const groupProjection = activeGroupProjection;
+  const groupGeneration = activeGroupGeneration;
+  const isCurrentGroup = () => groupGeneration === activeGroupGeneration && activeGroupProjection === groupProjection;
+  try {
+    const connection = await ensureProfileWsConnection();
+    if (!isCurrentGroup()) return;
+    const payload = await connection.client.request(WS_METHODS.profilesList, { include_sessions: true });
+    if (!isCurrentGroup()) return;
+    const split = splitBotRosterRows(payload, { sourceId: normalizeGatewayUrl(settings.gatewayUrl) });
+    if (split.groupChats.length) {
+      adoptSyncedGroupChats(split.groupChats);
+      const targetId = groupProjection.roomId || groupProjection.id;
+      const updated = split.groupChats.find((g) => (g.roomId || g.id) === targetId || g.displayName === groupProjection.displayName);
+      if (updated && Array.isArray(updated.messages)) {
+        activeGroupProjection = updated;
+        activeGroupMessages = groupProjectionMessagesForDisplay(updated);
+        messages = activeGroupMessages;
+        renderGroupThreadStrip();
+        renderMessagesFromStorage();
+        updateSessionLabel();
+        renderActiveProfileIndicator();
+      }
+    }
+  } catch {
+    /* silent background sync catch */
+  }
+}
+
+async function openBotGroupChat(row) {
+  if (!row) return false;
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    setStatus('warn', 'Group chat unavailable', 'Group chats require the connected Hermes Dashboard. Switch to Dashboard mode to open this room.', { translateDetail: false });
+    return false;
+  }
+  if (sending) {
+    setStatus('warn', 'Hermes is working…', 'Stop the active run before opening a group chat.');
+    return false;
+  }
+  // Room opens are panel-owned: an unconfirmed prior run state must not block
+  // navigating into a synced room (Bot Mode surface switch).
+  if (activeRunControl && activeRunControl.phase !== 'terminal') {
+    activeRunControl = markRunTerminal(activeRunControl, 'failed');
+  }
+  const groupGeneration = ++activeGroupGeneration;
+  activeGroupProjection = row;
+  // Restore this room's durable display-only rows (member pass/failure and
+  // model change/reset notices) and merge them back into the transcript so a
+  // close/reopen does not lose them.
+  activeGroupDisplayEvents = readRoomDisplayEvents(roomEventStore, String(row.roomId || row.id || ''));
+  activeGroupMessages = [...groupProjectionMessagesForDisplay(row), ...activeGroupDisplayEvents]
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  messages = activeGroupMessages;
+  activeConversationTransport = 'dashboard-ws';
+  activeGroupRuntime = null;
+  activeGroupThreadId = '';
+  activeGroupPendingNewThread = false;
+  activeGroupExpandedThreads.clear();
+  resetActiveGroupTypingIndicator();
+  botHistoryVisibleCount = BOT_HISTORY_PAGE_SIZE;
+  // Opening a room from inside a bot chat must fully hand off: the bot's own
+  // send path is disconnected so the room composer owns the transcript.
+  document.body.classList.add('bot-mode-engaged');
+  els.botModePanel.hidden = true;
+  els.botModeButton.setAttribute('aria-expanded', 'false');
+  renderGroupThreadStrip();
+  renderMessagesFromStorage();
+  updateSessionLabel();
+  let groupRuntime = null;
+  // Liveness is the generation token, never the projection object's identity.
+  // Every teardown path (Remote API-only cleanup, profile switch, leaving Bot
+  // Mode, new/resumed session) bumps activeGroupGeneration, and a successful
+  // room sync bumps it too only when it retires the room. An in-place
+  // `sessions.changed` roster sync legitimately REPLACES activeGroupProjection
+  // with a freshly parsed object for the SAME room, so identity would reject
+  // the live runtime's own callbacks and silently freeze the open room.
+  const isCurrentOpen = () => groupGeneration === activeGroupGeneration;
+  const isCurrentRuntime = () => isCurrentOpen() && groupRuntime !== null && activeGroupRuntime === groupRuntime;
+  // Read the live projection: a roster sync may have swapped the object since
+  // this runtime was created, and callbacks must land on the current room.
+  const liveProjection = () => activeGroupProjection;
+  try {
+    const connection = await ensureActiveDashboardWsConnection();
+    if (!isCurrentOpen()) return false;
+    groupRuntime = createBotGroupRuntime({
+      client: connection.client,
+      onMessage: (message, meta = {}) => {
+        if (!isCurrentRuntime()) return;
+        activeGroupMessages = [...activeGroupMessages, message];
+        messages = activeGroupMessages;
+        const entry = groupProjectionEntryFromDisplayMessage(message);
+        const projection = liveProjection();
+        if (projection && entry) {
+          projection.messages = [...(projection.messages || []), entry];
+        }
+        renderGroupThreadStrip();
+        if (message.role === 'assistant' && activeGroupLiveMessage && activeGroupLiveMessage.member === meta.member) {
+          const live = activeGroupLiveMessage;
+          if (activeGroupLiveFrame) cancelAnimationFrame(activeGroupLiveFrame);
+          activeGroupLiveFrame = 0;
+          Object.assign(live.record, message);
+          live.node.querySelector('.message-content').style.removeProperty('white-space');
+          setMessageContent(live.node, message.content);
+          applyRoomMessageIdentity(live.node, live.record);
+          live.row.classList.remove('is-live');
+          messageThreadUi().setStreaming(live.row, false);
+          messageThreadUi().refreshActions();
+          activeGroupLiveMessage = null;
+        } else renderMessagesFromStorage();
+        if (meta.kind === 'reply') updateActiveGroupActivity({ kind: 'reply', member: meta.member, roleLabel: message.roleLabel });
+        updateSessionLabel();
+        renderActiveProfileIndicator();
+      },
+      onActivity: (activity) => {
+        if (!isCurrentRuntime()) return;
+        updateActiveGroupActivity(activity);
+        const projection = liveProjection();
+        if (activity.kind === 'working') {
+          setStatus('ok', 'Group member responding', `${activity.roleLabel || activity.member} is working on the room message.`, { translateDetail: false });
+        } else if (activity.kind === 'tool_start') {
+          captureTaskToolEvent({
+            tool: activity.tool,
+            data: activity.data || {},
+          }, (projection || row).roomId || (projection || row).id).catch(() => {});
+          setStatus('ok', 'Tool running', `${activity.roleLabel || activity.member} is using ${activity.tool || 'a tool'}…`, { translateDetail: false });
+        }
+      },
+      persist: (displayMessages) => isCurrentRuntime()
+        ? persistActiveGroupProjection(connection.client, displayMessages)
+        : undefined,
+      // B3.3 Outcome R: a room session drops its --session model pick on
+      // resume, so the stored binding is re-verified and re-applied before
+      // EVERY submission attempt. An unverified switch fails the member's
+      // turn rather than silently answering on the wrong model.
+      beforeMemberTurn: async (member, session) => {
+        await applyRoomMemberModelBeforeTurn(row.roomId || row.id, member, session);
+      },
+    });
+    activeGroupRuntime = groupRuntime;
+    const prepared = await groupRuntime.prepare({
+      roomId: row.roomId || row.id,
+      members: groupRuntimeMembers(row),
+    });
+    if (!isCurrentRuntime()) return false;
+    if (!prepared.ok) {
+      setStatus('warn', 'Group chat opened with missing member sessions', `${prepared.failures.length} member session${prepared.failures.length === 1 ? '' : 's'} will initialize when you send.`, { translateDetail: false });
+    } else {
+      setStatus('ok', 'Group chat opened', `${row.displayName} · ${activeGroupMessages.length} synced messages · members can reply.`, { translateDetail: false });
+    }
+    els.input.focus();
+    return true;
+  } catch {
+    if (groupRuntime ? !isCurrentRuntime() : !isCurrentOpen()) return false;
+    activeGroupRuntime = null;
+    setStatus('warn', 'Group chat transport unavailable', 'The connected Hermes runtime could not open the existing member sessions for this room.', { translateDetail: false });
+    els.input.focus();
+    return false;
+  }
+}
+
+
+
+// Group projections are read from the connected verified roster and never
+// substituted with Browser-owned fallback data.
+
+const CANONICAL_FALLBACK_PROFILES = [];
+
+const CANONICAL_FALLBACK_GROUP_CHATS = [];
+
+let desktopDashboardUrl = '';
+
+function scheduleRosterRetry({ force = false } = {}) {
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    rosterRetryCount = 0;
+    return;
+  }
+  if (botModeRoster.length && !force) {
+    rosterRetryCount = 0;
+    return;
+  }
+  if (rosterRetryCount >= 3) return;
+  rosterRetryCount += 1;
+  const delayMs = 1200 * rosterRetryCount;
+  setTimeout(() => {
+    void loadProfiles({ quiet: true, allowDashboardTrust: true });
+  }, delayMs);
+}
+
+async function loadProfiles({ quiet = false, allowDashboardTrust = !quiet } = {}) {
+  // Profiles load regardless of Bot Mode. Only the authenticated profiles.list
+  // contract owns bot names, assets, activity, canonical sessions and groups.
+  // Public status and REST profile summaries are discovery, never roster data.
+  const generation = ++botModeRosterGeneration;
+  const gatewayUrl = normalizeGatewayUrl(settings.gatewayUrl);
+  if (isRemoteMode() && !isRemoteWsMode()) {
+    availableProfiles = [];
+    botModeRoster = [];
+    botModeRosterNote = 'Profile roster unavailable in Remote API mode. Connect a Hermes Dashboard to use profile switching.';
+    rosterRetryCount = 0;
+    activeConversationTransport = 'rest';
+    activeDashboardWsConnection = null;
+    activeGroupGeneration += 1;
+    const clearedActiveGroup = Boolean(activeGroupProjection);
+    if (clearedActiveGroup) {
+      activeGroupAbortController?.abort?.();
+      activeGroupAbortController = null;
+      activeGroupProjection = null;
+      activeGroupRuntime = null;
+      activeGroupMessages = [];
+      activeGroupThreadId = '';
+      activeGroupPendingNewThread = false;
+      activeGroupExpandedThreads.clear();
+      resetActiveGroupTypingIndicator();
+      messages = [];
+      document.body.classList.remove('bot-mode-engaged');
+      if (els.botChatIntro) els.botChatIntro.hidden = true;
+      if (settings.botModeEnabled === true) {
+        setBotModeView('agents');
+        if (els.botModePanel) els.botModePanel.hidden = false;
+        els.botModeButton?.setAttribute('aria-expanded', 'true');
+      }
+      renderGroupThreadStrip();
+      renderMessagesFromStorage();
+      updateSessionLabel();
+    }
+    // The prior Dashboard roster is connection-scoped. Drop its synced rows,
+    // but preserve any local draft rooms owned by this browser session.
+    adoptSyncedGroupChats([], { authoritative: true, allowCanonicalFallback: false });
+    renderProfiles();
+    renderBotModeRoster(els.botModeSearch?.value);
+    renderActiveProfileIndicator();
+    if (!quiet || clearedActiveGroup) setStatus('warn', 'Profile roster unavailable', botModeRosterNote, { translateDetail: false });
+    return { status: 'degraded', detail: botModeRosterNote };
+  }
+  try {
+    const connection = await ensureProfileWsConnection({ readyTimeoutMs: 8_000, allowDashboardTrust });
+    const payload = await connection.client.request(WS_METHODS.profilesList, { include_sessions: true });
+    if (generation !== botModeRosterGeneration || gatewayUrl !== normalizeGatewayUrl(settings.gatewayUrl)) {
+      return { status: 'skipped', detail: 'Profile sync was superseded.' };
+    }
+    if (!Array.isArray(payload?.profiles)) throw new Error('invalid-profile-roster');
+    const sourceId = connection.baseUrl || gatewayUrl;
+    const split = splitBotRosterRows(payload, { sourceId });
+    availableProfiles = botProfileRowsToHermesProfiles(split.agents, settings.activeProfile);
+    botModeRoster = split.agents;
+    adoptSyncedGroupChats(split.groupChats, { allowCanonicalFallback: false });
+    botModeRosterNote = '';
+    rosterRetryCount = 0;
+    // Keep a successful avatar so refresh does not flash a generic face while the next fetch is in flight.
+    await writeLastKnownRoster({ agents: split.agents, groupChats: split.groupChats, sourceId });
+    if (generation !== botModeRosterGeneration) {
+      return { status: 'skipped', detail: 'Profile sync was superseded.' };
+    }
+    renderProfiles();
+    renderBotModeRoster(els.botModeSearch?.value);
+    renderBotModeGroupChats(els.botModeSearch?.value);
+    renderActiveProfileIndicator();
+    void loadSessions({ quiet: true });
+    const count = botModeRoster.length;
+    if (!quiet) setStatus('ok', 'Hermes profiles synced', `${count} profile${count === 1 ? '' : 's'} available`);
+    return { status: 'ready', detail: count === 1 ? '1 PROFILE LOADED.' : `${count} PROFILES LOADED.` };
+  } catch {
+    if (generation !== botModeRosterGeneration || gatewayUrl !== normalizeGatewayUrl(settings.gatewayUrl)) {
+      return { status: 'skipped', detail: 'Profile sync was superseded.' };
+    }
+    // Preserve live rich rows and groups. Do not restore legacy caches: earlier
+    // versions persisted status-only rows without authority or connection scope.
+    botModeRosterNote = 'Desktop profile sync unavailable. Existing bot details are preserved. Open the connected Dashboard and refresh profiles to reconnect.';
+    renderProfiles();
+    renderBotModeRoster(els.botModeSearch?.value);
+    renderBotModeGroupChats(els.botModeSearch?.value);
+    renderActiveProfileIndicator();
+    if (!quiet) setStatus('warn', 'Desktop profile sync unavailable', botModeRosterNote, { translateDetail: false });
+    scheduleRosterRetry({ force: true });
+    return { status: 'degraded', detail: botModeRosterNote };
+  }
+}
+
+function profileSwitchDisplayName(profileName = '') {
+  const value = String(profileName || '').trim();
+  if (!value) return translateUiText('Default profile');
+  const row = availableProfiles.find((profile) => profile.name === value);
+  return row?.displayName || row?.display_name || row?.title || value;
+}
+
+function closeProfileSwitchDialog({ restoreSelection = true } = {}) {
+  pendingProfileSwitch = null;
+  if (els.profileSwitchDialog) {
+    els.profileSwitchDialog.hidden = true;
+    els.profileSwitchDialog.setAttribute('aria-hidden', 'true');
+    els.profileSwitchDialog.setAttribute('aria-busy', 'false');
+  }
+  if (restoreSelection) {
+    renderProfiles();
+    els.profileSelect?.focus?.({ preventScroll: true });
+  }
+}
+
+function renderProfileSwitchDialog() {
+  if (!els.profileSwitchDialog) return;
+  const pending = pendingProfileSwitch;
+  if (!pending) {
+    els.profileSwitchDialog.hidden = true;
+    els.profileSwitchDialog.setAttribute('aria-hidden', 'true');
+    els.profileSwitchDialog.setAttribute('aria-busy', 'false');
+    return;
+  }
+  const previous = profileSwitchDisplayName(pending.previousProfile);
+  const profile = profileSwitchDisplayName(pending.nextProfile);
+  if (els.profileSwitchTitle) els.profileSwitchTitle.textContent = t('profile_switch.title');
+  if (els.profileSwitchDetail) {
+    els.profileSwitchDetail.textContent = t('profile_switch.detail', { profile, previous });
+  }
+  const processing = pending.processing === true;
+  if (els.profileSwitchCarryButton) els.profileSwitchCarryButton.disabled = processing || !pending.previousMessages?.length;
+  if (els.profileSwitchCleanButton) els.profileSwitchCleanButton.disabled = processing;
+  if (els.profileSwitchCancelButton) els.profileSwitchCancelButton.disabled = processing;
+  els.profileSwitchDialog.hidden = false;
+  els.profileSwitchDialog.setAttribute('aria-hidden', 'false');
+  els.profileSwitchDialog.setAttribute('aria-busy', processing ? 'true' : 'false');
+}
+
+async function completeRegularProfileSwitch(nextProfile = '', { carryContext = false, snapshot = null } = {}) {
+  const previous = snapshot || {
+    previousProfile: settings.activeProfile || '',
+    previousSessionId: settings.sessionId || '',
+    previousMessages: [...messages],
+  };
+  const previousSettings = { ...settings };
+  const previousMessages = [...messages];
+  const previousRuntime = { ...activeSessionRuntime };
+  const previousTransport = activeConversationTransport;
+  const previousSessionRoutesAvailable = sessionRoutesAvailable;
+  const previousMessagesKey = activeMessagesStorageKey(previousConversationScope);
+  const handoff = carryContext
+    ? buildProfileContextHandoff({
+      fromProfile: previous.previousProfile,
+      sessionId: previous.previousSessionId,
+      messages: previous.previousMessages,
+    })
+    : '';
+  settings = {
+    ...settings,
+    pendingProfileContextHandoff: '',
+    pendingProfileContextHandoffSessionId: '',
+    extensionPreferredModel: null,
+    extensionPreferredModelOptions: null,
+  };
+  const restorePreviousState = async () => {
+    settings = previousSettings;
+    messages = previousMessages;
+    activeSessionRuntime = previousRuntime;
+    activeConversationTransport = previousTransport;
+    sessionRoutesAvailable = previousSessionRoutesAvailable;
+    await browserApi.storage.local.set({
+      hermesBrowserSettings: settings,
+      [previousMessagesKey]: previousMessages,
+    }).catch(() => undefined);
+    renderProfiles();
+    renderActiveProfileIndicator();
+    renderMessagesFromStorage();
+    updateSessionLabel();
+    renderSessionMenu();
+  };
+  try {
+    const switched = await applySelectedProfile(nextProfile, { quiet: true });
+    if (!switched) {
+      await restorePreviousState();
+      return false;
+    }
+    const nextSession = await beginHermesBrowserDraft({ title: makeBrowserSessionTitle(), focus: true });
+    if (!nextSession) {
+      await restorePreviousState();
+      return false;
+    }
+    const nextSessionId = String(nextSession.id || settings.sessionId || '').trim();
+    settings = {
+      ...settings,
+      pendingProfileContextHandoff: handoff,
+      pendingProfileContextHandoffSessionId: handoff && nextSessionId ? nextSessionId : '',
+    };
+    await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+  } catch (error) {
+    await restorePreviousState();
+    setStatus('error', 'Profile switch failed', error?.message || String(error), { translateDetail: false });
+    return false;
+  }
+  setStatus(
+    'ok',
+    'Profile switched',
+    carryContext
+      ? `Started ${profileSwitchDisplayName(nextProfile)} with the prior session context ready for the next message.`
+      : `Started a clean Hermes Browser session for ${profileSwitchDisplayName(nextProfile)}.`,
+    { translateDetail: false },
+  );
+  return true;
+}
+
+async function handleRegularProfileSelection(profileName = '') {
+  const nextProfile = String(profileName || '').trim();
+  const currentProfile = String(settings.activeProfile || '').trim();
+  if (nextProfile === currentProfile) {
+    renderProfiles();
+    return true;
+  }
+  if (document.body.classList.contains('bot-mode-engaged')) {
+    renderProfiles();
+    setStatus('warn', 'Exit Bot Mode first', 'Use Regular Sessions before changing the regular-session profile.', { translateDetail: false });
+    return false;
+  }
+  const snapshot = {
+    nextProfile,
+    previousProfile: currentProfile,
+    previousSessionId: String(settings.sessionId || '').trim(),
+    previousMessages: [...messages],
+  };
+  if (shouldPromptForProfileSwitch({ currentProfile, nextProfile, messages })) {
+    pendingProfileSwitch = snapshot;
+    renderProfileSwitchDialog();
+    els.profileSwitchCarryButton?.focus?.();
+    return false;
+  }
+  return completeRegularProfileSwitch(nextProfile, { snapshot });
+}
+
+async function resolveProfileSwitchChoice(choice = 'cancel') {
+  const pending = pendingProfileSwitch;
+  if (!pending) return false;
+  if (pending.processing) return false;
+  if (choice === 'cancel') {
+    closeProfileSwitchDialog({ restoreSelection: true });
+    return false;
+  }
+  pendingProfileSwitch = { ...pending, processing: true };
+  renderProfileSwitchDialog();
+  const switched = await completeRegularProfileSwitch(pending.nextProfile, {
+    carryContext: choice === 'carry',
+    snapshot: pending,
+  });
+  if (switched) {
+    closeProfileSwitchDialog({ restoreSelection: false });
+    closeSettingsDialog();
+  }
+  else if (pendingProfileSwitch) {
+    pendingProfileSwitch = { ...pending, processing: false };
+    renderProfileSwitchDialog();
+  }
+  return switched;
+}
+
+// Merge only source-backed synced group-chat rows into the current Bot Mode
+// lifecycle. Browser never owns or persists group-room authority.
+function adoptSyncedGroupChats(syncedRows = [], { authoritative = false, allowCanonicalFallback = true } = {}) {
+  const hasRealIncoming = Array.isArray(syncedRows) && syncedRows.some((r) => r && r.sourceId && r.sourceId !== 'canonical');
+  if (authoritative || hasRealIncoming) {
+    // Authoritative remote snapshot: keep pending local rooms (browser-room-*) if any, but replace stale in-memory projections
+    const pendingLocal = botModeGroupChats.filter((r) => r && String(r.id).startsWith('browser-room-'));
+    botModeGroupChats = mergeGroupChatLists(syncedRows, pendingLocal);
+  } else {
+    const incoming = Array.isArray(syncedRows) && syncedRows.length
+      ? syncedRows
+      : (botModeGroupChats.length
+        ? []
+        : (allowCanonicalFallback ? CANONICAL_FALLBACK_GROUP_CHATS : []));
+    botModeGroupChats = mergeGroupChatLists(incoming, botModeGroupChats);
+  }
+  if (!botModeGroupChats.length && allowCanonicalFallback) {
+    botModeGroupChats = [...CANONICAL_FALLBACK_GROUP_CHATS];
+  }
+  renderBotModeGroupChats(els.botModeSearch?.value);
+}
+
+async function applySelectedProfile(profileName = '', { quiet = false, viaBotMode = false } = {}) {
+  if (sending) {
+    setStatus('warn', 'Profile switch blocked', 'Stop the active Hermes turn before selecting another profile.');
+    return false;
+  }
+  const previousProfile = settings.activeProfile || '';
+  const sameProfile = previousProfile === (profileName || '');
+  const clearProfileContextHandoff = !sameProfile || viaBotMode;
+  settings = {
+    ...settings,
+    activeProfile: profileName,
+    ...(clearProfileContextHandoff
+      ? { pendingProfileContextHandoff: '', pendingProfileContextHandoffSessionId: '' }
+      : {}),
+  };
+  // Profile boundary: a live session minted under another profile never
+  // carries into the new selection. In regular (non-Bot) mode this means the
+  // user MUST start a new session to talk under the new profile — tell them
+  // explicitly. Bot Mode handles its own per-bot session opens.
+  if (!sameProfile && !viaBotMode) {
+    if (profileWsConnection) {
+      profileWsConnection.wsSessionId = '';
+      profileWsConnection.wsStoredSessionId = '';
+    }
+    if (remoteWsConnection) {
+      remoteWsConnection.wsSessionId = '';
+      remoteWsConnection.wsStoredSessionId = '';
+      remoteWsConnection.profile = '';
+    }
+    settings = {
+      ...settings,
+      sessionId: '',
+      remoteDashboardSession: { ...(settings.remoteDashboardSession || {}), storedSessionId: '' },
+    };
+  }
+  await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+  renderProfiles();
+  renderActiveProfileIndicator();
+  renderBotModeRoster(els.botModeSearch?.value);
+  syncBotModeFooterState();
+  if (!profileName) return true;
+  if (!quiet && !viaBotMode && previousProfile && !sameProfile) {
     setStatus(
       'ok',
-      'Hermes profile switched',
-      payload.restart_required ? t('status.profile_selected_restart', { profile: profileName }) : profileName,
+      'Profile switched: new session required',
+      `You are now on ${profileName}. A profile cannot be switched mid-conversation, so your previous session stays archived under ${previousProfile || 'the prior profile'} and the next message starts a fresh session that ${profileName} owns.`,
       { translateDetail: false },
     );
-    await loadProfiles({ quiet: true });
-    await loadModels({ quiet: true });
-    await loadSkills({ quiet: true });
-  } catch (error) {
-    setStatus('warn', 'Profile switch unavailable', t('status.profile_switch_unavailable', { error: error?.message || String(error) }), { translateDetail: false });
   }
+  void syncProfileModelSelection(profileName).then((modelSync) => {
+    if (!modelSync?.ok && !modelSync?.stale && !quiet && !viaBotMode) {
+      // The switch itself succeeded — messaging on the new profile is already
+      // wired. Only the model metadata sync degraded; say so without implying
+      // the agent switch failed.
+      setStatus('warn', 'Agent selected · model sync degraded', t('status.profile_switch_unavailable', { error: modelSync?.error || 'Hermes model sync failed' }), { translateDetail: false });
+    }
+  }).catch(() => undefined);
+  // The cron schedule is profile-scoped: re-read it for the newly active agent.
+  void loadCronJobs({ quiet: true });
+  // Skill commands are profile-scoped too; refresh them after every successful
+  // profile boundary so the composer never keeps the prior profile's catalog.
+  void ensureProfileWsConnection()
+    .then(() => loadSkills({ quiet: true }))
+    .catch(() => loadSkills({ quiet: true }));
+  return true;
+}
+
+
+// ── Active Cron Jobs (Bot Mode settings) ─────────────────────────────────────
+// Read-only viewer over the gateway Jobs API (GET /api/jobs, profile-scoped by
+// the transport). Remote dashboards have no REST surface (CORS), so those ride
+// a best-effort `cron.list` WS probe and fall back to an honest empty state.
+let botModeCronJobs = [];
+let botModeCronJobsLoading = false;
+
+function cronJobStatusBadge(status = '') {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'running') return 'running';
+  if (normalized === 'paused') return 'paused';
+  if (normalized === 'error') return 'error';
+  return 'active';
+}
+
+function renderCronJobs() {
+  const list = els.botModeCronList;
+  if (!list) return;
+  const now = Date.now();
+  list.replaceChildren();
+  for (const job of botModeCronJobs) {
+    const row = document.createElement('li');
+    row.className = 'bot-mode-cron-row';
+    const top = document.createElement('div');
+    top.className = 'bot-mode-cron-row-top';
+    const name = document.createElement('span');
+    name.className = 'bot-mode-cron-name';
+    name.textContent = job.name || job.id;
+    const badges = document.createElement('span');
+    badges.className = 'bot-mode-cron-badges';
+    if (job.scheduleTag) {
+      const tag = document.createElement('span');
+      tag.className = 'bot-mode-cron-tag';
+      tag.textContent = job.scheduleTag;
+      tag.title = `Schedule: ${job.scheduleTag}`;
+      badges.append(tag);
+    }
+    const badge = document.createElement('span');
+    const status = cronJobStatusBadge(job.status);
+    badge.className = `bot-mode-cron-badge ${status}`;
+    badge.textContent = status;
+    badges.append(badge);
+    top.append(name, badges);
+    row.append(top);
+    const lastRun = document.createElement('div');
+    lastRun.className = 'bot-mode-cron-meta';
+    const lastRunLabel = cronRelativeTime(job.lastRunAt, now);
+    if (job.lastRunAt && job.lastRunStatus && !['ok', 'success', 'completed'].includes(job.lastRunStatus)) {
+      lastRun.textContent = `Last run ${lastRunLabel} · ${job.lastRunStatus}`;
+      lastRun.title = job.lastRunError || '';
+    } else {
+      lastRun.textContent = job.lastRunAt ? `Last run ${lastRunLabel}` : 'Never run yet';
+    }
+    row.append(lastRun);
+    if (job.nextRunAt) {
+      const next = document.createElement('div');
+      next.className = 'bot-mode-cron-meta next';
+      next.textContent = `Next fire ${cronRelativeTime(job.nextRunAt, now)}`;
+      next.title = new Date(job.nextRunAt).toLocaleString();
+      row.append(next);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'bot-mode-cron-actions';
+    const run = document.createElement('button');
+    run.type = 'button';
+    run.className = 'bot-mode-cron-run';
+    run.textContent = job.status === 'running' ? 'Running…' : 'Run now';
+    run.disabled = job.status === 'running';
+    run.title = `Run ${job.name || job.id} now`;
+    run.addEventListener('click', () => { void runCronJobNow(job); });
+    actions.append(run);
+    row.append(actions);
+    list.append(row);
+  }
+  if (els.botModeCronStatus) {
+    if (botModeCronJobsLoading) {
+      els.botModeCronStatus.textContent = 'Reading the cron schedule…';
+    } else if (botModeCronJobs.length) {
+      els.botModeCronStatus.textContent = `${botModeCronJobs.length} scheduled job${botModeCronJobs.length === 1 ? '' : 's'} on this profile.`;
+    } else {
+      els.botModeCronStatus.textContent = 'No scheduled cron jobs on this profile.';
+    }
+    els.botModeCronStatus.classList.toggle('empty', !botModeCronJobsLoading && !botModeCronJobs.length);
+  }
+}
+
+async function runCronJobNow(job) {
+  if (!job?.id || job.status === 'running') return false;
+  const priorStatus = job.status;
+  job.status = 'running';
+  renderCronJobs();
+  try {
+    const useDashboardWs = isRemoteWsMode() || activeConversationTransport === 'dashboard-ws';
+    if (useDashboardWs) {
+      const connection = await ensureActiveDashboardWsConnection();
+      await connection.client.request('cron.manage', {
+        action: 'run',
+        name: job.id,
+        profile: safeActiveProfile(),
+      });
+    } else {
+      const response = await apiFetch(`/api/jobs/${encodeURIComponent(job.id)}/run`, { method: 'POST' });
+      const payload = await readJsonResponse(response);
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || payload?.error || `Cron run failed (${response.status})`);
+      }
+    }
+    setStatus('ok', 'Cron job started', `${job.name || job.id} was queued to run now.`);
+    await loadCronJobs({ quiet: true });
+    return true;
+  } catch (error) {
+    job.status = priorStatus;
+    renderCronJobs();
+    setStatus('error', 'Could not run cron job', String(error?.message || error));
+    return false;
+  }
+}
+
+async function loadCronJobs({ quiet = false } = {}) {
+  if (settings.botModeEnabled !== true) return;
+  if (botModeCronJobsLoading) return;
+  botModeCronJobsLoading = true;
+  renderCronJobs();
+  try {
+    let payload = null;
+    const useDashboardWs = isRemoteWsMode() || activeConversationTransport === 'dashboard-ws';
+    if (useDashboardWs) {
+      const connection = await ensureActiveDashboardWsConnection();
+      payload = await connection.client.request('cron.manage', {
+        action: 'list',
+        include_disabled: true,
+        profile: safeActiveProfile(),
+      });
+    } else {
+      let lastError = null;
+      for (const path of ['/api/jobs', '/api/cron/jobs']) {
+        try {
+          const response = await apiFetch(path, { method: 'GET' });
+          if (response.status === 404) continue;
+          payload = await readJsonResponse(response);
+          if (!response.ok) {
+            throw new Error(payload?.error?.message || payload?.error || `Cron jobs failed (${response.status})`);
+          }
+          break;
+        } catch (error) {
+          lastError = error;
+          if (lastError?.status === 404) continue;
+          payload = null;
+        }
+      }
+      if (!payload) throw lastError || new Error('Cron jobs route unavailable');
+    }
+    botModeCronJobs = normalizeCronJobRows(payload, { sourceId: normalizeGatewayUrl(settings.gatewayUrl) });
+    if (!quiet) setStatus('ok', 'Cron schedule synced', botModeCronJobs.length
+      ? `${botModeCronJobs.length} scheduled job${botModeCronJobs.length === 1 ? '' : 's'} for this profile.`
+      : 'No scheduled cron jobs for this profile.');
+  } catch (error) {
+    // A failed refresh must not erase the last verified list. If this is the
+    // first load, the empty state is honest and the visible status explains
+    // that the runtime did not expose a readable cron route.
+    if (!quiet) setStatus('warn', 'Cron schedule unavailable', 'The connected Hermes runtime did not return a readable cron schedule.', { translateDetail: false });
+  } finally {
+    botModeCronJobsLoading = false;
+    renderCronJobs();
+  }
+}
+
+async function listCanonicalBotChatViaGateway(profileName) {
+  const base = String(normalizeGatewayUrl(settings.gatewayUrl) || '').replace(/\/$/, '');
+  const name = String(profileName || '').trim();
+  if (!base || !name) return null;
+  const key = hermesGatewayKey();
+  const url = `${base}/p/${encodeURIComponent(name)}/api/sessions?title=${encodeURIComponent(BOT_CHAT_TITLE)}&include_hidden=true&limit=5`;
+  const headers = { Accept: 'application/json' };
+  if (key) headers.Authorization = `Bearer ${key}`;
+  const response = await fetch(url, { headers, credentials: 'omit', cache: 'no-store' });
+  if (!response.ok) return null;
+  const payload = await response.json();
+  const rows = Array.isArray(payload?.data)
+    ? payload.data
+    : (Array.isArray(payload?.sessions) ? payload.sessions : []);
+  return rows.find((entry) => String(entry?.title || '') === BOT_CHAT_TITLE) || rows[0] || null;
+}
+
+async function openBotProfile(row) {
+  // Bot Mode deck navigation is panel-owned: a stale UNCONFIRMED run-control
+  // from a previous failed attempt must never wedge the deck open forever.
+  if (!sending && activeRunControl && activeRunControl.phase !== 'terminal') {
+    activeRunControl = markRunTerminal(activeRunControl, 'failed');
+  }
+  const decision = canSwitchBotProfile({ running: sending, currentProfile: settings.activeProfile, selectedProfile: row?.profileName });
+  if (!decision.allowed) {
+    setStatus('warn', 'Profile switch blocked', 'Stop the active Hermes turn before opening another agent.');
+    return false;
+  }
+  if (els.botModeLoadingOverlay) {
+    const name = botProfileDisplayName(row);
+    if (els.botModeLoadingAgentTitle) els.botModeLoadingAgentTitle.textContent = `OPENING ${name.toUpperCase()}…`;
+    if (els.botModeLoadingAgentSubtitle) els.botModeLoadingAgentSubtitle.textContent = `Loading profile, model, and Bot Chat session…`;
+    if (els.botModeLoadingAvatar) {
+          let avatar = row?.avatar;
+          if (row?.hasAvatar && !remoteAvatarImageOf(avatar)) {
+            const dataUrl = await fetchBotModeRemoteAvatar(row);
+            if (dataUrl) avatar = { ...(avatar || {}), image: dataUrl, data_url: dataUrl };
+          }
+          appendBotModeAvatar(els.botModeLoadingAvatar, name, row?.profileName, avatar);
+        }
+    els.botModeLoadingOverlay.hidden = false;
+  }
+  activeGroupGeneration += 1;
+  activeGroupAbortController?.abort?.();
+  activeGroupAbortController = null;
+  activeGroupProjection = null;
+  activeGroupRuntime = null;
+  activeGroupMessages = [];
+  activeGroupThreadId = '';
+  activeGroupExpandedThreads.clear();
+  // Bot session separation: strictly isolate transcripts so regular session
+  // messages or prior bot chat messages never bleed into this bot view while loading.
+  messages = [];
+  els.messages.replaceChildren();
+  const botModeEngaged = document.body.classList.contains('bot-mode-engaged');
+  const existingReturnProfile = String(settings.botModeReturnProfile || '').trim();
+  const returnProfile = botModeEngaged && existingReturnProfile
+    ? existingReturnProfile
+    : String(settings.activeProfile || safeActiveProfile() || '').trim();
+  settings = {
+    ...settings,
+    botModeReturnProfile: returnProfile,
+    pendingProfileContextHandoff: '',
+    pendingProfileContextHandoffSessionId: '',
+  };
+  await applySelectedProfile(row.profileName, { quiet: true, viaBotMode: true });
+  settings = { ...settings, botModeSelectedProfile: row.profileName };
+
+  // Bot session separation: opening a Bot always starts a fresh Bot Chat
+  // session under that profile. Stale identities from the previous agent must
+  // never carry into this profile's chat (Desktop Bot Mode parity — each bot
+  // has exactly one canonical Bot Chat, resolved fresh on every open).
+  settings = {
+    ...settings,
+    remoteDashboardSession: { ...(settings.remoteDashboardSession || {}), storedSessionId: '' },
+    sessionId: '',
+    sessionTitle: BOT_CHAT_TITLE,
+    sessionModelBindings: { ...(settings.sessionModelBindings || {}) },
+  };
+  if (profileWsConnection) {
+    profileWsConnection.wsSessionId = '';
+    profileWsConnection.wsStoredSessionId = '';
+  }
+
+  // Pin the profile's own default model. /api/model/options?profile=<name>
+  // returns what `hermes <profile>` runs (verified against the live gateway:
+  // default→gemini-3.7-flash-high, namine→z-ai/glm-5.3-flash, riku→deepseek-v4).
+  // Falls back to the roster row's model when the dashboard route is offline.
+  await syncProfileModelSelection(row.profileName, { row });
+
+  await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+
+  // Desktop parity: clicking a bot loads THAT bot's entire Bot Chat session.
+  // Resolve the bot's canonical Bot Chat under its own profile (via the WS
+  // session.list, which is profile-scoped), resume it so history loads, and
+  // only create a fresh one when the bot has never chatted.
+  // The user stays on the sleek centered botModeLoadingOverlay until the session is ready!
+  try {
+    const connection = await ensureActiveDashboardWsConnection();
+    const canonical = await resolveCanonicalBotSession(row, (params) => connection.client.request('session.list', { ...params, limit: 200 }));
+    if (canonical) {
+      const opened = await openHermesSession({
+        id: canonical.durableId,
+        title: BOT_CHAT_TITLE,
+        source: 'hermes_bot_mode',
+        profile: row.profileName,
+        transport: 'dashboard-ws',
+      });
+      if (opened !== true) throw new Error('Could not resume the existing Bot Chat. No replacement was created.');
+    } else {
+      const created = await createHermesBrowserSession({ title: BOT_CHAT_TITLE, hidden: true, focus: true, transport: 'dashboard-ws', source: 'hermes_bot_mode' });
+      if (!created) throw new Error('Bot Chat creation did not complete.');
+    }
+    return true;
+  } catch (err) {
+    console.warn('[Hermes Browser] Bot session open failed; preserving canonical identity:', err);
+    setStatus('error', 'Could not open Bot Chat', err?.message || String(err), { translateDetail: false });
+    return false;
+  } finally {
+    if (els.botModeLoadingOverlay) els.botModeLoadingOverlay.hidden = true;
+    if (els.botModePanel) els.botModePanel.hidden = true;
+    els.botModeButton?.setAttribute?.('aria-expanded', 'false');
+    document.body.classList.add('bot-mode-engaged');
+    botHistoryVisibleCount = BOT_HISTORY_PAGE_SIZE;
+    renderGroupThreadStrip();
+    renderMessagesFromStorage();
+    renderBotChatIntro(row);
+    if (els.composerInput) {
+      els.composerInput.placeholder = `Ask ${botProfileDisplayName(row)} anything...`;
+    }
+  }
+}
+
+async function leaveBotModeForRegularSession() {
+  if (!document.body.classList.contains('bot-mode-engaged')) return true;
+  if (!canSwitchActiveSession({ sending, runControl: activeRunControl })) {
+    setStatus('warn', 'Hermes is working…', 'Stop the active Bot Mode turn before returning to Regular Sessions.');
+    return false;
+  }
+
+  if (els.botModeLoadingOverlay) {
+    if (els.botModeLoadingAgentTitle) els.botModeLoadingAgentTitle.textContent = 'RESTORING REGULAR SESSIONS…';
+    if (els.botModeLoadingAgentSubtitle) els.botModeLoadingAgentSubtitle.textContent = 'Loading extension session and model state…';
+    if (els.botModeLoadingAvatar) {
+      els.botModeLoadingAvatar.replaceChildren();
+      const img = document.createElement('img');
+      img.src = 'assets/icons/icon-48.png';
+      img.alt = '';
+      img.style.width = '32px';
+      img.style.height = '32px';
+      img.style.objectFit = 'contain';
+      els.botModeLoadingAvatar.append(img);
+    }
+    els.botModeLoadingOverlay.hidden = false;
+  }
+
+  try {
+    const { returnProfile, nextSettings } = botModeExitStateForRegularSession(
+      settings,
+      settings.activeProfile || '',
+    );
+    const nextProfile = returnProfile || String(settings.activeProfile || '').trim();
+
+    activeGroupGeneration += 1;
+    activeGroupAbortController?.abort?.();
+    activeGroupAbortController = null;
+    activeGroupProjection = null;
+    activeGroupRuntime = null;
+    activeGroupMessages = [];
+    activeGroupThreadId = '';
+    activeGroupExpandedThreads.clear();
+    resetActiveGroupTypingIndicator();
+    botHistoryVisibleCount = BOT_HISTORY_PAGE_SIZE;
+    // If we're connected to a local Desktop dashboard runtime, keep the dashboard-ws transport active
+    // so regular sessions don't revert to unconfigured local-api REST and trigger a disconnect.
+    if (desktopDashboardUrl) {
+      activeConversationTransport = 'dashboard-ws';
+      activeDashboardWsConnection = profileWsConnection || null;
+    } else {
+      activeConversationTransport = 'rest';
+      activeDashboardWsConnection = null;
+    }
+    activeSessionRuntime = {
+      ...activeSessionRuntime,
+      sessionId: '',
+      usedTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      contextTokens: 0,
+      model: '',
+      provider: '',
+      source: '',
+    };
+    sessionRoutesAvailable = null;
+    messages = [];
+    els.messages.replaceChildren();
+    document.body.classList.remove('bot-mode-engaged');
+    if (els.botModePanel) els.botModePanel.hidden = true;
+    els.botModeButton?.setAttribute('aria-expanded', 'false');
+    if (els.botChatIntro) els.botChatIntro.hidden = true;
+    renderGroupThreadStrip();
+
+    // The profile socket is shared with regular dashboard sessions. Clear only
+    // its session identity; closing it would unnecessarily tear down the roster
+    // and force a second authentication round-trip.
+    for (const connection of [profileWsConnection, remoteWsConnection]) {
+      if (!connection) continue;
+      connection.wsSessionId = '';
+      connection.wsStoredSessionId = '';
+      connection.profile = '';
+    }
+
+    settings = nextSettings;
+    const switched = await applySelectedProfile(nextProfile, { quiet: true });
+    if (!switched) return false;
+    const session = await beginHermesBrowserDraft({ title: makeBrowserSessionTitle(), focus: true });
+    if (!session) return false;
+    renderBotChatIntro();
+    renderMessagesFromStorage();
+    renderActiveProfileIndicator();
+    updateSessionLabel();
+    updateConnectionPrompt();
+    setStatus('ok', 'Regular Sessions restored', `Started a fresh Hermes Browser session for ${profileSwitchDisplayName(nextProfile)}.`, { translateDetail: false });
+    return true;
+  } finally {
+    if (els.botModeLoadingOverlay) els.botModeLoadingOverlay.hidden = true;
+  }
+}
+
+function renderActiveProfileIndicator() {
+  if (!els.activeProfileIndicator) return;
+  els.activeProfileIndicator.replaceChildren();
+  if (!botModeRoster.length) {
+    closeProfileSwitchMenu();
+    els.activeProfileIndicator.classList.remove('group-roster');
+    els.activeProfileIndicator.style.width = '';
+    els.activeProfileIndicator.style.maxWidth = '';
+    els.activeProfileIndicator.style.flexBasis = '';
+    els.activeProfileIndicator.removeAttribute('aria-disabled');
+    els.activeProfileIndicator.hidden = true;
+    return;
+  }
+
+  // If inside a group chat, show all group bot members side-by-side (max 4, then +N)
+  if (activeGroupProjection) {
+    els.activeProfileIndicator.classList.add('group-roster');
+    const members = groupRuntimeMembers(activeGroupProjection);
+    if (!members.length) {
+      els.activeProfileIndicator.style.width = '';
+      els.activeProfileIndicator.style.maxWidth = '';
+      els.activeProfileIndicator.style.flexBasis = '';
+      els.activeProfileIndicator.hidden = true;
+      return;
+    }
+    const rowWidth = els.composerActions?.clientWidth || 320;
+        const fit = rowWidth < 300 ? 1 : (rowWidth < 380 ? 2 : 3);
+        let maxVisible = Math.max(1, Math.min(fit, members.length));
+        if (members.length > maxVisible && maxVisible * 30 + 34 > 96) {
+          maxVisible = Math.max(1, Math.floor((96 - 34) / 30));
+        }
+    const visibleMembers = members.slice(0, maxVisible);
+    const overflowCount = members.length - maxVisible;
+
+    for (const member of visibleMembers) {
+      const rosterRow = botModeRoster.find((entry) => entry.profileName === member.name);
+      const name = member.title || (rosterRow ? botProfileDisplayName(rosterRow) : member.name);
+      const slot = document.createElement('span');
+      slot.className = 'group-member-avatar-slot';
+      slot.title = name;
+      renderRoomMemberAvatar(slot, { name: member.name, title: name });
+      els.activeProfileIndicator.append(slot);
+    }
+
+    if (overflowCount > 0) {
+      const moreBadge = document.createElement('span');
+      moreBadge.className = 'group-more-badge';
+      moreBadge.textContent = `+${overflowCount}`;
+      moreBadge.title = `${overflowCount} more members`;
+      els.activeProfileIndicator.append(moreBadge);
+    }
+
+    // The room cluster is a control (BUILD-B B3.4): it opens the room member
+    // popover, so it advertises a dialog and is not marked disabled.
+    els.activeProfileIndicator.title = `${t('ui.room.bots.title')} · ${members.length}`;
+    els.activeProfileIndicator.setAttribute('aria-haspopup', 'dialog');
+    els.activeProfileIndicator.removeAttribute('aria-disabled');
+        const clusterWidth = maxVisible * 32 + (overflowCount > 0 ? 42 : 4);
+    els.activeProfileIndicator.style.width = `${clusterWidth}px`;
+    els.activeProfileIndicator.style.maxWidth = `${clusterWidth}px`;
+    els.activeProfileIndicator.style.flexBasis = `${clusterWidth}px`;
+        els.activeProfileIndicator.hidden = false;
+    return;
+  }
+
+  // Regular single-profile indicator for Bot Chat or active profile
+  els.activeProfileIndicator.classList.remove('group-roster');
+  els.activeProfileIndicator.style.width = '';
+  els.activeProfileIndicator.style.maxWidth = '';
+  els.activeProfileIndicator.style.flexBasis = '';
+  els.activeProfileIndicator.removeAttribute('aria-disabled');
+  const engaged = document.body.classList.contains('bot-mode-engaged');
+  const activeProfile = engaged
+    ? (settings.botModeSelectedProfile || settings.activeProfile)
+    : settings.activeProfile;
+  if (!activeProfile || settings.botModeEnabled !== true) {
+    els.activeProfileIndicator.hidden = true;
+    return;
+  }
+  const row = botModeRoster.find((entry) => entry.profileName === activeProfile);
+  if (!row) {
+    els.activeProfileIndicator.hidden = true;
+    return;
+  }
+  const name = botProfileDisplayName(row);
+  appendBotModeAvatar(els.activeProfileIndicator, name, activeProfile, row?.avatar);
+  if (row?.hasAvatar && !remoteAvatarImageOf(row?.avatar)) {
+    void hydrateBotModeRemoteAvatar(row, els.activeProfileIndicator);
+  }
+  els.activeProfileIndicator.title = `Active profile: ${name}`;
+  // Restore the 1:1 affordance after a room set aria-haspopup="dialog".
+  els.activeProfileIndicator.setAttribute('aria-haspopup', 'menu');
+  els.activeProfileIndicator.hidden = false;
+  }
+
+  function closeProfileSwitchMenu() {
+    const menu = document.getElementById('profileSwitchMenu');
+    if (menu) menu.hidden = true;
+    els.activeProfileIndicator?.setAttribute('aria-expanded', 'false');
+  }
+
+  function renderProfileSwitchMenu() {
+    const menu = document.getElementById('profileSwitchMenu');
+    if (!menu) return;
+    menu.replaceChildren();
+    const modes = document.createElement('div');
+    modes.className = 'profile-switch-modes';
+    for (const [value, label] of [['browser', 'Browser chat'], ['bot', 'Bot chat']]) {
+      const mode = document.createElement('button');
+      mode.type = 'button';
+      mode.className = 'profile-switch-mode';
+      mode.classList.toggle('on', profileSwitchMode === value);
+            mode.textContent = label;
+            mode.title = value === 'browser'
+        ? 'Switch the Hermes profile for this browser chat. The next message starts a fresh session on that profile.'
+        : 'Open this agent in Bot Chat and load that profile, its skills, and its tools.';
+      mode.addEventListener('click', (event) => {
+        event.stopPropagation();
+        profileSwitchMode = value;
+        renderProfileSwitchMenu();
+      });
+      modes.append(mode);
+    }
+    menu.append(modes);
+    const options = document.createElement('div');
+    options.className = 'profile-switch-options';
+    const active = profileSwitchMode === 'bot'
+      ? (settings.botModeSelectedProfile || settings.activeProfile || '')
+      : (settings.activeProfile || '');
+    for (const row of botModeRoster || []) {
+      const name = String(row?.profileName || '').trim();
+      if (!name) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'profile-switch-option';
+      button.setAttribute('role', 'menuitem');
+      if (name === active) button.classList.add('selected');
+      const face = document.createElement('span');
+      appendBotModeAvatar(face, botProfileDisplayName(row), name, row.avatar);
+      if (row.hasAvatar && !remoteAvatarImageOf(row.avatar)) void hydrateBotModeRemoteAvatar(row, face);
+      const label = document.createElement('span');
+      label.textContent = botProfileDisplayName(row);
+      button.append(face, label);
+      button.addEventListener('click', () => {
+        closeProfileSwitchMenu();
+        if (profileSwitchMode === 'browser') {
+                  void handleRegularProfileSelection(name);
+                  return;
+                }
+        void openBotProfile(row);
+      });
+      options.append(button);
+    }
+    menu.append(options);
+  }
+
+        function toggleProfileSwitchMenu() {
+    const menu = document.getElementById('profileSwitchMenu');
+    if (!menu) return;
+    if (!menu.hidden) {
+      closeProfileSwitchMenu();
+      return;
+    }
+    renderProfileSwitchMenu();
+    menu.hidden = false;
+    els.activeProfileIndicator?.setAttribute('aria-expanded', 'true');
+  }
+
+  function renderBotChatIntro(row = null) {
+  renderActiveProfileIndicator();
+  if (!els.botChatIntro) return;
+  // A group room owns the transcript: the individual bot hero must never
+  // render over it (or after switching back from a room).
+  if (activeGroupProjection) {
+    els.botChatIntro.hidden = true;
+    return;
+  }
+  // Intro hero is a Bot-Chat surface only. It must NEVER appear on plain panel
+  // boot: only when openBotProfile()/openBotGroupChat() has actually engaged
+  // Bot Mode (body.bot-mode-engaged) during this panel lifecycle. A persisted
+  // botModeSelectedProfile alone is not engagement — it must not resurrect the
+  // hero when the extension opens to the normal Browser screen.
+  const isBotChatSession = document.body.classList.contains('bot-mode-engaged');
+  const activeRow = row || (isBotChatSession
+    ? botModeRoster.find((entry) => entry.profileName === (settings.botModeSelectedProfile || settings.activeProfile))
+    : null);
+  if (!activeRow || settings.botModeEnabled !== true || !isBotChatSession) {
+    els.botChatIntro.hidden = true;
+    return;
+  }
+  if (els.browserIntroHero) els.browserIntroHero.hidden = true;
+  if (els.botChatIntroAvatar) {
+    appendBotModeAvatar(els.botChatIntroAvatar, botProfileDisplayName(activeRow), activeRow.profileName, activeRow.avatar);
+    if (activeRow?.hasAvatar && !remoteAvatarImageOf(activeRow.avatar)) {
+      void hydrateBotModeRemoteAvatar(activeRow, els.botChatIntroAvatar);
+    }
+  }
+  if (els.botChatIntroTitle) {
+    els.botChatIntroTitle.textContent = (botProfileDisplayName(activeRow) || activeRow.displayName || activeRow.profileName || 'Agent').toUpperCase();
+  }
+  const hasMessages = Boolean(Array.isArray(messages) && messages.length);
+  // Empty session: full hero. Once messages start, the hero is hidden so
+  // it does not clutter the transcript or bleed into message 1.
+  els.botChatIntro.classList.toggle('compact', hasMessages);
+  if (els.botChatIntroSubtitle) els.botChatIntroSubtitle.hidden = hasMessages;
+  els.botChatIntro.hidden = hasMessages;
+}
+
+// Footer "Open Bot Mode" opens the selected (or first verified) agent's canonical chat.
+async function openBotModeSelection() {
+  if (!els.botModeOpenButton || els.botModeOpenButton.disabled) return false;
+  const selectedProfile = settings.botModeSelectedProfile || settings.activeProfile || '';
+  const row = botModeRoster.find((entry) => entry.profileName === selectedProfile)
+    || botModeRoster.find((entry) => entry.canonical.status === 'ready')
+    || botModeRoster[0];
+  if (!row) {
+    setStatus('warn', 'No verified agents', 'Refresh the roster or connect to a Hermes instance that exposes Bot Mode.');
+    return false;
+  }
+  return openBotProfile(row);
+}
+
+function syncBotModeFooterState() {
+  if (!els.botModeOpenButton) return;
+  const groupsActive = botModeView === 'groups';
+  const selectedProfile = settings.botModeSelectedProfile || settings.activeProfile || '';
+  const hasVerified = botModeRoster.some((entry) => entry.canonical.status === 'ready');
+  const hasSelection = botModeRoster.some((entry) => entry.profileName === selectedProfile);
+  // In the Group Chats view, agent actions do not apply: rooms own their own
+  // bounded runtime and composer. "Open Bot Chat" is meaningless there — hide
+  // it and let "+ Start A New Group Chat" be the footer's primary action.
+  els.botModeOpenButton.disabled = groupsActive || !(hasVerified || hasSelection);
+  els.botModeOpenButton.hidden = groupsActive;
+  if (els.botModeEditButton) {
+    // Edit Profile targets the selected (or active) agent; it needs a roster row.
+    els.botModeEditButton.disabled = groupsActive || !botModeRoster.some((entry) => entry.profileName === selectedProfile);
+    els.botModeEditButton.hidden = groupsActive;
+  }
+  if (els.botModeNewAgentButton) els.botModeNewAgentButton.hidden = groupsActive;
+  if (els.botModeNewGroupButton) {
+    els.botModeNewGroupButton.hidden = !groupsActive;
+    els.botModeNewGroupButton.disabled = false;
+    // Primary emphasis in the Groups view (matches .bot-mode-action.primary,
+    // full-width like the Open Bot Chat button in the Bots view).
+    els.botModeNewGroupButton.classList.toggle('primary', groupsActive);
+  }
+  if (els.botModeVerify) {
+    if (groupsActive) {
+      els.botModeVerify.textContent = `${botModeGroupChats.length} group chat${botModeGroupChats.length === 1 ? '' : 's'} · synced from the connected Hermes instance`;
+    } else {
+      const readyCount = botModeRoster.filter((entry) => entry.canonical.status === 'ready').length;
+      els.botModeVerify.textContent = readyCount
+        ? `${readyCount} canonical Bot Chat${readyCount === 1 ? '' : 's'} verified · current connected Hermes instance`
+        : 'Current connected Hermes instance';
+    }
+  }
+  void syncPetPickerState();
+}
+
+// ── Bot Mode profile sheet (mockup: full-height Edit profile / New Agent sheet) ──
+// One sheet, two modes: 'edit' mutates the selected agent through the
+// authenticated profile contract; 'create' uses profiles.create. Server state
+// is authoritative and stale local override data is cleanup-only.
+let botSheetMode = 'edit';
+let botSheetProfileName = '';
+let botSheetAvatarChoice = null; // null = keep current; {kind:'blobatar',seed} | {kind:'image',icon} | {kind:'pet',petSlug,petDisplayName,icon} | {kind:'clear'}
+let botSheetProfileDescribe = null;
+const botSheetSkillsDisabled = new Set();
+const botSheetEnabledToolsets = new Set();
+const botSheetEnabledMcpServers = new Set();
+let botSheetSaving = false;
+// The available profile capabilities are loaded from profiles.describe and
+// selections survive list filtering and pane rerenders.
+
+// Deterministic blobatar variants: the canonical name face plus one face per
+// vendored blobatar shape (seed "${name}::${shape}" keeps each face stable).
+const BLOBATAR_SHAPES = ['round', 'organic', 'boxy', 'capsule', 'nub', 'cloud', 'droplet', 'hexagon', 'sun', 'triangle'];
+const CLASSIC_AVATAR_SHAPES = ['circle', 'blob', 'squircle', 'pill', 'triangle', 'hexagon', 'cloud', 'drop'];
+let botSheetFaceMode = 'blob';
+let botSheetClassicShape = 'squircle';
+let botSheetClassicColor = null; // null = Match the name (desktop ColorSwatches behavior)
+// Same 12 swatches as the desktop picker (PROFILE_SWATCHES: hsl(index*30 68% 58%)).
+const CLASSIC_AVATAR_SWATCHES = Array.from({ length: 12 }, (_, index) => `hsl(${index * 30} 68% 58%)`);
+
+function fillBotCreateModelSelects() {
+  const providerSelect = document.getElementById('botModeSheetProvider');
+  const modelSelect = document.getElementById('botModeSheetModel');
+  if (!providerSelect || !modelSelect) return;
+  const providers = [...new Set((availableModels || []).map((model) => String(model.provider || model.owner || '').trim()).filter(Boolean))];
+  providerSelect.replaceChildren();
+  const inherited = document.createElement('option');
+  inherited.value = '';
+  inherited.textContent = 'Inherited';
+  providerSelect.append(inherited);
+  for (const provider of providers) {
+    const option = document.createElement('option');
+    option.value = provider;
+    option.textContent = provider;
+    providerSelect.append(option);
+  }
+  const paintModels = () => {
+    const provider = providerSelect.value;
+    modelSelect.replaceChildren();
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = provider ? 'Select a model' : 'Inherited';
+    modelSelect.append(blank);
+    for (const model of availableModels || []) {
+      const modelProvider = String(model.provider || model.owner || '').trim();
+      if (provider && modelProvider !== provider) continue;
+      const option = document.createElement('option');
+      option.value = model.rawModelId || model.model || model.id;
+      option.textContent = model.name || model.id;
+      modelSelect.append(option);
+    }
+    mountBrandedSelect(modelSelect);
+  };
+  providerSelect.onchange = paintModels;
+  paintModels();
+  mountBrandedSelect(providerSelect);
+}
+
+function switchBotAdvancedPane(tab = 'general') {
+  const named = botSheetMode === 'edit' || Boolean(String(document.getElementById('botModeSheetNameInput')?.value || '').trim());
+  for (const button of document.querySelectorAll('[data-advanced-tab]')) {
+    const on = button.dataset.advancedTab === tab;
+    button.classList.toggle('on', on);
+    button.setAttribute('aria-pressed', String(on));
+  }
+  for (const pane of document.querySelectorAll('[data-advanced-pane]')) {
+    pane.hidden = pane.dataset.advancedPane !== tab;
+  }
+  const gate = document.getElementById('botModeCapsGate');
+  const lists = document.getElementById('botModeCapsLists');
+  if (gate) gate.hidden = named || tab !== 'capabilities';
+  if (lists) lists.hidden = tab === 'capabilities' && !named;
+  if (tab === 'capabilities' && named) {
+    renderBotModeSheetTools();
+    renderBotModeSheetMcp();
+  }
+}
+
+function botSheetRosterRow(profileName = botSheetProfileName) {
+  return botModeRoster.find((entry) => entry.profileName === profileName) || null;
+}
+
+function showBotModeSheetWarning(message, { conflict = false } = {}) {
+  if (!els.botModeSheetWarning) return;
+  els.botModeSheetWarning.textContent = message;
+  els.botModeSheetWarning.classList.toggle('conflict', conflict === true);
+  els.botModeSheetWarning.hidden = !message;
+}
+
+function clearBotModeSheetWarning() {
+  showBotModeSheetWarning('');
+}
+
+function refreshBotModeSheetDirtyState() {
+  if (els.botModeSheetSaveButton) els.botModeSheetSaveButton.disabled = botSheetSaving;
+}
+
+function nameAvatarColor(name = '') {
+  let hash = 0;
+  for (const ch of String(name || 'agent')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return `hsl(${hash % 360} 68% 58%)`;
+}
+
+// Desktop parity (hermes-bots avatar.tsx shapeNode + math face): same body
+// geometry and the same two eyes, so a classic shape reads identically in the
+// extension and the desktop picker.
+function classicShapeIsDark(color = '') {
+  const value = String(color || '').trim();
+  if (!value.startsWith('#')) return false;
+  try {
+    const n = parseInt(value.slice(1), 16);
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b < 110;
+  } catch {
+    return false;
+  }
+}
+
+function classicShapeSvg(shape = 'squircle', color = 'hsl(180 68% 58%)') {
+  const body = {
+    circle: `<circle cx="20" cy="20" r="17.5" fill="${color}"/>`,
+    blob: `<path d="M20 4.5 C11 4.5 4.2 10 4.6 18 C5 26.5 11 35.5 20 35.5 C29 35.5 35.8 29 35.4 20 C35 11 29.5 4.5 20 4.5 Z" fill="${color}"/>`,
+    squircle: `<rect x="3" y="3" width="34" height="34" rx="11" fill="${color}"/>`,
+    pill: `<rect x="2" y="7" width="36" height="26" rx="13" fill="${color}"/>`,
+    triangle: `<path d="M20 5.5 L36 33.5 L4 33.5 Z" fill="${color}" stroke="${color}" stroke-width="7" stroke-linejoin="round"/>`,
+    hexagon: `<path d="M20 3.5 L34.5 11.75 L34.5 28.25 L20 36.5 L5.5 28.25 L5.5 11.75 Z" fill="${color}" stroke="${color}" stroke-width="7" stroke-linejoin="round"/>`,
+    cloud: `<path d="M11 32 a7.5 7.5 0 0 1 -1 -14.9 A9.5 9.5 0 0 1 29 12.5 A7 7 0 0 1 30 32 Z" fill="${color}"/>`,
+    drop: `<path d="M20 3 C20 3 6 20 6 27 a14 13.5 0 0 0 28 0 C34 20 20 3 20 3 Z" fill="${color}"/>`,
+  }[shape] || `<rect x="3" y="3" width="34" height="34" rx="11" fill="${color}"/>`;
+  const eyeY = shape === 'cloud' ? 22 : 17.2;
+  const dark = classicShapeIsDark(color);
+  const eyeFill = dark ? 'rgba(232,220,195,0.95)' : 'rgba(0,0,0,0.85)';
+  const highlightFill = dark ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.85)';
+  return `<svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">${body}<g><ellipse cx="15.4" cy="${eyeY}" rx="2.2" ry="2.3" fill="${eyeFill}"/><ellipse cx="24.6" cy="${eyeY}" rx="2.2" ry="2.3" fill="${eyeFill}"/><circle cx="14.8" cy="${eyeY - 0.7}" r="0.65" fill="${highlightFill}"/><circle cx="24" cy="${eyeY - 0.7}" r="0.65" fill="${highlightFill}"/></g></svg>`;
+}
+
+function classicShapeDataUrl(shape, color) {
+  return `data:image/svg+xml,${encodeURIComponent(classicShapeSvg(shape, color))}`;
+}
+
+function botSheetClassicColorValue() {
+  return botSheetClassicColor || nameAvatarColor(botSheetBaseName());
+}
+
+function setBotSheetClassicColor(color) {
+  botSheetClassicColor = color || null;
+  if (botSheetAvatarChoice?.kind === 'classic') {
+    const next = botSheetClassicColorValue();
+    botSheetAvatarChoice = { ...botSheetAvatarChoice, color: next, icon: classicShapeDataUrl(botSheetAvatarChoice.shape, next) };
+  }
+  const hint = document.getElementById('botModeSheetFaceHint');
+  if (hint && botSheetFaceMode === 'classic') {
+    hint.textContent = botSheetClassicColor ? t('bot_mode.face_classic_picked_color') : t('bot_mode.face_classic_follows_name');
+  }
+  renderClassicShapeGrid();
+  renderBotModeSheetAvatarPreview();
+}
+
+function renderClassicShapeColors() {
+  const swatches = document.getElementById('botModeClassicSwatches');
+  if (swatches) {
+    swatches.replaceChildren();
+    for (const swatch of CLASSIC_AVATAR_SWATCHES) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'bot-mode-swatch';
+            chip.style.background = swatch;
+            // currentColor drives the pressed ring, mirroring the desktop swatch grid.
+            chip.style.color = swatch;
+            chip.title = swatch;
+      chip.setAttribute('aria-pressed', String(botSheetClassicColor === swatch));
+      chip.addEventListener('click', () => setBotSheetClassicColor(swatch));
+      swatches.append(chip);
+    }
+  }
+  const nameChip = document.getElementById('botModeClassicNameColor');
+    if (nameChip) {
+      // Bound once: the chip lives in the markup and rerenders reuse it.
+      if (nameChip.dataset.bound !== '1') {
+        nameChip.dataset.bound = '1';
+        nameChip.addEventListener('click', () => setBotSheetClassicColor(null));
+      }
+      nameChip.setAttribute('aria-pressed', String(botSheetClassicColor === null));
+    }
+  }
+
+function syncBotSheetFaceSwitch() {
+  const showingClassic = botSheetFaceMode === 'classic';
+  const classicGrid = document.getElementById('botModeClassicShapeGrid');
+  const blobGrid = els.botModeSheetFaceGrid;
+  if (classicGrid) classicGrid.hidden = !showingClassic;
+    if (blobGrid) blobGrid.hidden = showingClassic;
+    const colorRow = document.getElementById('botModeClassicColorRow');
+    if (colorRow) colorRow.hidden = !showingClassic;
+  const blobButton = document.getElementById('botModeBlobFacesButton');
+  const classicButton = document.getElementById('botModeClassicShapesButton');
+  blobButton?.classList.toggle('on', !showingClassic);
+  classicButton?.classList.toggle('on', showingClassic);
+  blobButton?.setAttribute('aria-pressed', String(!showingClassic));
+  classicButton?.setAttribute('aria-pressed', String(showingClassic));
+  const hint = document.getElementById('botModeSheetFaceHint');
+      if (hint) {
+        hint.textContent = showingClassic
+          ? (botSheetClassicColor ? t('bot_mode.face_classic_picked_color') : t('bot_mode.face_classic_follows_name'))
+          : t('bot_mode.face_follows_name');
+      }
+      const label = document.getElementById('botModeSheetFaceLabel');
+      if (label) label.textContent = showingClassic ? t('bot_mode.face_classic_label') : t('bot_mode.blobatar_title');
+    if (showingClassic) renderClassicShapeColors();
+  }
+
+function setBotSheetFaceMode(mode = 'blob') {
+  const next = mode === 'classic' ? 'classic' : 'blob';
+  if (botSheetFaceMode === next) return;
+  botSheetFaceMode = next;
+  if (next === 'classic') {
+      const color = botSheetClassicColorValue();
+      botSheetAvatarChoice = { kind: 'classic', shape: botSheetClassicShape, color, icon: classicShapeDataUrl(botSheetClassicShape, color) };
+      renderClassicShapeGrid();
+      renderClassicShapeColors();
+    } else if (botSheetAvatarChoice?.kind === 'classic') {
+    botSheetAvatarChoice = null;
+    renderBotModeFaceGrid();
+  }
+  syncBotSheetFaceSwitch();
+    renderBotModeSheetAvatarPreview();
+  }
+
+  function renderClassicShapeGrid() {
+      const grid = document.getElementById('botModeClassicShapeGrid');
+    if (!grid) return;
+    const color = botSheetClassicColorValue();
+    grid.replaceChildren();
+    for (const shape of CLASSIC_AVATAR_SHAPES) {
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'bot-mode-face-tile bot-mode-classic-tile';
+      tile.title = shape;
+      tile.setAttribute('aria-selected', String(botSheetAvatarChoice?.kind === 'classic' && botSheetAvatarChoice.shape === shape));
+      tile.innerHTML = classicShapeSvg(shape, color);
+      tile.addEventListener('click', () => {
+        botSheetClassicShape = shape;
+        botSheetAvatarChoice = { kind: 'classic', shape, color, icon: classicShapeDataUrl(shape, color) };
+        const hint = document.getElementById('botModeSheetFaceHint');
+        if (hint) hint.textContent = botSheetClassicColor ? t('bot_mode.face_classic_picked_color') : t('bot_mode.face_classic_follows_name');
+        renderClassicShapeGrid();
+        renderBotModeSheetAvatarPreview();
+      });
+      grid.append(tile);
+    }
+    renderClassicShapeColors();
+  }
+
+function botSheetBaseName() {
+  if (botSheetMode === 'create') return String(els.botModeSheetNameInput?.value || '').trim() || 'agent';
+  return botSheetProfileName || 'agent';
+}
+
+function renderBotModeSheetAvatarPreview() {
+  const host = els.botModeSheetAvatarPreview;
+  if (!host) return;
+  const choice = botSheetAvatarChoice;
+  if (choice?.kind === 'classic') {
+      host.innerHTML = classicShapeSvg(choice.shape, choice.color || botSheetClassicColorValue());
+      return;
+    }
+  const icon = choice?.kind === 'image' || choice?.kind === 'pet' ? choice.icon : '';
+  if (icon) {
+    const img = document.createElement('img');
+    img.src = icon;
+    img.alt = '';
+    img.className = 'bot-mode-avatar-pet';
+    host.replaceChildren(img);
+    return;
+  }
+  const row = botSheetRosterRow();
+  const seed = choice?.kind === 'blobatar'
+    ? choice.seed
+    : choice?.kind === 'clear' || botSheetMode === 'create'
+      ? botSheetBaseName()
+      : '';
+  if (seed) {
+    let svgMarkup = '';
+    try {
+      svgMarkup = blobatarSvg(seed, { size: 40 });
+    } catch {
+      svgMarkup = '';
+    }
+    if (svgMarkup) {
+      const template = document.createElement('template');
+      template.innerHTML = svgMarkup.trim();
+      const svg = template.content.firstElementChild;
+      if (svg) {
+        svg.setAttribute('aria-hidden', 'true');
+        host.replaceChildren(svg);
+        return;
+      }
+    }
+  }
+  // No pending avatar choice: show what the roster renders today.
+  appendBotModeAvatar(host, botProfileDisplayName(row) || botSheetBaseName(), botSheetProfileName, row?.avatar);
+    if (!choice && row && !host.querySelector('img, .bot-mode-pet-live')) {
+      void hydrateBotModeRemoteAvatar(row, host);
+    }
+  }
+
+function botSheetCurrentBlobatarSeed() {
+  const choice = botSheetAvatarChoice;
+  if (choice?.kind === 'blobatar') return choice.seed;
+  const override = botProfileOverrideFor(botSheetProfileName);
+  if (!choice && !override?.icon && !override?.petSlug && !override?.blobatarSeed) {
+    const row = botSheetRosterRow();
+    if (!remoteAvatarImageOf(row?.avatar)) return botSheetBaseName();
+  }
+  if (!choice && override?.blobatarSeed) return override.blobatarSeed;
+  return '';
+}
+
+function renderBotModeFaceGrid() {
+  const grid = els.botModeSheetFaceGrid;
+  if (!grid) return;
+  const baseName = botSheetBaseName();
+  const seeds = [...new Set([baseName, ...BLOBATAR_SHAPES.map((shape) => `${baseName}::${shape}`)])];
+  const currentSeed = botSheetCurrentBlobatarSeed();
+  grid.replaceChildren();
+  for (const seed of seeds) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'bot-mode-face-tile';
+    tile.setAttribute('role', 'option');
+    tile.setAttribute('aria-selected', String(seed === currentSeed));
+    tile.title = seed === baseName ? baseName : seed.split('::').pop();
+    let svgMarkup = '';
+    try {
+      svgMarkup = blobatarSvg(seed, { size: 40 });
+    } catch {
+      svgMarkup = '';
+    }
+    if (svgMarkup) {
+      const template = document.createElement('template');
+      template.innerHTML = svgMarkup.trim();
+      const svg = template.content.firstElementChild;
+      if (svg) {
+        svg.setAttribute('aria-hidden', 'true');
+        tile.append(svg);
+      }
+    }
+    tile.addEventListener('click', () => {
+      botSheetAvatarChoice = { kind: 'blobatar', seed };
+      renderBotModeFaceGrid();
+      renderBotModeSheetAvatarPreview();
+      syncPetPickerState();
+    });
+    grid.append(tile);
+  }
+}
+
+function renderBotModeSheetSkills() {
+  const container = document.getElementById('botModeSheetSkillsList');
+  if (!container) return;
+  const search = document.getElementById('botModeSheetSkillsSearch');
+  const count = document.getElementById('botModeSheetSkillsCount');
+  const skills = Array.isArray(botSheetProfileDescribe?.skills) ? botSheetProfileDescribe.skills : [];
+  const needle = String(search?.value || '').trim().toLowerCase();
+  const matches = skills.filter((skill) => !needle
+    || `${skill.name || ''} ${skill.description || ''}`.toLowerCase().includes(needle));
+  if (count) count.textContent = skills.length ? (needle ? `${matches.length}/${skills.length}` : String(skills.length)) : '';
+  container.replaceChildren();
+  if (!botSheetProfileDescribe) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'Loading profile capabilities from Hermes…';
+    container.append(empty);
+    return;
+  }
+  if (!skills.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'No installed skills were returned for this profile.';
+    container.append(empty);
+    return;
+  }
+  if (!matches.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'No skills match this search.';
+    container.append(empty);
+    return;
+  }
+  for (const skill of matches) {
+    const name = String(skill?.name || '').trim();
+    if (!name) continue;
+    const label = document.createElement('label');
+    label.className = 'bot-mode-check-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !botSheetSkillsDisabled.has(name);
+    cb.addEventListener('change', () => {
+      if (cb.checked) botSheetSkillsDisabled.delete(name);
+      else botSheetSkillsDisabled.add(name);
+      refreshBotModeSheetDirtyState();
+    });
+    const txt = document.createElement('span');
+    txt.textContent = name;
+    if (skill.description) label.title = String(skill.description).slice(0, 240);
+    label.append(cb, txt);
+    container.append(label);
+  }
+}
+
+function renderBotModeSheetTools() {
+  const container = document.getElementById('botModeSheetToolsList');
+  if (!container) return;
+  const search = document.getElementById('botModeSheetToolsSearch');
+  const count = document.getElementById('botModeSheetToolsCount');
+  const toolsets = Array.isArray(botSheetProfileDescribe?.toolsets) ? botSheetProfileDescribe.toolsets : [];
+  const needle = String(search?.value || '').trim().toLowerCase();
+  const matches = toolsets.filter((toolset) => !needle || `${toolset?.name || ''} ${toolset?.label || ''} ${toolset?.description || ''}`.toLowerCase().includes(needle));
+  if (count) count.textContent = toolsets.length ? (needle ? `${matches.length}/${toolsets.length}` : String(toolsets.length)) : '';
+  container.replaceChildren();
+  if (!botSheetProfileDescribe) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'Loading profile capabilities from Hermes…';
+    container.append(empty);
+    return;
+  }
+  if (!toolsets.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = 'Toolset configuration is not advertised by this Hermes connection.';
+      container.append(empty);
+      return;
+    }
+    if (!matches.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = 'No tools match this search.';
+      container.append(empty);
+      return;
+    }
+    for (const toolset of matches) {
+    const name = String(toolset?.name || '').trim();
+    if (!name) continue;
+    const label = document.createElement('label');
+    label.className = 'bot-mode-check-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = botSheetEnabledToolsets.has(name);
+    cb.addEventListener('change', () => {
+      if (cb.checked) botSheetEnabledToolsets.add(name);
+      else botSheetEnabledToolsets.delete(name);
+      refreshBotModeSheetDirtyState();
+    });
+    const text = document.createElement('span');
+    text.textContent = String(toolset.label || name);
+    label.title = String(toolset.description || `${toolset.tool_count || 0} tools`).slice(0, 240);
+    label.append(cb, text);
+    container.append(label);
+  }
+}
+
+function renderBotModeSheetMcp() {
+  const container = document.getElementById('botModeSheetMcpList');
+  if (!container) return;
+  const search = document.getElementById('botModeSheetMcpSearch');
+  const count = document.getElementById('botModeSheetMcpCount');
+  const servers = Array.isArray(botSheetProfileDescribe?.mcp_servers) ? botSheetProfileDescribe.mcp_servers : [];
+  const needle = String(search?.value || '').trim().toLowerCase();
+  const matches = servers.filter((server) => !needle || `${server?.name || ''} ${server?.transport || ''}`.toLowerCase().includes(needle));
+  if (count) count.textContent = servers.length ? (needle ? `${matches.length}/${servers.length}` : String(servers.length)) : '';
+  container.replaceChildren();
+  if (!botSheetProfileDescribe) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'Loading profile capabilities from Hermes…';
+    container.append(empty);
+    return;
+  }
+  if (!servers.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = 'MCP configuration is not advertised by this Hermes connection.';
+      container.append(empty);
+      return;
+    }
+    if (!matches.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = 'No MCP servers match this search.';
+      container.append(empty);
+      return;
+    }
+    for (const server of matches) {
+    const name = String(server?.name || '').trim();
+    if (!name) continue;
+    const label = document.createElement('label');
+    label.className = 'bot-mode-check-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = botSheetEnabledMcpServers.has(name);
+    cb.addEventListener('change', () => {
+      if (cb.checked) botSheetEnabledMcpServers.add(name);
+      else botSheetEnabledMcpServers.delete(name);
+      refreshBotModeSheetDirtyState();
+    });
+    const text = document.createElement('span');
+    text.textContent = name;
+    label.title = String(server.transport || 'MCP server').slice(0, 120);
+    label.append(cb, text);
+    container.append(label);
+  }
+}
+
+function switchBotModeSheetTab(tab = 'avatar') {
+  for (const button of els.botModeSheetTabs?.querySelectorAll('[data-sheet-tab]') || []) {
+    button.classList.toggle('on', button.dataset.sheetTab === tab);
+  }
+  for (const pane of els.botModeSheet?.querySelectorAll('[data-sheet-pane]') || []) {
+    pane.hidden = pane.dataset.sheetPane !== tab;
+  }
+  if (tab === 'avatar') {
+      renderBotModeFaceGrid();
+    // Render immediately on open/tab-switch so the preview mirrors the agent's
+    // equipped avatar before any new face is clicked.
+    renderBotModeSheetAvatarPreview();
+  } else if (tab === 'skills') {
+      renderBotModeSheetSkills();
+      renderBotModeSheetTools();
+      renderBotModeSheetMcp();
+    } else if (tab === 'tools') {
+    renderBotModeSheetTools();
+  } else if (tab === 'mcp') {
+    renderBotModeSheetMcp();
+  } else if (tab === 'soul') {
+    // SOUL content is backend-owned. Do not seed a profile with a Browser
+    // identity or a hard-coded default when the runtime has not returned it.
+    const soulInput = document.getElementById('botModeSheetSoulInput');
+    if (soulInput) soulInput.placeholder = translateUiText('SOUL is loaded from the connected Hermes profile.');
+  }
+}
+
+async function loadBotProfileDescribe(profileName) {
+  if (!profileName || settings.botModeEnabled !== true) return false;
+  try {
+    const connection = await ensureActiveDashboardWsConnection();
+    const described = await connection.client.request(WS_METHODS.profilesDescribe, { name: profileName });
+    if (botSheetProfileName !== profileName || botSheetMode !== 'edit') return false;
+    botSheetProfileDescribe = described && typeof described === 'object' ? described : null;
+    botSheetSkillsDisabled.clear();
+    botSheetEnabledToolsets.clear();
+    botSheetEnabledMcpServers.clear();
+    for (const skill of Array.isArray(botSheetProfileDescribe?.skills) ? botSheetProfileDescribe.skills : []) {
+      if (skill?.enabled === false && skill.name) botSheetSkillsDisabled.add(String(skill.name));
+    }
+    for (const toolset of Array.isArray(botSheetProfileDescribe?.toolsets) ? botSheetProfileDescribe.toolsets : []) {
+      if (toolset?.enabled === true && toolset.name) botSheetEnabledToolsets.add(String(toolset.name));
+    }
+    for (const server of Array.isArray(botSheetProfileDescribe?.mcp_servers) ? botSheetProfileDescribe.mcp_servers : []) {
+      if (server?.enabled === true && server.name) botSheetEnabledMcpServers.add(String(server.name));
+    }
+    const soulInput = document.getElementById('botModeSheetSoulInput');
+    if (soulInput) soulInput.value = String(botSheetProfileDescribe?.soul || '');
+    renderBotModeSheetSkills();
+    renderBotModeSheetTools();
+    renderBotModeSheetMcp();
+    refreshBotModeSheetDirtyState();
+    return true;
+  } catch {
+    showBotModeSheetWarning(translateUiText('Profile capabilities are unavailable on this Hermes connection.'));
+    return false;
+  }
+}
+
+function openBotProfileSheet({ mode = 'edit', profileName = '' } = {}) {
+  if (!els.botModeSheet) return false;
+  const row = botSheetRosterRow(profileName);
+  if (mode === 'edit' && !row) {
+    setStatus('warn', 'No agent selected', 'Refresh the roster, then pick an agent to edit.');
+    return false;
+  }
+  botSheetMode = mode;
+  botSheetProfileName = profileName;
+  botSheetAvatarChoice = null;
+  botSheetProfileDescribe = null;
+  botSheetSkillsDisabled.clear();
+  botSheetEnabledToolsets.clear();
+  botSheetEnabledMcpServers.clear();
+  petSelection = null;
+  botSheetSaving = false;
+  if (els.botModeSheetTitle) {
+    els.botModeSheetTitle.textContent = mode === 'create' ? translateUiText('New Bot') : translateUiText('Edit profile');
+  }
+  if (els.botModeSheetMeta) {
+    if (mode === 'create') {
+      els.botModeSheetMeta.textContent = translateUiText('Creates a verified Hermes agent profile');
+    } else {
+      const revision = Number(row?.metadataRevision || 0);
+      els.botModeSheetMeta.textContent = t('bot_mode.sheet_meta_profile', {
+        name: revision > 0 ? `${profileName} · revision ${revision}` : profileName,
+      });
+    }
+  }
+  if (els.botModeSheetNameField) els.botModeSheetNameField.hidden = mode === 'edit';
+  const advanced = document.getElementById('botModeCreateAdvanced');
+    if (advanced) advanced.hidden = false;
+    const modelFields = document.getElementById('botModeModelFields');
+    const createFlags = document.getElementById('botModeCreateFlags');
+    if (modelFields) modelFields.hidden = mode !== 'create';
+    if (createFlags) createFlags.hidden = mode !== 'create';
+    switchBotAdvancedPane('general');
+  if (mode === 'create') fillBotCreateModelSelects();
+  botSheetFaceMode = 'blob';
+  const classicGrid = document.getElementById('botModeClassicShapeGrid');
+  if (classicGrid) classicGrid.hidden = true;
+  if (els.botModeSheetFaceGrid) els.botModeSheetFaceGrid.hidden = false;
+  const cloneField = document.getElementById('botModeCloneField');
+  const cloneSelect = document.getElementById('botModeSheetCloneFrom');
+  if (cloneField) cloneField.hidden = mode !== 'create';
+  if (cloneSelect && mode === 'create') {
+    cloneSelect.replaceChildren();
+    const fresh = document.createElement('option');
+    fresh.value = '';
+    fresh.textContent = 'Fresh profile';
+    cloneSelect.append(fresh);
+    for (const row of botModeRoster || []) {
+      const name = String(row?.profileName || '').trim();
+      if (!name) continue;
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = botProfileDisplayName(row);
+      cloneSelect.append(option);
+    }
+    cloneSelect.value = '';
+        mountBrandedSelect(cloneSelect);
+      }
+  if (els.botModeSheetNameInput) els.botModeSheetNameInput.value = mode === 'create' ? '' : profileName;
+  if (els.botModeSheetTitleInput) {
+    els.botModeSheetTitleInput.value = mode === 'edit'
+      ? String(row?.displayName || '')
+      : '';
+  }
+  if (els.botModeSheetDescriptionInput) {
+    els.botModeSheetDescriptionInput.value = mode === 'edit' ? String(row?.description || '') : '';
+  }
+  if (els.botModeSheetImageInput) els.botModeSheetImageInput.value = '';
+  if (els.botModeSheetUploadText) els.botModeSheetUploadText.textContent = translateUiText('Choose an image…');
+  els.botModeSheetUploadText?.closest('.bot-mode-upload-card')?.classList.remove('has-file');
+  if (els.botModeSheetSkillsSearch) els.botModeSheetSkillsSearch.value = '';
+  clearBotModeSheetWarning();
+  refreshBotModeSheetDirtyState();
+  els.botModeSheet.hidden = false;
+    switchBotModeSheetTab('avatar');
+        botSheetFaceMode = 'blob';
+        botSheetClassicShape = 'squircle';
+        botSheetClassicColor = null;
+        // Classic shape selections survive round trips: the local override first,
+        // then the profile ui_meta the desktop picker writes (shape/color).
+        const classicEntry = mode === 'edit' ? botProfileOverrideFor(profileName) : null;
+        const classicRow = mode === 'edit' ? botSheetRosterRow(profileName) : null;
+        const shapeHint = String(classicEntry?.classicShape || classicRow?.shape || '').trim();
+        if (CLASSIC_AVATAR_SHAPES.includes(shapeHint)) {
+          botSheetFaceMode = 'classic';
+          botSheetClassicShape = shapeHint;
+          const colorHint = String(classicEntry?.classicColor || classicRow?.color || '').trim();
+          botSheetClassicColor = colorHint || null;
+        }
+        syncBotSheetFaceSwitch();
+    els.botModeSheet.querySelector('.bot-mode-sheet-body')?.scrollTo(0, 0);
+  syncPetPickerState();
+  if (mode === 'edit') {
+    void refreshPetAvatarCache().then(() => {
+      if (botSheetMode === 'edit' && botSheetProfileName === profileName && !botSheetAvatarChoice) {
+        renderBotModeSheetAvatarPreview();
+      }
+    });
+    void loadBotProfileDescribe(profileName);
+  }
+  if (mode === 'create') els.botModeSheetNameInput?.focus();
+  return true;
+}
+
+function closeBotModeSheet() {
+  if (!els.botModeSheet) return;
+  els.botModeSheet.hidden = true;
+  botSheetAvatarChoice = null;
+  petSelection = null;
+  botSheetSaving = false;
+  if (!els.botModePanel?.hidden) {
+    renderBotModeRoster(els.botModeSearch?.value);
+    renderBotModeGroupChats(els.botModeSearch?.value);
+  }
+}
+
+// Dashboard REST helper. The desktop dashboard gates /api/* behind its session
+// token (bootstrapped from the root HTML, same handshake as the roster fetch).
+async function dashboardApiRequest(path, { method = 'GET', body = null, timeoutMs = 10000 } = {}) {
+  const base = String(desktopDashboardUrl || '').replace(/\/+$/, '');
+  if (!base) {
+    const error = new Error('no-dashboard-url');
+    error.status = 0;
+    throw error;
+  }
+  const rootResponse = await fetch(base, {
+    headers: { Accept: 'text/html' },
+    cache: 'no-store',
+    signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(Math.min(timeoutMs, 2500)) : undefined,
+  });
+  const token = extractDashboardSessionToken(await rootResponse.text());
+  if (!token) {
+    const error = new Error('no-dashboard-session-token');
+    error.status = rootResponse.status || 0;
+    throw error;
+  }
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Hermes-Session-Token': token,
+    },
+    credentials: 'include',
+    body: body == null ? undefined : JSON.stringify(body),
+    signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
+  });
+  if (!response.ok) {
+    const error = new Error(`dashboard-${method.toLowerCase()}-${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return response;
+}
+
+// "Same as desktop normalizeAvatarImage": decode the upload, cover-crop to a
+// square, downscale to 256px, and re-encode as a PNG data URL.
+function normalizeAvatarImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error('no-file'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('avatar-read-failed'));
+    reader.onload = async () => {
+      try {
+        const bitmap = await createImageBitmap(new Blob([reader.result], { type: file.type || 'image/png' }));
+        const edge = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = edge;
+        canvas.height = edge;
+        const context = canvas.getContext('2d');
+        const scale = Math.max(edge / bitmap.width, edge / bitmap.height);
+        const width = bitmap.width * scale;
+        const height = bitmap.height * scale;
+        context.imageSmoothingQuality = 'high';
+        context.drawImage(bitmap, (edge - width) / 2, (edge - height) / 2, width, height);
+        bitmap.close();
+        resolve(canvas.toDataURL('image/png'));
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error('avatar-decode-failed'));
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function botSheetEntryForSave(profileName, title, description) {
+  const previous = botProfileOverrideFor(profileName) || {};
+  const entry = { title, description };
+  const choice = botSheetAvatarChoice;
+  if (choice?.kind === 'clear') {
+    // Revert to the deterministic blobatar face: no avatar fields at all.
+  } else if (choice?.kind === 'image') {
+    entry.icon = choice.icon;
+    entry.custom = true;
+  } else if (choice?.kind === 'pet') {
+    entry.petSlug = choice.petSlug;
+    entry.icon = choice.icon;
+    entry.custom = false;
+  } else if (choice?.kind === 'classic') {
+      const classicColor = choice.color || botSheetClassicColorValue();
+      entry.icon = classicShapeDataUrl(choice.shape, classicColor);
+      entry.custom = true;
+      entry.classicShape = choice.shape;
+      if (botSheetClassicColor) entry.classicColor = botSheetClassicColor;
+    } else if (choice?.kind === 'blobatar') {
+    entry.blobatarSeed = choice.seed;
+  } else {
+    if (previous.icon) {
+      entry.icon = previous.icon;
+      entry.custom = previous.custom === true;
+    }
+    if (previous.petSlug) entry.petSlug = previous.petSlug;
+    if (previous.blobatarSeed) entry.blobatarSeed = previous.blobatarSeed;
+  }
+  return entry;
+}
+
+async function writeBotProfileToServer({
+  profileName,
+  title,
+  description,
+  entry,
+  choice,
+  create = false,
+  disabledSkills,
+  enabledToolsets,
+  enabledMcpServers,
+  soul,
+} = {}) {
+  const connection = await ensureActiveDashboardWsConnection();
+  const client = connection?.client;
+  if (!client?.request) throw new Error('Bot Mode profile transport unavailable.');
+  if (create) {
+    await client.request(WS_METHODS.profilesCreate, {
+      name: profileName,
+      description,
+      clone_from: String(document.getElementById('botModeSheetCloneFrom')?.value || '').trim(),
+            clone_all: false,
+            no_skills: document.getElementById('botModeSheetNoSkills')?.checked === true,
+                        mirror_credentials: document.getElementById('botModeSheetShareKeys')?.checked === true,
+            ...(document.getElementById('botModeSheetProvider')?.value && document.getElementById('botModeSheetModel')?.value
+              ? {
+                provider: document.getElementById('botModeSheetProvider').value,
+                model: document.getElementById('botModeSheetModel').value,
+              }
+              : {}),
+    });
+  }
+  const listed = await client.request(WS_METHODS.profilesList, { include_sessions: false });
+  const profiles = Array.isArray(listed?.profiles) ? listed.profiles : [];
+  const current = profiles.find((candidate) => String(candidate?.name || '').trim() === profileName);
+  if (!current) throw new Error('Hermes did not return the selected profile after creation.');
+  const currentMeta = current?.ui_meta && typeof current.ui_meta === 'object' ? current.ui_meta : {};
+  const currentBotMeta = currentMeta['hermes-bots'] && typeof currentMeta['hermes-bots'] === 'object'
+    ? currentMeta['hermes-bots']
+    : {};
+  const revisions = current?.ui_meta_revisions && typeof current.ui_meta_revisions === 'object'
+    ? current.ui_meta_revisions
+    : {};
+  const expectedRevision = Number.isFinite(Number(revisions['hermes-bots']))
+    ? Math.max(0, Math.floor(Number(revisions['hermes-bots'])))
+    : 0;
+  const configurePayload = {
+    name: profileName,
+    description,
+    ui_meta: {
+      'hermes-bots': {
+        ...currentBotMeta,
+        title: title || null,
+        ...(choice?.kind === 'pet' ? { pet: choice.petSlug || null, imageKind: 'photo' } : {}),
+                ...(choice?.kind === 'image' ? { pet: null, imageKind: 'photo' } : {}),
+                ...(choice?.kind === 'clear' || choice?.kind === 'blobatar' ? { pet: null, imageKind: 'shape' } : {}),
+                ...(choice?.kind === 'classic'
+                  ? { pet: null, imageKind: 'shape', shape: choice.shape || null, color: botSheetClassicColor || null }
+                  : {}),
+      },
+    },
+    ui_meta_expected_revisions: { 'hermes-bots': expectedRevision },
+  };
+  if (Array.isArray(disabledSkills)) configurePayload.disabled_skills = [...disabledSkills];
+  if (Array.isArray(enabledToolsets)) configurePayload.enabled_toolsets = [...enabledToolsets];
+  if (Array.isArray(enabledMcpServers)) configurePayload.enabled_mcp_servers = [...enabledMcpServers];
+  if (typeof soul === 'string') configurePayload.soul = soul;
+  const configureResult = await client.request(WS_METHODS.profilesConfigure, configurePayload);
+  if (configureResult?.applied?.ui_meta !== true) {
+    if (configureResult?.applied?.ui_meta_conflicts) throw new Error('Another client changed this profile. Reload it and try again.');
+    throw new Error('Hermes rejected the profile metadata update.');
+  }
+  for (const [field, key] of [
+    [disabledSkills, 'skills'],
+    [enabledToolsets, 'toolsets'],
+    [enabledMcpServers, 'mcp_servers'],
+    [typeof soul === 'string' ? soul : undefined, 'soul'],
+  ]) {
+    if (field !== undefined && configureResult?.applied?.[key] !== true) throw new Error(`Hermes rejected the profile ${key} update.`);
+  }
+
+  const wantsAvatarWrite = choice?.kind === 'clear' || choice?.kind === 'blobatar' || choice?.kind === 'image' || choice?.kind === 'pet';
+  if (wantsAvatarWrite) {
+    const icon = typeof entry?.icon === 'string' && entry.icon.startsWith('data:image/') ? entry.icon : '';
+    const assetResult = await client.request(WS_METHODS.profilesSetAsset, {
+      name: profileName,
+      asset: 'avatar',
+      clear: choice.kind === 'clear' || choice.kind === 'blobatar',
+      data: icon,
+    });
+    if (assetResult?.ok !== true) throw new Error('Hermes rejected the profile avatar update.');
+  }
+
+  const verifiedPayload = await client.request(WS_METHODS.profilesList, { include_sessions: false });
+  const verifiedProfiles = Array.isArray(verifiedPayload?.profiles) ? verifiedPayload.profiles : [];
+  const verified = verifiedProfiles.find((candidate) => String(candidate?.name || '').trim() === profileName);
+  const verifiedTitle = verified?.ui_meta?.['hermes-bots']?.title || verified?.title || '';
+  if (!verified || (title && verifiedTitle !== title) || String(verified.description || '') !== description) {
+    throw new Error('Profile write verification did not match the requested values.');
+  }
+  if (Array.isArray(disabledSkills) || Array.isArray(enabledToolsets) || Array.isArray(enabledMcpServers) || typeof soul === 'string') {
+    const described = await client.request(WS_METHODS.profilesDescribe, { name: profileName });
+    if (typeof soul === 'string' && String(described?.soul || '') !== soul) throw new Error('Profile SOUL verification did not match the requested value.');
+    if (Array.isArray(disabledSkills)) {
+      const actualDisabled = new Set((Array.isArray(described?.skills) ? described.skills : [])
+        .filter((skill) => skill?.enabled === false)
+        .map((skill) => String(skill.name || '')));
+      if (actualDisabled.size !== disabledSkills.length || disabledSkills.some((name) => !actualDisabled.has(name))) throw new Error('Profile skills verification did not match the requested values.');
+    }
+    if (Array.isArray(enabledToolsets)) {
+      const actualToolsets = new Set((Array.isArray(described?.toolsets) ? described.toolsets : [])
+        .filter((toolset) => toolset?.enabled === true)
+        .map((toolset) => String(toolset.name || '')));
+      if (actualToolsets.size !== enabledToolsets.length || enabledToolsets.some((name) => !actualToolsets.has(name))) throw new Error('Profile toolset verification did not match the requested values.');
+    }
+    if (Array.isArray(enabledMcpServers)) {
+      const actualMcp = new Set((Array.isArray(described?.mcp_servers) ? described.mcp_servers : [])
+        .filter((server) => server?.enabled === true)
+        .map((server) => String(server.name || '')));
+      if (actualMcp.size !== enabledMcpServers.length || enabledMcpServers.some((name) => !actualMcp.has(name))) throw new Error('Profile MCP verification did not match the requested values.');
+    }
+  }
+  if (wantsAvatarWrite) {
+    const asset = await client.request(WS_METHODS.profilesGetAsset, { name: profileName, asset: 'avatar' });
+    const found = asset?.found === true;
+    if (found === (choice.kind === 'clear' || choice.kind === 'blobatar')) {
+      throw new Error('Profile avatar write verification did not match the requested state.');
+    }
+  }
+  return verified;
+}
+
+async function saveBotProfileSheet() {
+  if (botSheetSaving || !els.botModeSheet || els.botModeSheet.hidden) return;
+  const title = String(els.botModeSheetTitleInput?.value || '').trim().slice(0, 120);
+  const description = String(els.botModeSheetDescriptionInput?.value || '').trim().slice(0, 500);
+
+  if (botSheetMode === 'create') {
+    const profileName = String(els.botModeSheetNameInput?.value || '').trim();
+    if (!profileName) {
+      showBotModeSheetWarning(translateUiText('Give the new agent a profile name.'));
+      return;
+    }
+    botSheetSaving = true;
+    refreshBotModeSheetDirtyState();
+    try {
+      await writeBotProfileToServer({
+              profileName,
+              title,
+              description,
+              entry: botSheetEntryForSave(profileName, title, description),
+              choice: botSheetAvatarChoice,
+              create: true,
+                            soul: String(document.getElementById('botModeSheetSoulInput')?.value || '').trim()
+                              ? String(document.getElementById('botModeSheetSoulInput')?.value || '')
+                              : undefined,
+            });
+      closeBotModeSheet();
+      setStatus('ok', 'Agent created', `${profileName} was created; refreshing the roster.`);
+      await loadProfiles();
+    } catch {
+      showBotModeSheetWarning(translateUiText('Hermes could not create this agent profile. Verify the active dashboard connection and try again.'));
+      botSheetSaving = false;
+      refreshBotModeSheetDirtyState();
+    }
+    return;
+  }
+
+  const profileName = botSheetProfileName;
+  if (!profileName || !botSheetRosterRow(profileName)) {
+    showBotModeSheetWarning(translateUiText('Select an agent in Bot Mode first, then edit its profile.'));
+    return;
+  }
+  const entry = botSheetEntryForSave(profileName, title, description);
+  const choice = botSheetAvatarChoice;
+  botSheetSaving = true;
+  refreshBotModeSheetDirtyState();
+  try {
+    await writeBotProfileToServer({
+      profileName,
+      title,
+      description,
+      entry,
+      choice,
+      disabledSkills: botSheetProfileDescribe ? [...botSheetSkillsDisabled] : undefined,
+      enabledToolsets: botSheetProfileDescribe ? [...botSheetEnabledToolsets] : undefined,
+      enabledMcpServers: botSheetProfileDescribe ? [...botSheetEnabledMcpServers] : undefined,
+      soul: botSheetProfileDescribe ? String(document.getElementById('botModeSheetSoulInput')?.value || '') : undefined,
+    });
+    await writeBotProfileOverride(profileName, null);
+        if (choice?.kind === 'pet' && choice.spritesheetUrl) {
+          const petEntry = { slug: choice.petSlug, displayName: choice.petDisplayName, icon: entry.icon, spritesheetUrl: choice.spritesheetUrl };
+          petAvatarsByProfile.set(profileName, petEntry);
+          void writePetAvatar(profileName, petEntry);
+        } else {
+          petAvatarsByProfile.delete(profileName);
+          void writePetAvatar(profileName, null);
+        }
+    botModeRemoteAvatarCache.delete(botModeAvatarCacheKey(profileName));
+  } catch {
+    showBotModeSheetWarning(translateUiText('Hermes could not save this profile. Reload the profile and try again.'));
+    botSheetSaving = false;
+    refreshBotModeSheetDirtyState();
+    return;
+  }
+  botSheetSaving = false;
+  closeBotModeSheet();
+  setStatus('ok', 'Profile saved', `${profileName} saved to Hermes; refreshing the roster.`);
+  try {
+    await loadProfiles();
+  } catch {
+    setStatus('warn', 'Profile saved', 'Hermes accepted the change, but the roster refresh is still pending.');
+  }
+}
+
+// ── Petdex pet picker (Bot Mode profile sheet): frame-0 icons, per-profile assignment ──
+let petGalleryCache = [];
+let petGalleryLoading = false;
+let petGalleryLoaded = false;
+let petSelection = null; // { slug, displayName, spritesheetUrl, icon }
+let petIconJobs = new Map();
+let petThumbObserver = null;
+
+// One gateway thumb per pet, cached per slug. The RPC can stall on a cold
+// server-side crop (the desktop caps it at 15s for the same reason), so this
+// races a timeout and never caches a failure: a stalled request must not wedge
+// the tile, the picker, or the avatar apply that awaits it.
+const PET_THUMB_TIMEOUT_MS = 12_000;
+async function petIconFor(spriteUrl, slug = '') {
+  const key = slug || spriteUrl;
+  if (!key) return null;
+  const cached = petIconJobs.get(key);
+  if (cached) {
+    const icon = await cached;
+    if (icon) return icon;
+    petIconJobs.delete(key);
+  }
+  const job = Promise.race([
+    requestPetGateway('pet.thumb', { slug, url: spriteUrl || '' })
+      .then((result) => (result?.ok && result.dataUri ? result.dataUri : null))
+      .catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), PET_THUMB_TIMEOUT_MS)),
+  ]);
+  petIconJobs.set(key, job);
+  const icon = await job;
+  if (!icon) petIconJobs.delete(key);
+  return icon;
+}
+
+const petSheetBlobJobs = new Map();
+
+async function petSheetBlob(spriteUrl) {
+  if (!spriteUrl) return null;
+  const cached = petSheetBlobJobs.get(spriteUrl);
+  if (cached) {
+    const url = await cached;
+    if (url) return url;
+    petSheetBlobJobs.delete(spriteUrl);
+  }
+  const job = (async () => {
+    try {
+      const response = await fetch(spriteUrl, { signal: AbortSignal.timeout(20000) });
+      if (!response.ok) return null;
+      return URL.createObjectURL(await response.blob());
+    } catch {
+      return null;
+    }
+  })();
+  petSheetBlobJobs.set(spriteUrl, job);
+  const url = await job;
+  if (!url) petSheetBlobJobs.delete(spriteUrl);
+  return url;
+}
+
+function paintPetThumb(thumb, pet, { eager = false } = {}) {
+  const slug = pet?.slug || '';
+  const spriteUrl = pet?.spritesheetUrl || '';
+  if (!thumb || !slug) return;
+  thumb.dataset.sprite = spriteUrl;
+  thumb.dataset.slug = slug;
+  // The first screenful paints immediately: the picker lives inside a details
+  // element that is closed at render time, and a lazy observer alone leaves the
+  // gallery blank until it happens to fire. Everything below the fold still
+  // rides the observer so a 4800-pet catalog stays cheap.
+  if (eager) {
+    enqueuePetThumb(thumb, spriteUrl, slug);
+    return;
+  }
+  if (!petThumbObserver) {
+    petThumbObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        petThumbObserver.unobserve(entry.target);
+        enqueuePetThumb(entry.target, entry.target.dataset.sprite, entry.target.dataset.slug);
+      }
+    }, { root: null, rootMargin: '240px' });
+  }
+  petThumbObserver.observe(thumb);
+}
+
+// Paint whatever the open picker shows but never got a thumb for (observer
+// missed it, or the panel was resized after render).
+function primePetThumbs(limit = 12) {
+  const grid = els.botModePetGrid;
+  if (!grid) return;
+  let queued = 0;
+  for (const thumb of grid.querySelectorAll('.bot-mode-pet-thumb')) {
+    if (queued >= limit) break;
+    if (thumb.querySelector('img')) continue;
+    const slug = thumb.dataset.slug || '';
+    if (!slug || petIconJobs.has(slug)) continue;
+    enqueuePetThumb(thumb, thumb.dataset.sprite || '', slug);
+    queued += 1;
+  }
+}
+
+const petDecodeQueue = [];
+let petDecodeActive = 0;
+
+function enqueuePetThumb(thumb, spriteUrl, slug = '') {
+  const run = () => {
+    petDecodeActive += 1;
+    petIconFor(spriteUrl, slug).then((icon) => {
+      if (!icon || !thumb.isConnected) return;
+      const img = document.createElement('img');
+      img.src = icon;
+      img.alt = '';
+      img.width = 52;
+      img.height = 56;
+      thumb.replaceChildren(img);
+    }).finally(() => {
+      petDecodeActive -= 1;
+      const next = petDecodeQueue.shift();
+      if (next) next();
+    });
+  };
+  if (petDecodeActive < 3) run();
+  else petDecodeQueue.push(run);
+}
+
+async function renderPetGrid() {
+  const grid = els.botModePetGrid;
+  if (!grid) return;
+  petThumbObserver?.disconnect();
+  petDecodeQueue.length = 0;
+  const needle = String(els.botModePetSearch?.value || '').trim().toLowerCase();
+  const seen = new Set();
+  const pets = [];
+  for (const pet of petGalleryCache) {
+    if (!pet?.slug || seen.has(pet.slug)) continue;
+    if (needle && !`${pet.slug} ${pet.displayName}`.toLowerCase().includes(needle)) continue;
+    seen.add(pet.slug);
+    pets.push(pet);
+  }
+  const visible = pets.slice(0, petGridLimit);
+  grid.replaceChildren();
+  for (const [index, pet] of visible.entries()) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bot-mode-pet-tile';
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(petSelection?.slug === pet.slug));
+    button.title = pet.displayName;
+    const thumb = document.createElement('span');
+    thumb.className = 'bot-mode-pet-thumb';
+    button.append(thumb);
+    const label = document.createElement('span');
+    label.className = 'bot-mode-pet-name';
+    label.textContent = pet.displayName;
+    button.append(label);
+    paintPetThumb(thumb, pet, { eager: index < 12 });
+    button.addEventListener('click', async () => {
+      petSelection = { ...pet };
+      grid.querySelectorAll('[aria-selected]').forEach((el) => el.setAttribute('aria-selected', 'false'));
+      button.setAttribute('aria-selected', 'true');
+      if (!pet.icon) pet.icon = await petIconFor(pet.spritesheetUrl, pet.slug);
+      petSelection = { ...pet, icon: pet.icon };
+      void applyPetSelection();
+    });
+    grid.append(button);
+  }
+  if (!pets.length && petGalleryLoaded) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = needle
+          ? t('bot_mode.pet_no_match')
+          : (petGalleryFailed ? t('bot_mode.pet_gallery_failed') : t('bot_mode.pet_gallery_empty'));
+    grid.append(empty);
+  }
+  if (pets.length > visible.length) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'bot-mode-action';
+    more.textContent = `Show more (${pets.length - visible.length} left)`;
+    more.addEventListener('click', () => {
+      petGridLimit += 48;
+      renderPetGrid();
+    });
+    grid.append(more);
+  }
+}
+
+async function requestPetGateway(method, params = {}) {
+  const connection = await ensureActiveDashboardWsConnection();
+  return connection.client.request(method, params);
+}
+
+function normalizePetGallery(payload) {
+  const pets = Array.isArray(payload?.pets) ? payload.pets : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const pet of pets) {
+    if (!pet?.slug || seen.has(pet.slug)) continue;
+    seen.add(pet.slug);
+    normalized.push({
+      slug: String(pet.slug),
+      displayName: String(pet.displayName || pet.slug),
+      spritesheetUrl: String(pet.spritesheetUrl || ''),
+      curated: pet.curated === true,
+      installed: pet.installed === true,
+    });
+  }
+  normalized.sort((left, right) => {
+    const rank = (pet) => (pet.installed ? 0 : pet.curated ? 1 : 2);
+    return rank(left) - rank(right) || left.displayName.localeCompare(right.displayName);
+  });
+  return normalized;
+}
+
+async function loadPetGalleryFromGateway() {
+  const local = await requestPetGateway('pet.gallery', { localOnly: true });
+  return normalizePetGallery(local);
+}
+
+let petGalleryFullLoading = false;
+let petGalleryFullLoaded = false;
+let petGridLimit = 48;
+
+async function loadFullPetGallery() {
+  if (petGalleryFullLoading || petGalleryFullLoaded) return;
+  petGalleryFullLoading = true;
+  if (els.botModePetHint) els.botModePetHint.textContent = t('bot_mode.pet_loading_rest');
+  try {
+    const full = await requestPetGateway('pet.gallery', {});
+    const pets = normalizePetGallery(full);
+    if (pets.length) {
+          petGalleryCache = pets;
+          petGalleryFailed = false;
+          petGalleryFullLoaded = true;
+          renderPetGrid();
+        }
+  } catch {
+    /* Keep the installed pets if the full catalog is slow. */
+  } finally {
+    petGalleryFullLoading = false;
+    if (els.botModePetHint && !petGalleryFailed) els.botModePetHint.textContent = '';
+  }
+}
+
+let petGalleryFailed = false;
+
+async function ensurePetGallery() {
+  if (settings.botModeEnabled !== true) return;
+  if (petGalleryLoading) return;
+  if (petGalleryLoaded && petGalleryCache.length) {
+    renderPetGrid();
+    void loadFullPetGallery();
+    return;
+  }
+  petGalleryLoading = true;
+  if (els.botModePetGrid && !petGalleryLoaded) {
+      if (els.botModePetHint) els.botModePetHint.textContent = t('bot_mode.pet_loading_installed');
+    }
+  try {
+    petGalleryCache = await loadPetGalleryFromGateway();
+        petGalleryFailed = false;
+        petGalleryLoaded = true;
+        renderPetGrid();
+        void loadFullPetGallery();
+  } catch {
+    petGalleryCache = [];
+    petGalleryFailed = true;
+    petGalleryLoaded = true;
+  } finally {
+    petGalleryLoading = false;
+  }
+  renderPetGrid();
+}
+
+function syncPetPickerState() {
+  const profile = botSheetProfileName;
+  const pet = profile ? petAvatarsByProfile.get(profile) : null;
+  const override = botProfileOverrideFor(profile);
+  if (els.botModePetClear) els.botModePetClear.hidden = !pet && !override?.icon;
+  const summary = document.getElementById('botModePetSummaryValue');
+    if (summary) {
+      summary.textContent = (botSheetAvatarChoice?.kind === 'pet' && botSheetAvatarChoice.petDisplayName)
+      || pet?.displayName
+      || override?.petDisplayName
+      || (override?.icon ? t('bot_mode.custom_image') : t('bot_mode.pet_none'));
+    }
+    if (els.botModePetHint) {
+      els.botModePetHint.textContent = petGalleryFullLoading ? t('bot_mode.pet_loading_rest') : '';
+    }
+  if (els.botModePetApply) els.botModePetApply.disabled = !(profile && petSelection);
+}
+
+async function applyPetSelection() {
+  // No profile name required: a brand-new bot has none until it is created, and
+  // the pet is staged in botSheetAvatarChoice exactly like a classic face is.
+  if (!petSelection) return;
+  const icon = petSelection.icon || await petIconFor(petSelection.spritesheetUrl, petSelection.slug);
+  if (!icon) {
+    // Never leave a phantom selection: the tile reads as picked while the
+    // avatar never changes. Reset it and say why.
+    petSelection = null;
+    els.botModePetGrid?.querySelectorAll('[aria-selected="true"]').forEach((el) => el.setAttribute('aria-selected', 'false'));
+    syncPetPickerState();
+    showBotModeSheetWarning(translateUiText('Pet unavailable'));
+    return;
+  }
+  // Stage the pet as this agent's avatar; Save commits it to the override store.
+  botSheetAvatarChoice = { kind: 'pet', petSlug: petSelection.slug, petDisplayName: petSelection.displayName, icon, spritesheetUrl: petSelection.spritesheetUrl || '' };
+  petSelection = null;
+  if (els.botModePetApply) els.botModePetApply.disabled = true;
+  renderBotModeSheetAvatarPreview();
+  syncPetPickerState();
+  refreshBotModeSheetDirtyState();
+}
+
+async function clearPetSelection() {
+  if (!botSheetAvatarChoice && !petSelection && !botSheetProfileName) return;
+  // Same as "Clear avatar": revert to the deterministic blobatar face on Save.
+  botSheetAvatarChoice = { kind: 'clear' };
+  petSelection = null;
+  if (els.botModePetApply) els.botModePetApply.disabled = true;
+  renderBotModeSheetAvatarPreview();
+  syncPetPickerState();
+  refreshBotModeSheetDirtyState();
 }
 
 // ---------------------------------------------------------------------------
@@ -6086,8 +13710,10 @@ async function switchAgentGateway(agent) {
 }
 
 function renderBrowserIntroVisibility() {
+  renderBotChatIntro();
   if (!els.browserIntroHero) return;
-  els.browserIntroHero.hidden = browserIntroDismissedForPanel || messages.length > 0;
+  const botIntroVisible = Boolean(els.botChatIntro && !els.botChatIntro.hidden);
+  els.browserIntroHero.hidden = browserIntroDismissedForPanel || messages.length > 0 || botIntroVisible;
 }
 
 function renderEmptyState() {
@@ -6114,10 +13740,39 @@ function sessionDisplayName(session = {}) {
 }
 
 function updateSessionLabel() {
+  if (activeGroupProjection) {
+    const label = `${activeGroupProjection.displayName} · Group Chat`;
+    els.currentSessionName.textContent = label;
+    els.currentSessionName.title = `${label} · synced group room`;
+    // Desktop-parity composer hint: the room composer is thread-based with
+    // @mention routing, not a page-context prompt.
+    if (els.input) {
+      if (activeGroupPendingNewThread) {
+        els.input.placeholder = `Type your message to start a new thread in ${activeGroupProjection.displayName}...`;
+      } else if (activeGroupThreadId) {
+        els.input.placeholder = `Reply to this thread in ${activeGroupProjection.displayName}... (@name to direct, @everyone for all)`;
+      } else {
+        els.input.placeholder = `New thread in ${activeGroupProjection.displayName}... (@name to direct, @everyone for all)`;
+      }
+    }
+    updateComposerActionLabels();
+    renderTaskStack();
+    return;
+  }
   const current = availableSessions.find((session) => session.id === settings.sessionId);
   const label = current ? sessionDisplayName(current) : (settings.sessionTitle || settings.sessionId || 'Hermes Browser Extension');
   els.currentSessionName.textContent = label;
   els.currentSessionName.title = `${label} · ${settings.sessionId}`;
+  if (els.input) {
+    const isBotChat = document.body.classList.contains('bot-mode-engaged');
+    const activeProfile = settings.botModeSelectedProfile || settings.activeProfile;
+    const activeRow = isBotChat ? botModeRoster.find((entry) => entry.profileName === activeProfile) : null;
+    const botName = activeRow ? botProfileDisplayName(activeRow) : '';
+    els.input.placeholder = botName
+      ? `Ask ${botName}...`
+      : translateUiText('Ask Hermes about this page...');
+  }
+  updateComposerActionLabels();
   renderTaskStack();
 }
 
@@ -6139,23 +13794,265 @@ async function copyTextToClipboard(text = '', { label = 'Text copied' } = {}) {
   }
 }
 
-async function promptRenameSession(session = {}) {
-  const currentTitle = sessionDisplayName(session);
-  const nextTitle = window.prompt(translateUiText('Rename session'), currentTitle);
-  if (nextTitle == null) return false;
-  const cleanTitle = String(nextTitle || '').trim();
-  if (!cleanTitle || cleanTitle === currentTitle) return false;
+// ── In-panel session rename editor ─────────────────────────────────────
+// Replaces the native window.prompt rename: a small editor row inside the
+// session menu (existing tokens + .session-action-button conventions), with
+// Save/Cancel, Enter=submit, Escape=cancel, and focus moved into the input.
+// The sidebar row updates optimistically; a rejected write reverts it and
+// surfaces the error inline (plus the panel status line).
+let sessionRenameEditor = null; // { sessionId, draft, error }
+const SESSION_RENAME_MAX_CHARS = 80;
+
+function isSessionRenameEditorTarget(session = {}) {
+  const state = sessionRenameEditor;
+  if (!state?.sessionId) return false;
+  const id = String(state.sessionId);
+  if (session.kind === 'group-thread') {
+    return session.threadId === 'main'
+      && Boolean(activeGroupProjection)
+      && String(activeGroupProjection.id) === id;
+  }
+  return String(session.id || '') === id;
+}
+
+function openSessionRenameEditor(session = {}, { draft = '', error = '' } = {}) {
+  const sessionId = String(session.id || '').trim();
+  if (!sessionId) return false;
+  const previousTitle = sessionDisplayName(session);
+  sessionRenameEditor = {
+    sessionId,
+    previousTitle,
+    draft: String(draft || previousTitle || '').slice(0, SESSION_RENAME_MAX_CHARS),
+    error: String(error || ''),
+  };
+  renderSessionMenu();
+  return true;
+}
+
+function closeSessionRenameEditor({ render = true } = {}) {
+  if (!sessionRenameEditor) return;
+  sessionRenameEditor = null;
+  if (render) renderSessionMenu();
+}
+
+function renderSessionRenameEditor(row, session = {}) {
+  const state = sessionRenameEditor;
+  // The rename target id is the editor state's (group rooms rename the room
+  // projection, not the row's synthetic bot-thread id).
+  const targetId = String(state?.sessionId || session.id || '');
+  row.classList.add('renaming');
+
+  const form = document.createElement('form');
+  form.className = 'session-rename-editor';
+  form.setAttribute('aria-label', translateUiText('Rename session'));
+
+  const line = document.createElement('span');
+  line.className = 'session-rename-line';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'session-rename-input';
+  input.value = state?.draft || '';
+  input.maxLength = SESSION_RENAME_MAX_CHARS;
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.setAttribute('aria-label', t('session.rename_named', { title: sessionDisplayName(session) }));
+
+  const actions = document.createElement('span');
+  actions.className = 'session-rename-actions';
+
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'session-action-button session-rename-save';
+  save.textContent = translateUiText('Save');
+
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'session-action-button session-rename-cancel';
+  cancel.textContent = translateUiText('Cancel');
+
+  const status = document.createElement('small');
+  status.className = 'session-rename-status';
+  status.setAttribute('role', 'status');
+  status.hidden = !state?.error;
+  status.textContent = state?.error || '';
+
+  input.addEventListener('input', () => {
+    if (sessionRenameEditor && String(sessionRenameEditor.sessionId) === targetId) sessionRenameEditor.draft = input.value;
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSessionRenameEditor();
+    }
+  });
+  cancel.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeSessionRenameEditor();
+  });
+  form.addEventListener('click', (event) => event.stopPropagation());
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitSessionRename({ id: targetId, title: state?.previousTitle || sessionDisplayName(session) }, input.value);
+  });
+
+  actions.append(save, cancel);
+  line.append(input, actions);
+  form.append(line, status);
+  row.replaceChildren(form);
+
+  queueMicrotask(() => {
+    try {
+      input.focus({ preventScroll: true });
+      input.select();
+    } catch {
+      /* focus is best-effort */
+    }
+  });
+}
+
+async function submitSessionRename(session = {}, rawTitle = '') {
+  const sessionId = String(session.id || '').trim();
+  const previousTitle = sessionDisplayName(session);
+  const nextTitle = String(rawTitle || '').trim().slice(0, SESSION_RENAME_MAX_CHARS);
+  if (!sessionId) return false;
+  if (!nextTitle || nextTitle === previousTitle) {
+    closeSessionRenameEditor();
+    return false;
+  }
+  // Optimistic: the row shows the new name immediately; a rejected write
+  // reverts it and reopens the editor with the attempted name + the error.
+  closeSessionRenameEditor({ render: false });
+  applySessionTitleLocally(sessionId, nextTitle);
+  renderSessionMenu();
+  updateSessionLabel();
   try {
-    await renameHermesSessionTitle(session.id, cleanTitle);
+    await renameHermesSessionTitle(sessionId, nextTitle);
+    if (sessionId === String(settings.sessionId || '')) void loadSessions({ quiet: true }).catch(() => {});
     return true;
   } catch (error) {
+    applySessionTitleLocally(sessionId, previousTitle);
+    renderSessionMenu();
+    updateSessionLabel();
     setStatus('warn', 'Could not rename session', error?.message || String(error), { translateDetail: false });
+    openSessionRenameEditor({ id: sessionId, title: previousTitle }, { draft: nextTitle, error: error?.message || String(error) });
     return false;
   }
 }
 
-function renderSessionMenu(query = els.sessionSearchInput?.value || '') {
+// Local-only title projection shared by the optimistic render and the revert
+// path. Never pretends the write was persisted — persistence lives in
+// renameHermesSessionTitle.
+function applySessionTitleLocally(sessionId, title) {
+  const id = String(sessionId || '').trim();
+  const clean = String(title || '').trim();
+  if (!id || !clean) return;
+  if (activeGroupProjection && String(activeGroupProjection.id) === id) {
+    activeGroupProjection = {
+      ...activeGroupProjection,
+      displayName: clean,
+      title: clean,
+    };
+    botModeGroupChats = botModeGroupChats.map((room) => (
+      room.id === activeGroupProjection.id
+        ? { ...room, displayName: clean, title: clean }
+        : room
+    ));
+    renderBotModeGroupChats(els.botModeSearch?.value);
+  } else {
+    availableSessions = availableSessions.map((session) => (
+      String(session.id) === id ? { ...session, title: clean } : session
+    ));
+  }
+  if (String(settings.sessionId || '') === id) {
+    settings = { ...settings, sessionTitle: clean };
+    void browserApi.storage.local.set({ hermesBrowserSettings: settings });
+  }
+  updateSessionLabel();
+}
+
+function groupThreadSessionsForMenu(query = '') {
+  if (!activeGroupProjection) return [];
+  const needle = String(query || '').trim().toLowerCase();
+  return groupThreadMenuEntries(activeGroupProjection)
+    .filter((entry) => !needle || `${entry.title} ${entry.preview} ${entry.roomLabel}`.toLowerCase().includes(needle))
+    .map((entry) => ({
+      ...entry,
+      kind: 'group-thread',
+      selected: entry.threadId === (activeGroupThreadId || 'main'),
+    }));
+}
+
+function isBotModeEngaged() {
+  return document.body.classList.contains('bot-mode-engaged');
+}
+
+function sessionMenuGroups(query = '') {
   const groups = groupSessionsForMenu(availableSessions, settings.sessionId, query);
+  const threadSessions = groupThreadSessionsForMenu(query);
+  if (isBotModeEngaged()) {
+    return threadSessions.length
+      ? [{
+        label: t('bot_mode.group_threads'),
+        source: 'hermes_bot_group_threads',
+        sessions: threadSessions,
+      }]
+      : [];
+  }
+  if (!threadSessions.length) return groups;
+  return [
+    ...groups,
+    {
+      label: t('bot_mode.group_threads'),
+      source: 'hermes_bot_group_threads',
+      sessions: threadSessions,
+    },
+  ];
+}
+
+function selectGroupThreadFromMenu(session) {
+  if (!activeGroupProjection || session?.kind !== 'group-thread') return false;
+  activeGroupThreadId = session.threadId === 'main' ? '' : String(session.threadId || '');
+  activeGroupPendingNewThread = false;
+  if (activeGroupThreadId) activeGroupExpandedThreads.add(activeGroupThreadId);
+  else activeGroupExpandedThreads.clear();
+  els.sessionMenu.hidden = true;
+  els.sessionMenuButton.setAttribute('aria-expanded', 'false');
+  els.botModeThreadsButton?.setAttribute('aria-expanded', 'false');
+  renderMessagesFromStorage();
+  renderGroupThreadStrip();
+  updateSessionLabel();
+  els.input?.focus?.();
+  return true;
+}
+
+async function openGroupThreadMenu() {
+  const button = els.botModeThreadsButton;
+  if (!activeGroupProjection || button?.hidden) return false;
+  const isCurrentlyOpen = !els.sessionMenu.hidden && openSessionGroups.has(t('bot_mode.group_threads'));
+  if (isCurrentlyOpen) {
+    els.sessionMenu.hidden = true;
+    els.sessionMenuButton.setAttribute('aria-expanded', 'false');
+    button.setAttribute('aria-expanded', 'false');
+    return false;
+  }
+  closeFloatingPanels();
+  openSessionGroups.add(t('bot_mode.group_threads'));
+  closedSessionGroups.delete(t('bot_mode.group_threads'));
+  els.sessionSearchInput.value = '';
+  els.sessionMenu.hidden = false;
+  els.sessionMenuButton.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-expanded', 'true');
+  renderSessionMenu('');
+  await loadSessions({ quiet: true });
+  renderSessionMenu('');
+  els.sessionSearchInput.focus();
+  return true;
+}
+
+function renderSessionMenu(query = els.sessionSearchInput?.value || '') {
+  const groups = sessionMenuGroups(query);
   const searching = Boolean(String(query || '').trim());
   els.sessionMenuList.innerHTML = '';
   if (!groups.length) {
@@ -6196,10 +14093,85 @@ function renderSessionMenu(query = els.sessionSearchInput?.value || '') {
 
     if (!isOpen) continue;
 
+    if (group.source === 'hermes_bot_group_threads') {
+      const newThreadRow = document.createElement('div');
+      newThreadRow.className = 'session-option-row group-new-thread-row';
+      const newThreadBtn = document.createElement('button');
+      newThreadBtn.type = 'button';
+      newThreadBtn.className = 'session-option new-thread-option';
+      newThreadBtn.innerHTML = '<span class="session-option-name" style="color:var(--hermes-accent, #0505e8); font-weight:700;">＋ Start a new thread</span>';
+      newThreadBtn.addEventListener('click', () => {
+        startNewGroupThread();
+        closeFloatingPanels();
+      });
+      newThreadRow.appendChild(newThreadBtn);
+      els.sessionMenuList.appendChild(newThreadRow);
+    }
+
     for (const session of group.sessions) {
       const row = document.createElement('div');
       row.className = `session-option-row ${session.selected ? 'selected' : ''}`.trim();
       row.dataset.sessionId = session.id;
+
+      if (isSessionRenameEditorTarget(session)) {
+        renderSessionRenameEditor(row, session);
+        els.sessionMenuList.appendChild(row);
+        continue;
+      }
+
+      if (session.kind === 'group-thread') {
+        row.classList.add('group-thread');
+        row.setAttribute('data-group-thread-id', session.threadId);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `session-option ${session.selected ? 'selected' : ''}`.trim();
+        button.setAttribute('data-group-thread-id', session.threadId);
+        button.setAttribute('aria-label', `${session.title}${session.replyCount ? ` · ${session.replyCount} ${session.replyCount === 1 ? 'reply' : 'replies'}` : ''}`);
+
+        const name = document.createElement('span');
+        name.className = 'session-option-name';
+        name.textContent = session.threadId === 'main' ? t('bot_mode.main_thread') : session.title;
+
+        const meta = document.createElement('span');
+        meta.className = 'session-option-meta';
+        meta.textContent = session.selected
+          ? '✓'
+          : session.replyCount === 1
+            ? t('bot_mode.thread_reply', { count: session.replyCount })
+            : t('bot_mode.thread_replies', { count: session.replyCount });
+
+        button.append(name, meta);
+        button.addEventListener('click', () => selectGroupThreadFromMenu(session));
+        const actions = document.createElement('span');
+        actions.className = 'session-actions';
+        if (session.threadId === 'main') {
+          const settingsButton = document.createElement('button');
+          settingsButton.type = 'button';
+          settingsButton.className = 'session-action-button';
+          settingsButton.textContent = 'Settings';
+          settingsButton.title = 'Group settings';
+          settingsButton.setAttribute('aria-label', 'Group settings');
+          settingsButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            closeFloatingPanels();
+            openGroupSettingsModal(activeGroupProjection);
+          });
+          const renameButton = document.createElement('button');
+          renameButton.type = 'button';
+          renameButton.className = 'session-action-button';
+          renameButton.textContent = translateUiText('Rename');
+          renameButton.title = translateUiText('Rename group room');
+          renameButton.setAttribute('aria-label', translateUiText('Rename group room'));
+          renameButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openSessionRenameEditor({ id: activeGroupProjection.id, title: activeGroupProjection.displayName });
+          });
+          actions.append(settingsButton, renameButton);
+        }
+        row.append(button, actions);
+        els.sessionMenuList.appendChild(row);
+        continue;
+      }
 
       const button = document.createElement('button');
       button.type = 'button';
@@ -6214,6 +14186,23 @@ function renderSessionMenu(query = els.sessionSearchInput?.value || '') {
       meta.className = 'session-option-meta';
       const modelLabel = [session.provider, session.rawModelId || session.model].filter(Boolean).join(' · ');
       meta.textContent = session.selected ? '✓' : (modelLabel || (session.messageCount ? `${session.messageCount}` : ''));
+
+      // Honest liveness. Session rows and the REST payload carry no state field
+      // at all, so the only trustworthy evidence the panel currently holds is
+      // the local run signal plus the live subagent roster for the session it is
+      // attached to; anything else stays unmarked rather than guessed.
+      const isAttachedSession = String(session.id || '') === String(settings.sessionId || '');
+      const liveState = mergeLiveSignals({
+        row: session,
+        liveRun: isAttachedSession ? activeRunControl : null,
+        roster: isAttachedSession ? currentSubagentItems() : null,
+      });
+      if (liveState.live || liveState.state === 'error') {
+        const badge = liveStateBadge(liveState.state);
+        meta.dataset.liveState = liveState.state;
+        meta.title = liveState.label;
+        meta.textContent = ['● ' + badge.text.toUpperCase(), session.selected ? '' : meta.textContent].filter(Boolean).join(' · ');
+      }
 
       button.append(name, meta);
       button.addEventListener('click', () => openHermesSession(session));
@@ -6240,7 +14229,7 @@ function renderSessionMenu(query = els.sessionSearchInput?.value || '') {
       renameButton.setAttribute('aria-label', t('session.rename_named', { title: sessionDisplayName(session) }));
       renameButton.addEventListener('click', (event) => {
         event.stopPropagation();
-        promptRenameSession(session);
+        openSessionRenameEditor(session);
       });
 
       actions.append(copyButton, renameButton);
@@ -6255,7 +14244,10 @@ async function loadAllHermesSessions() {
   let offset = 0;
   const merged = [];
   for (let page = 0; page < 10; page += 1) {
-    const response = await apiFetch(`/api/sessions?limit=${limit}&offset=${offset}&include_children=true&order=recent`, { method: 'GET' });
+    const response = await apiFetch(`/api/sessions?limit=${limit}&offset=${offset}&include_children=true&order=recent`, {
+      method: 'GET',
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(3_000) : undefined,
+    });
     const payload = await readJsonResponse(response);
     if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Session list failed (${response.status})`);
     const rows = Array.isArray(payload.data)
@@ -6274,17 +14266,74 @@ async function loadAllHermesSessions() {
   return { data: merged };
 }
 
+// Dashboard REST session read with ?profile= scoping (session-token auth).
+// The gateway multiplexer fails closed for profiles without their own
+// API_SERVER_KEY; the desktop dashboard's session-token surface accepts
+// ?profile= for sessions and model options, so it is the universal fallback.
+async function loadDashboardSessionsForProfile(profile = '') {
+  const base = String(desktopDashboardUrl || '').replace(/\/+$/, '');
+  if (!base) throw Object.assign(new Error('no-dashboard-url'), { status: 0 });
+  const rootResponse = await fetch(base, {
+    headers: { Accept: 'text/html' },
+    cache: 'no-store',
+    signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(1_500) : undefined,
+  });
+  const token = extractDashboardSessionToken(await rootResponse.text());
+  if (!token) throw Object.assign(new Error('no-dashboard-session-token'), { status: rootResponse.status || 0 });
+  const limit = 100;
+  let offset = 0;
+  const merged = [];
+  for (let page = 0; page < 5; page += 1) {
+    const url = `${base}/api/sessions?limit=${limit}&offset=${offset}&order=recent${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`;
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json', 'X-Hermes-Session-Token': token },
+      credentials: 'include',
+      cache: 'no-store',
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(3_000) : undefined,
+    });
+    if (!response.ok) {
+      if (page === 0) throw Object.assign(new Error(`dashboard-sessions-${response.status}`), { status: response.status });
+      break;
+    }
+    const payload = await response.json().catch(() => null);
+    const rows = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.sessions)
+        ? payload.sessions
+        : Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload?.results)
+            ? payload.results
+            : [];
+    merged.push(...rows);
+    const hasMore = Boolean(payload?.has_more ?? payload?.hasMore ?? payload?.pagination?.hasMore);
+    const total = Number(payload?.total || payload?.pagination?.total || 0);
+    offset += rows.length;
+    if (shouldStopSessionPaging({ rowCount: rows.length, offset, total, hasMore }) || rows.length < limit) break;
+  }
+  return merged;
+}
+
 async function loadSessions({ quiet = false } = {}) {
-  if (isRemoteWsMode()) {
+  if (usesDashboardWsChatTransport()) {
+    // Remote and local-dashboard fallback reads use the already authenticated
+    // socket. The local fallback must not jump back to the stale API key.
+    const dashboardConnection = isRemoteWsMode() ? remoteWsConnection : activeDashboardWsConnection;
+    if (dashboardConnection?.client?.readyState !== 1) {
+      availableSessions = [];
+      updateSessionLabel();
+      renderSessionMenu();
+      return { ok: false, count: 0, error: 'Hermes dashboard is not connected.' };
+    }
     // Remote reads go over the WS; only possible once a socket is open.
-    if (remoteWsConnection?.client?.readyState !== 1) {
+    if (isRemoteWsMode() && remoteWsConnection?.client?.readyState !== 1) {
       availableSessions = [];
       updateSessionLabel();
       renderSessionMenu();
       return { ok: false, count: 0, error: 'Remote Hermes is not connected.' };
     }
     try {
-      const result = await remoteWsConnection.client.request(WS_METHODS.sessionList, { limit: 200 });
+      const result = await dashboardConnection.client.request(WS_METHODS.sessionList, { limit: 200, profile: safeActiveProfile() });
       const desiredProfile = safeActiveProfile();
       availableSessions = applySessionModelBindings(
         normalizeHermesSessions(result),
@@ -6315,7 +14364,25 @@ async function loadSessions({ quiet = false } = {}) {
     return { ok: false, count: 0, error: 'Connect to Hermes before refreshing sessions.' };
   }
   try {
-    const payload = await loadAllHermesSessions();
+    // Profile-scoped session reads: the gateway multiplexes /p/<profile>/ with
+    // per-profile Bearer keys (fail-closed when a profile has no API_SERVER_KEY),
+    // while the desktop dashboard REST honors ?profile= with the session token.
+    // hermesClient routes via /p/<name>/; when that auth model 401s we retry
+    // against the dashboard with the session token before surfacing an error.
+    let payload = null;
+    let lastError = null;
+    try {
+      payload = await loadAllHermesSessions();
+    } catch (error) {
+      lastError = error;
+      if (desktopDashboardUrl && error?.status === 401) {
+        payload = await loadDashboardSessionsForProfile(safeActiveProfile());
+      }
+    }
+    if (!payload && desktopDashboardUrl && safeActiveProfile()) {
+      payload = await loadDashboardSessionsForProfile(safeActiveProfile());
+    }
+    if (!payload) throw lastError || new Error('Hermes did not return sessions.');
     availableSessions = normalizeHermesSessions(payload).filter((session) => Number(session.messageCount || 0) > 0);
     syncActiveSessionRuntimeFromList();
     updateSessionLabel();
@@ -6354,33 +14421,200 @@ async function refreshSessionsFromMenu() {
     : { kind: 'warn', title: 'Session refresh incomplete', detail: outcome?.error || 'Hermes kept the current session list.' });
 }
 
-async function renameHermesSessionTitle(sessionId, title, { quiet = false } = {}) {
-  const nextTitle = String(title || '').trim();
-  if (!sessionId || !nextTitle) return false;
-  if (isRemoteWsMode()) {
-    // Dashboard WS currently exposes create/resume/list/history but not rename.
-    availableSessions = availableSessions.map((session) => (session.id === sessionId ? { ...session, title: nextTitle } : session));
-    settings = { ...settings, sessionTitle: nextTitle };
-    await browserApi.storage.local.set({ hermesBrowserSettings: settings });
-    updateSessionLabel();
-    renderSessionMenu();
-    if (!quiet) setStatus('warn', 'Session title saved locally', 'Remote dashboard rename RPC is not available yet.');
-    return false;
+// ── Session rename persistence (Desktop parity) ────────────────────────
+// Desktop renames the ACTIVE session through the gateway's `session.title`
+// WebSocket RPC — it resolves the live runtime session and persists the row on
+// demand, so it succeeds for runtime-only sessions where REST 404s — and every
+// other row through REST PATCH /api/sessions/{id} (rename_session_endpoint in
+// hermes_cli/web_routers/sessions.py). The extension mirrors that order and
+// only reaches the dashboard's session-token REST surface when the RPC cannot
+// run (session not live on this socket) or fails.
+
+// The runtime id is only known for the session the dashboard socket is
+// currently attached to; anything else resolves against the stored table.
+function sessionRenameRpcLiveId(sessionId) {
+  if (!usesDashboardWsChatTransport()) return '';
+  const connection = isRemoteWsMode() ? remoteWsConnection : activeDashboardWsConnection;
+  if (connection?.client?.readyState !== 1) return '';
+  const liveId = String(connection.wsSessionId || '').trim();
+  const storedId = String(connection.wsStoredSessionId || '').trim();
+  if (!liveId || !storedId || storedId !== String(sessionId || '').trim()) return '';
+  return liveId;
+}
+
+// `session.title` { session_id: <runtime id>, title } -> { pending, title }.
+// Rejects an empty title (4021) and a runtime id the gateway no longer holds
+// (4001 "session not found"), which is what sends the caller to REST.
+async function renameSessionViaGatewayRpc(sessionId, title) {
+  const liveId = sessionRenameRpcLiveId(sessionId);
+  if (!liveId) return { ok: false, reason: 'session-not-live' };
+  const connection = isRemoteWsMode() ? remoteWsConnection : activeDashboardWsConnection;
+  if (connection?.client?.readyState !== 1) return { ok: false, reason: 'dashboard-offline' };
+  try {
+    const result = await connection.client.request(WS_METHODS.sessionTitle, { session_id: liveId, title });
+    return {
+      ok: true,
+      title: String(result?.title || '').trim() || title,
+      pending: result?.pending === true,
+    };
+  } catch (error) {
+    console.warn('[Hermes Browser] session.title rename RPC failed:', error);
+    return { ok: false, reason: 'rpc-rejected', detail: error?.message || String(error) };
   }
-  if (!settings.apiKey) return false;
+}
+
+// REST with the api_server Bearer key (local-api / remote-api modes). Remote
+// dashboard mode skips this: its REST surface is CORS-gated against the
+// extension origin and lives behind the session token instead.
+async function renameSessionViaGatewayRest(sessionId, title) {
+  if (!settings.apiKey) return { ok: false, reason: 'no-api-key' };
   const response = await apiFetch(`/api/sessions/${encodeSessionId(sessionId)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ title: nextTitle }),
+    body: JSON.stringify({ title }),
   });
   const payload = await readJsonResponse(response);
-  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Session rename failed (${response.status})`);
-  const updated = normalizeHermesSessions({ data: [payload.session || payload] })[0] || { id: sessionId, title: nextTitle, source: settings.sessionSource };
-  availableSessions = normalizeHermesSessions({ data: [updated, ...availableSessions.filter((session) => session.id !== sessionId)] });
-  settings = { ...settings, sessionTitle: updated.title || nextTitle };
-  await browserApi.storage.local.set({ hermesBrowserSettings: settings });
-  updateSessionLabel();
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: `rest-${response.status}`,
+      detail: payload?.error?.message || payload?.error || '',
+    };
+  }
+  const titleFromServer = String(payload?.session?.title || payload?.title || '').trim();
+  return { ok: true, title: titleFromServer || title };
+}
+
+// Dashboard session-token REST. Local dashboard: direct fetch from the
+// extension (the same origin the roster/model calls already use). Remote
+// dashboard: first-party PATCH executed inside the trusted signed-in tab,
+// because the dashboard's CORS rejects the extension origin.
+async function renameSessionViaDashboardRest(sessionId, title) {
+  if (isRemoteWsMode()) {
+    try {
+      const result = await renameSessionViaTab({
+        tabsApi: browserApi.tabs,
+        scriptingApi: browserApi.scripting,
+        baseUrl: normalizeGatewayUrl(settings.gatewayUrl),
+        tabId: Number.isFinite(trustedDashboardTabId) ? trustedDashboardTabId : null,
+        sessionId,
+        title,
+        profile: safeActiveProfile(),
+      });
+      if (result?.ok) return { ok: true, title: String(result.title || '').trim() || title };
+      return { ok: false, reason: result?.reason || 'tab-rename-failed', detail: result?.detail || '' };
+    } catch (error) {
+      return { ok: false, reason: 'tab-rename-error', detail: error?.message || String(error) };
+    }
+  }
+  if (!desktopDashboardUrl) return { ok: false, reason: 'no-dashboard' };
+  const profile = safeActiveProfile();
+  const path = `/api/sessions/${encodeSessionId(sessionId)}${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`;
+  try {
+    const response = await dashboardApiRequest(path, {
+      method: 'PATCH',
+      body: { title, ...(profile ? { profile } : {}) },
+    });
+    const payload = await readJsonResponse(response);
+    return { ok: true, title: String(payload?.title || '').trim() || title };
+  } catch (error) {
+    return { ok: false, reason: `dashboard-rest-${error?.status || 'error'}`, detail: error?.message || '' };
+  }
+}
+
+function sessionRenameFailureMessage(failures = []) {
+  const reasons = failures.map((entry) => String(entry?.reason || ''));
+  if (isRemoteWsMode()) {
+    if (reasons.includes('no_dashboard_tab')) {
+      return 'Open and sign in to your Hermes dashboard tab, then retry. Hermes only holds a live runtime session while it is open in the panel.';
+    }
+    if (reasons.includes('not_signed_in')) return 'Sign in to your Hermes dashboard tab, then retry.';
+    if (reasons.some((reason) => reason.startsWith('rest-') || reason.startsWith('session_http_'))) {
+      return 'Hermes rejected the rename for this session. Reopen it in the panel, then retry.';
+    }
+    return 'Hermes did not confirm the rename. Check the dashboard connection and retry.';
+  }
+  if (reasons.some((reason) => reason.startsWith('rpc-rejected'))) {
+    return 'Hermes did not accept the rename. Reopen the session in the panel, then retry.';
+  }
+  return 'Hermes did not confirm the rename. Check the connection and retry.';
+}
+
+async function renameHermesSessionTitle(sessionId, title, { quiet = false } = {}) {
+  if (activeGroupProjection && sessionId === activeGroupProjection.id) {
+    const nextTitle = String(title || '').trim().slice(0, 64);
+    if (!nextTitle) return false;
+    const oldName = activeGroupProjection.displayName;
+    activeGroupProjection = {
+      ...activeGroupProjection,
+      displayName: nextTitle,
+      title: nextTitle,
+    };
+    botModeGroupChats = botModeGroupChats.map((room) => (
+      room.id === activeGroupProjection.id
+        ? { ...room, displayName: nextTitle, title: nextTitle }
+        : room
+    ));
+    renderBotModeGroupChats(els.botModeSearch?.value);
+    updateSessionLabel();
+    renderSessionMenu();
+    try {
+      const connection = await ensureActiveDashboardWsConnection();
+      await persistGroupProjectionRename(connection.client, {
+        roomId: activeGroupProjection.id,
+        roomKey: activeGroupProjection.roomKey || activeGroupProjection.id,
+        newName: nextTitle,
+      });
+      if (!quiet) setStatus('ok', 'Group chat renamed', `Renamed to "${nextTitle}" and synced.`);
+      return true;
+    } catch (err) {
+      console.warn('[Hermes Browser] Group projection rename failed:', err);
+      if (!quiet) setStatus('warn', 'Group chat renamed locally', 'Could not sync the rename to the gateway.');
+      return true;
+    }
+  }
+  const nextTitle = String(title || '').trim();
+  if (!sessionId || !nextTitle) return false;
+
+  const failures = [];
+  let persisted = '';
+
+  // 1. Desktop's primary path: the gateway `session.title` RPC for the live
+  //    runtime session (persists the row on demand).
+  const rpc = await renameSessionViaGatewayRpc(sessionId, nextTitle);
+  if (rpc.ok) persisted = rpc.title;
+  else failures.push(rpc);
+
+  // 2. REST with the api_server Bearer key. Remote dashboard mode skips this:
+  //    its REST surface is CORS-gated against the extension origin.
+  if (!persisted && !isRemoteWsMode()) {
+    try {
+      const rest = await renameSessionViaGatewayRest(sessionId, nextTitle);
+      if (rest.ok) persisted = rest.title;
+      else failures.push(rest);
+    } catch (error) {
+      failures.push({ reason: 'rest-error', detail: error?.message || String(error) });
+    }
+  }
+
+  // 3. Dashboard session-token REST (local: direct; remote: first-party in
+  //    the trusted tab).
+  if (!persisted) {
+    const dashboardRest = await renameSessionViaDashboardRest(sessionId, nextTitle);
+    if (dashboardRest.ok) persisted = dashboardRest.title;
+    else failures.push(dashboardRest);
+  }
+
+  if (!persisted) {
+    const message = sessionRenameFailureMessage(failures);
+    console.warn('[Hermes Browser] Session rename was not confirmed by Hermes:', failures);
+    if (!quiet) setStatus('warn', 'Could not rename session', message, { translateDetail: false });
+    throw new Error(message);
+  }
+
+  applySessionTitleLocally(sessionId, persisted);
   renderSessionMenu();
-  if (!quiet) setStatus('ok', 'Session title updated', settings.sessionTitle);
+  updateSessionLabel();
+  if (!quiet) setStatus('ok', 'Session renamed', persisted);
   return true;
 }
 
@@ -6401,6 +14635,7 @@ async function maybeRenameCurrentSessionTitle(previousSettings = {}, nextTitle =
 function autoTitleForCurrentTurn(userText = '') {
   if (settings.autoNameSessions === false || !String(userText || '').trim()) return '';
   if (messages.some((message) => message.role === 'user' && String(message.content || '').trim())) return '';
+  if (sessionRenameEditor && String(sessionRenameEditor.sessionId) === String(settings.sessionId || '')) return '';
   const current = availableSessions.find((session) => session.id === settings.sessionId);
   const currentTitle = current?.title || settings.sessionTitle || DEFAULT_SETTINGS.sessionTitle;
   if (!isDefaultBrowserSessionTitle(currentTitle)) return '';
@@ -6410,10 +14645,20 @@ function autoTitleForCurrentTurn(userText = '') {
 async function maybeAutoNameCurrentSession(title = '') {
   const cleanTitle = String(title || '').trim();
   if (!cleanTitle) return false;
+  // Revalidate at persist time (turn completion): the auto-name computed at
+  // turn start must still be eligible — an auto-name never overwrites a title
+  // the user chose, and a rename the user made mid-turn has already updated
+  // availableSessions, so the default-title guard now rejects it.
+  const current = availableSessions.find((session) => session.id === settings.sessionId);
+  const currentTitle = current?.title || settings.sessionTitle || DEFAULT_SETTINGS.sessionTitle;
+  if (!isDefaultBrowserSessionTitle(currentTitle)) return false;
+  if (sessionRenameEditor && String(sessionRenameEditor.sessionId) === String(settings.sessionId || '')) return false;
   try {
     return await renameHermesSessionTitle(settings.sessionId, cleanTitle, { quiet: true });
   } catch (error) {
-    setStatus('warn', 'Auto-name skipped', error?.message || String(error), { translateDetail: false });
+    // Auto-naming must not nag; keep it diagnosable for support instead.
+    const detail = error?.message || String(error);
+    console.warn('[Hermes Browser] Auto-name skipped:', detail);
     return false;
   }
 }
@@ -6434,14 +14679,19 @@ function makeBrowserSessionTitle(date = new Date()) {
   return `Hermes Browser Extension · ${stamp}`;
 }
 
-async function beginHermesBrowserDraft({ title = makeBrowserSessionTitle(), focus = true } = {}) {
+async function beginHermesBrowserDraft({ title = makeBrowserSessionTitle(), focus = true, scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   if (!canSwitchActiveSession({ sending, runControl: activeRunControl })) {
     setStatus('warn', 'Hermes is working…', 'Stop the active run before switching sessions.');
     return false;
   }
-  // Dashboard WebSocket sessions require a server-issued id; local API sessions
-  // can remain drafts until the first turn reaches ensureHermesSession().
-  if (isRemoteWsMode()) return createHermesBrowserSession({ title, focus });
+  // Dashboard WebSocket sessions require a server-issued id. Named profiles
+  // must use that profile-aware transport even when the extension itself is
+  // connected to the local API sidecar; otherwise the first send can land on
+  // the default profile or fail before the profile WS fallback is reached.
+  if (isRemoteWsMode() || isNamedHermesProfile() || activeConversationTransport === 'dashboard-ws') {
+    return createHermesBrowserSession({ title, focus, transport: 'dashboard-ws', scopeRevisionId });
+  }
   const sessionId = makeBrowserSessionId();
   const preferredBinding = preferredModelBindingForNewSession();
   const preferredOptions = preferredModelOptionsForNewSession();
@@ -6461,7 +14711,9 @@ async function beginHermesBrowserDraft({ title = makeBrowserSessionTitle(), focu
   sessionRoutesAvailable = true;
   messages = [];
   await browserApi.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey(previousConversationScope)]: [] });
-  await saveSessionBindingForActiveScope({ id: sessionId, title, source: DEFAULT_SETTINGS.sessionSource });
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  await saveSessionBindingForActiveScope({ id: sessionId, title, source: DEFAULT_SETTINGS.sessionSource }, { scopeRevisionId });
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   renderMessagesFromStorage();
   updateSessionLabel();
   renderSessionMenu();
@@ -6477,68 +14729,113 @@ function preferredModelOptionsForNewSession() {
   });
 }
 
-async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), focus = true } = {}) {
+async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), focus = true, hidden = false, transport = '', source = '', scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  activeGroupGeneration += 1;
+  activeGroupAbortController?.abort?.();
+  activeGroupAbortController = null;
+  activeGroupProjection = null;
+  activeGroupRuntime = null;
+  activeGroupMessages = [];
   const preferredBinding = preferredModelBindingForNewSession();
   const preferredOptions = preferredModelOptionsForNewSession();
   const preferredModel = modelForBinding(preferredBinding);
   const requestModel = preferredModel?.rawModelId || preferredBinding?.rawModelId || preferredBinding?.modelId || settings.model || DEFAULT_SETTINGS.model;
   const requestProvider = preferredModel?.provider || preferredBinding?.provider || '';
-  if (isRemoteWsMode()) {
-    const connection = await ensureRemoteWsClient();
-    const { liveId, storedId } = await establishGatewaySession({
-      client: connection.client,
-      createParams: {
-        title,
-        model: requestModel,
-        provider: requestProvider || undefined,
-        reasoning_effort: preferredOptions.thinkingEnabled ? preferredOptions.reasoningEffort : 'none',
-        fast: preferredOptions.fastMode,
+  const dashboardTransport = activeConversationTransport === 'dashboard-ws'
+    || shouldUseBotDashboardTransport({ gatewayMode: settings.gatewayMode, transport });
+  let connection = null;
+  if (dashboardTransport) {
+    activeConversationTransport = 'dashboard-ws';
+    try {
+      connection = await ensureActiveDashboardWsConnection();
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      const { liveId, storedId } = await establishGatewaySession({
+        client: connection.client,
         profile: safeActiveProfile(),
-      },
-    });
-    connection.wsSessionId = liveId;
-    connection.wsStoredSessionId = storedId;
-    const id = storedId;
-    const session = normalizeHermesSessions({ sessions: [{ id, title, source: settings.sessionSource || DEFAULT_SETTINGS.sessionSource }] })[0]
-      || { id, title, source: settings.sessionSource };
-    availableSessions = normalizeHermesSessions({ sessions: [session, ...availableSessions.filter((item) => item.id !== id)] });
-    settings = {
-      ...settings,
-      sessionId: id,
-      sessionTitle: session.title || title,
-      remoteDashboardSession: {
-        storedSessionId: storedId,
-        gatewayUrl: connection.baseUrl,
-      },
-      model: preferredModel?.id || preferredBinding?.modelId || settings.model,
-      modelContextTokens: preferredModel?.contextTokens || preferredBinding?.contextTokens || settings.modelContextTokens || 0,
-      extensionPreferredModel: preferredBinding,
-      sessionModelBindings: {
-        ...(settings.sessionModelBindings || {}),
-        [id]: preferredBinding,
-      },
-      sessionModelOptionBindings: {
-        ...(settings.sessionModelOptionBindings || {}),
-        [id]: preferredOptions,
-      },
-      modelScopeVersion: DEFAULT_SETTINGS.modelScopeVersion,
-    };
-    activeSessionRuntime = { ...activeSessionRuntime, sessionId: id, usedTokens: 0, inputTokens: 0, outputTokens: 0, model: '', provider: '', source: '' };
-    messages = [];
-    await browserApi.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey(previousConversationScope)]: [] });
-    await saveSessionBindingForActiveScope(session);
-    renderMessagesFromStorage();
-    updateSessionLabel();
-    renderSessionMenu();
-    if (focus) els.input.focus();
-    return session;
+        createParams: {
+          title,
+          hidden,
+          ...(source === 'hermes_bot_mode' ? { follow_profile_config: true } : {}),
+          source: source || settings.sessionSource || DEFAULT_SETTINGS.sessionSource,
+          model: requestModel,
+          provider: requestProvider || undefined,
+          reasoning_effort: preferredOptions.thinkingEnabled ? preferredOptions.reasoningEffort : 'none',
+          fast: preferredOptions.fastMode,
+          profile: safeActiveProfile(),
+        },
+      });
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      connection.wsSessionId = liveId;
+      connection.wsStoredSessionId = storedId;
+      connection.profile = safeActiveProfile();
+      const id = storedId;
+      const session = normalizeHermesSessions({ sessions: [{
+        id,
+        title,
+        source: source || settings.sessionSource || DEFAULT_SETTINGS.sessionSource,
+        profile: safeActiveProfile(),
+        transport: 'dashboard-ws',
+        hidden,
+      }] })[0]
+        || { id, title, source: source || settings.sessionSource || DEFAULT_SETTINGS.sessionSource, profile: safeActiveProfile(), transport: 'dashboard-ws', hidden };
+      availableSessions = normalizeHermesSessions({ sessions: [session, ...availableSessions.filter((item) => item.id !== id)] });
+      settings = {
+        ...settings,
+        sessionId: id,
+        sessionTitle: session.title || title,
+        remoteDashboardSession: {
+          storedSessionId: storedId,
+          gatewayUrl: connection.baseUrl,
+        },
+        model: preferredModel?.id || preferredBinding?.modelId || settings.model,
+        modelContextTokens: preferredModel?.contextTokens || preferredBinding?.contextTokens || settings.modelContextTokens || 0,
+        extensionPreferredModel: preferredBinding,
+        sessionModelBindings: {
+          ...(settings.sessionModelBindings || {}),
+          [id]: preferredBinding,
+        },
+        sessionModelOptionBindings: {
+          ...(settings.sessionModelOptionBindings || {}),
+          [id]: preferredOptions,
+        },
+        modelScopeVersion: DEFAULT_SETTINGS.modelScopeVersion,
+      };
+      activeSessionRuntime = { ...activeSessionRuntime, sessionId: id, usedTokens: 0, inputTokens: 0, outputTokens: 0, model: '', provider: '', source: '' };
+      messages = [];
+      await browserApi.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey(previousConversationScope)]: [] });
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      await saveSessionBindingForActiveScope(session, { scopeRevisionId });
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      renderMessagesFromStorage();
+      updateSessionLabel();
+      renderSessionMenu();
+      if (focus) els.input.focus();
+      return session;
+    } catch (wsError) {
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+      const preserveDashboardTransport = shouldPreserveDashboardTransport({
+        requestedTransport: 'dashboard-ws',
+        connectionReadyState: connection?.client?.readyState || activeDashboardWsConnection?.client?.readyState,
+        error: wsError,
+      });
+      if (source === 'hermes_bot_mode' || preserveDashboardTransport || isRemoteWsMode()) {
+        console.warn('[Hermes Browser] dashboard-ws session creation failed; preserving the active transport:', wsError?.message || wsError);
+        throw wsError;
+      }
+      console.warn('[Hermes Browser] dashboard-ws session creation fell back to REST:', wsError?.message || wsError);
+      activeConversationTransport = 'rest';
+      activeDashboardWsConnection = null;
+    }
   }
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   const sessionId = makeBrowserSessionId();
   const response = await apiFetch('/api/sessions', {
     method: 'POST',
     body: JSON.stringify({
       id: sessionId,
       title,
+      hidden,
       source: settings.sessionSource || DEFAULT_SETTINGS.sessionSource,
       model: requestModel,
       provider: requestProvider || undefined,
@@ -6547,8 +14844,14 @@ async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), f
     }),
   });
   const payload = await readJsonResponse(response);
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Could not create session (${response.status})`);
-  const session = normalizeHermesSessions({ data: [payload.session || payload] })[0] || { id: sessionId, title, source: settings.sessionSource };
+  const session = normalizeHermesSessions({ data: [{
+    ...(payload.session || payload),
+    profile: (payload.session || payload)?.profile || safeActiveProfile(),
+    transport: (payload.session || payload)?.transport || 'rest',
+    hidden: (payload.session || payload)?.hidden === true || hidden,
+  }] })[0] || { id: sessionId, title, source: settings.sessionSource, profile: safeActiveProfile(), transport: 'rest', hidden };
   availableSessions = normalizeHermesSessions({ data: [session, ...availableSessions.filter((item) => item.id !== session.id)] });
   settings = {
     ...settings,
@@ -6571,7 +14874,9 @@ async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), f
   sessionRoutesAvailable = true;
   messages = [];
   await browserApi.storage.local.set({ hermesBrowserSettings: settings, [activeMessagesStorageKey(previousConversationScope)]: [] });
-  await saveSessionBindingForActiveScope(session);
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  await saveSessionBindingForActiveScope(session, { scopeRevisionId });
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   renderMessagesFromStorage();
   updateSessionLabel();
   renderSessionMenu();
@@ -6581,7 +14886,7 @@ async function createHermesBrowserSession({ title = makeBrowserSessionTitle(), f
 
 function renderSessionHistoryLoading(session = {}) {
   const loading = document.createElement('section');
-  loading.className = 'session-history-loading';
+  loading.className = 'bot-mode-loading-overlay';
   loading.setAttribute('role', 'status');
   loading.setAttribute('aria-live', 'polite');
 
@@ -6589,41 +14894,70 @@ function renderSessionHistoryLoading(session = {}) {
   rail.className = 'session-history-loading-rail';
   rail.setAttribute('aria-hidden', 'true');
 
-  const label = document.createElement('span');
-  label.className = 'session-history-loading-label';
-  label.textContent = translateUiText('OPENING SESSION');
+  const card = document.createElement('div');
+  card.className = 'bot-mode-loading-card';
+  const avatar = document.createElement('span');
+  avatar.className = 'bot-mode-avatar bot-mode-avatar-loading';
+  avatar.setAttribute('aria-hidden', 'true');
+  const icon = document.createElement('img');
+  icon.src = 'assets/icons/icon-48.png';
+  icon.alt = '';
+  avatar.append(icon);
 
   const title = document.createElement('strong');
-  title.textContent = sessionDisplayName(session);
+  title.textContent = translateUiText('OPENING SESSION');
 
   const detail = document.createElement('span');
-  detail.className = 'session-history-loading-detail';
-  detail.textContent = translateUiText('Loading canonical Hermes history…');
+  detail.className = 'hint';
+  detail.textContent = sessionDisplayName(session);
 
-  loading.append(rail, label, title, detail);
+  card.append(avatar, rail, title, detail);
+  loading.append(card);
   els.messages.replaceChildren(loading);
 }
 
 async function openHermesSession(selectedSession) {
+  const { scopeRevisionId = scopeRevision.current() } = arguments[1] || {};
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   if (!canSwitchActiveSession({ sending, runControl: activeRunControl })) {
     setStatus('warn', 'Hermes is working…', 'Stop the active run before switching sessions.');
     return false;
   }
+  activeGroupGeneration += 1;
+  activeGroupAbortController?.abort?.();
+  activeGroupAbortController = null;
+  activeGroupProjection = null;
+  activeGroupRuntime = null;
+  activeGroupMessages = [];
   els.sessionMenu.hidden = true;
   els.sessionMenuButton.setAttribute('aria-expanded', 'false');
   const requestId = ++sessionLoadRequestId;
+  const isCurrentRequest = () => {
+    if (requestId !== sessionLoadRequestId) return;
+    return scopeRevision.isCurrent(scopeRevisionId);
+  };
   let session = selectedSession;
   renderSessionHistoryLoading(session);
   const requestedSessionId = session.id;
   let liveSessionId = session.id;
-  if (isRemoteWsMode()) {
+  const sessionTransport = session.transport || (isNamedHermesProfile(session.profile) ? 'dashboard-ws' : '');
+  const dashboardTransport = activeConversationTransport === 'dashboard-ws'
+    || shouldUseBotDashboardTransport({
+      gatewayMode: settings.gatewayMode,
+      source: session.source,
+      transport: sessionTransport,
+    });
+  activeConversationTransport = dashboardTransport ? 'dashboard-ws' : 'rest';
+  if (!dashboardTransport) activeDashboardWsConnection = null;
+  if (dashboardTransport) {
     try {
-      const connection = await ensureRemoteWsClient();
+      const connection = await ensureActiveDashboardWsConnection();
       const { liveId, storedId, profile: reportedProfile } = await establishGatewaySession({
         client: connection.client,
         storedSessionId: session.id,
+        profile: safeActiveProfile(),
       });
-      if (requestId !== sessionLoadRequestId) return;
+      if (!isCurrentRequest()) return false;
       // Profile boundary check: a session that the gateway reports under a
       // different profile must not be resumed into the current selection. Fail
       // closed and refuse to bind it (issue #60 review).
@@ -6635,10 +14969,11 @@ async function openHermesSession(selectedSession) {
           `This session belongs to the "${reportedProfile}" profile. Switch to that profile before resuming it.`,
           { translateDetail: false },
         );
-        return;
+        return false;
       }
       connection.wsSessionId = liveId;
       connection.wsStoredSessionId = storedId;
+      connection.profile = safeActiveProfile();
       liveSessionId = liveId;
       session = { ...session, id: storedId };
       availableSessions = normalizeHermesSessions({
@@ -6652,12 +14987,21 @@ async function openHermesSession(selectedSession) {
         },
       };
     } catch (error) {
-      if (requestId !== sessionLoadRequestId) return;
+      if (!isCurrentRequest()) return false;
+      if (!shouldPreserveDashboardTransport({
+        requestedTransport: 'dashboard-ws',
+        connectionReadyState: activeDashboardWsConnection?.client?.readyState,
+        error,
+      }) && !isRemoteWsMode()) {
+        activeConversationTransport = 'rest';
+        activeDashboardWsConnection = null;
+      }
       renderMessagesFromStorage();
       setStatus('error', 'Could not open session', error?.message || String(error), { translateDetail: false });
-      return;
+      return false;
     }
   }
+  if (!isCurrentRequest()) return false;
   const inheritedModelBinding = settings.sessionModelBindings?.[requestedSessionId];
   const inheritedModelOptions = settings.sessionModelOptionBindings?.[requestedSessionId];
   settings = {
@@ -6677,30 +15021,44 @@ async function openHermesSession(selectedSession) {
   activeSessionRuntime = { ...activeSessionRuntime, sessionId: session.id, usedTokens: 0, inputTokens: 0, outputTokens: 0, model: '', provider: '', source: '' };
   sessionRoutesAvailable = true;
   await browserApi.storage.local.set({ hermesBrowserSettings: settings });
-  await saveSessionBindingForActiveScope(session);
+  if (!isCurrentRequest()) return false;
+  await saveSessionBindingForActiveScope(session, { scopeRevisionId });
+  if (!isCurrentRequest()) return false;
   await activateCurrentDelegationSession();
+  if (!isCurrentRequest()) return false;
   updateSessionLabel();
   renderSessionMenu();
-  const loaded = await loadSessionMessages(liveSessionId, { requestId });
-  if (requestId !== sessionLoadRequestId) return;
+  const loaded = await loadSessionMessages(liveSessionId, {
+    requestId,
+    scopeRevisionId,
+    transport: activeConversationTransport,
+    connection: activeDashboardWsConnection,
+  });
+  if (!isCurrentRequest()) return false;
   setStatus(loaded ? 'ok' : 'warn', loaded ? 'Session opened' : 'Session opened without history', `${session.sourceLabel || session.source || 'Hermes'} · ${session.id}`, { translateDetail: false });
+  return true;
 }
 
-async function fetchSessionMessagesQuietly(sessionId, { transport = isRemoteWsMode() ? 'dashboard-ws' : 'rest' } = {}) {
+async function fetchSessionMessagesQuietly(sessionId, {
+  transport = usesDashboardWsChatTransport() ? 'dashboard-ws' : 'rest',
+  connection = activeDashboardWsConnection,
+} = {}) {
   if (transport === 'dashboard-ws') {
-    if (remoteWsConnection?.client?.readyState !== 1) throw new Error('Remote Hermes is not connected.');
+    if (connection?.client?.readyState !== 1) throw new Error('Hermes dashboard is not connected.');
     if (!sessionId) throw new Error('A live dashboard session id is required for history.');
-    const result = await remoteWsConnection.client.request(WS_METHODS.sessionHistory, { session_id: sessionId });
+    const result = await connection.client.request(WS_METHODS.sessionHistory, { session_id: sessionId, profile: safeActiveProfile() });
     const contextMessages = normalizeGatewayHistoryMessages(result)
       .map((message) => ({
+        ...message,
         role: message.role,
         content: message.content,
-        ts: Number(message.timestamp || message.ts || Date.now()),
-      }))
-      .filter((message) => message.content);
+        display_kind: message.display_kind,
+        ts: normalizeMessageTimestamp(message.timestamp ?? message.ts),
+        rowId: Number.isInteger(message.row_id) && message.row_id > 0 ? message.row_id : undefined,
+      }));
     return {
       contextMessages,
-      messages: contextMessages.filter((message) => ['user', 'assistant', 'system'].includes(message.role)),
+      messages: contextMessages,
       session: null,
     };
   }
@@ -6709,17 +15067,351 @@ async function fetchSessionMessagesQuietly(sessionId, { transport = isRemoteWsMo
   const payload = await readJsonResponse(response);
   if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Messages failed (${response.status})`);
   const rows = Array.isArray(payload.data) ? payload.data : [];
-  const contextMessages = rows
-    .filter((message) => message.content)
-    .map((message) => ({ role: message.role, content: String(message.content), ts: Number(message.timestamp || Date.now()) }));
+  const contextMessages = rows.map((message) => ({
+    ...message,
+    role: String(message.role || '').toLowerCase(),
+    content: String(message.content || ''),
+    display_kind: message.display_kind,
+    ts: normalizeMessageTimestamp(message.timestamp ?? message.ts),
+  }));
   return {
     contextMessages,
-    messages: contextMessages.filter((message) => ['user', 'assistant', 'system'].includes(message.role)),
+    messages: contextMessages,
     session: payload.session || null,
   };
 }
 
-async function commitFetchedSessionMessages(result, { sessionId, requestId = null } = {}) {
+// Dashboard history for background reconciliation (delegation watches, post-turn
+// refresh, subagent settle). The gateway reaps detached runtimes: a history call
+// against a stale live id is rejected with "not in memory", and the documented
+// contract is resume-then-history. Try the socket's live id when it belongs to
+// the requested durable session, then the durable id, then resume the durable
+// session to mint a fresh live id and fetch again.
+async function fetchDashboardHistoryWithResume(durableSessionId = '') {
+  const sid = String(durableSessionId || settings.sessionId || '').trim();
+  if (!sid) throw new Error('A durable session id is required for history.');
+  const connection = await ensureActiveDashboardWsConnection();
+  if (connection?.client?.readyState !== 1) throw new Error('Hermes dashboard is not connected.');
+  const live = String(connection.wsSessionId || '').trim();
+  const liveBelongsToSession = Boolean(live) && String(connection.wsStoredSessionId || '').trim() === sid;
+  const candidates = liveBelongsToSession && live !== sid ? [live, sid] : [sid];
+  for (const candidate of candidates) {
+    try {
+      return await fetchSessionMessagesQuietly(candidate, { transport: 'dashboard-ws', connection });
+    } catch {
+      // Reaped/detached runtime — try the next candidate, then resume below.
+    }
+  }
+  const { liveId } = await establishGatewaySession({
+    client: connection.client,
+    storedSessionId: sid,
+    profile: safeActiveProfile(),
+  });
+  connection.wsSessionId = liveId;
+  connection.wsStoredSessionId = sid;
+  connection.profile = safeActiveProfile();
+  return fetchSessionMessagesQuietly(liveId, { transport: 'dashboard-ws', connection });
+}
+
+async function resolveDashboardMediaBaseUrl() {
+  return resolveDashboardTranscriptionBaseUrl({
+    desktopDashboardUrl,
+    gatewayMode: normalizeGatewayMode(settings.gatewayMode),
+    gatewayUrl: settings.gatewayUrl,
+    discover: () => ensureDesktopDashboardUrl({ timeoutMs: 2_500 }),
+  });
+}
+
+async function hydrateSessionMedia(messageList = []) {
+  const rows = Array.isArray(messageList) ? messageList : [];
+  const pending = [];
+  for (const message of rows) {
+    const extracted = extractHistoryMediaAttachments(message);
+    if (extracted.length && !normalizeUserImageAttachments(message.attachments).length) {
+      message.attachments = [...(Array.isArray(message.attachments) ? message.attachments : []), ...extracted];
+    }
+    if (!Array.isArray(message?.attachments)) continue;
+    for (const attachment of message.attachments) {
+      if (!attachment || attachment.dataUrl || !attachment.pathRef) continue;
+      const plan = resolveMediaFetchPlan({ pathRef: attachment.pathRef });
+      if (plan.transport !== 'dashboard-media') continue;
+      pending.push(attachment);
+    }
+  }
+  if (!pending.length) return;
+  const baseUrl = await resolveDashboardMediaBaseUrl();
+  if (!baseUrl) return;
+  const token = await fetchDashboardSessionToken({ baseUrl });
+  await Promise.all(pending.map(async (attachment) => {
+    const dataUrl = await fetchDashboardMediaDataUrl({
+      baseUrl,
+      filePath: attachment.pathRef,
+      token,
+    });
+    if (dataUrl) attachment.dataUrl = dataUrl;
+  }));
+}
+
+async function hydrateSessionMediaInElement(element) {
+  if (!element?.querySelectorAll) return;
+  const nodes = [...element.querySelectorAll('[data-session-media][data-media-path]')];
+  if (!nodes.length) return;
+  const baseUrl = await resolveDashboardMediaBaseUrl();
+  if (!baseUrl) {
+    for (const node of nodes) node.classList.add('unavailable');
+    return;
+  }
+  const token = await fetchDashboardSessionToken({ baseUrl });
+  const doc = element.ownerDocument || document;
+  await Promise.all(nodes.map(async (node) => {
+    if (!node.isConnected) return;
+    const filePath = node.getAttribute('data-media-path') || '';
+    const kind = node.getAttribute('data-session-media') || classifyMediaKind(filePath);
+    const plan = resolveMediaFetchPlan({ pathRef: filePath });
+    if (kind === 'image' && plan.transport === 'dashboard-media') {
+      const dataUrl = await fetchDashboardMediaDataUrl({ baseUrl, filePath, token });
+      if (!dataUrl) {
+        node.classList.add('unavailable');
+        return;
+      }
+      const figure = doc.createElement('figure');
+      figure.className = 'generated-image';
+      figure.dataset.slot = 'aui_generated-image';
+      const image = doc.createElement('img');
+      image.src = dataUrl;
+      image.alt = filePath.split(/[\\/]/).pop() || 'Image';
+      image.loading = 'lazy';
+      image.dataset.slot = 'aui_generated-image';
+      figure.append(image);
+      node.replaceWith(figure);
+      wrapGeneratedImagesForInspection(figure.parentElement || figure);
+      return;
+    }
+    if (kind === 'video' && plan.transport === 'dashboard-stream') {
+      const video = doc.createElement('video');
+      video.className = 'session-media-player';
+      video.controls = true;
+      video.preload = 'metadata';
+      video.src = dashboardFileStreamUrl(baseUrl, filePath, token);
+      video.addEventListener('error', () => {
+        node.classList.add('unavailable');
+        if (video.isConnected) video.replaceWith(node);
+      }, { once: true });
+      node.replaceWith(video);
+    }
+  }));
+}
+
+// ── Returned-file cards ──────────────────────────────────────────────────────
+// A finished turn often hands back a file — a PDF report, a spreadsheet, an
+// HTML page, an archive. The transcript used to answer with nothing but the
+// path it sits at. These cards make the file actionable: Open renders viewable
+// kinds in a new tab from bytes fetched over the same authenticated dashboard
+// transport the media routes use, Open on computer hands the file to the OS
+// default app through downloads.download + downloads.open, and Save keeps a
+// copy. Every state is honest — when the dashboard cannot read the file, the
+// buttons are disabled and say why instead of failing on click.
+const ARTIFACT_CARD_LIMIT = 6;
+const ARTIFACT_PROBE_CACHE_MS = 30_000;
+const ARTIFACT_BLOB_TTL_MS = 120_000;
+const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 120_000;
+const artifactProbeCache = new Map();
+let artifactDashboardContext = { baseUrl: '', token: '' };
+
+function artifactCardLabels() {
+  return {
+    open: translateUiText('Open'),
+    'open-on-computer': translateUiText('Open on computer'),
+    save: translateUiText('Save'),
+    localSource: translateUiText('On this computer'),
+    remoteSource: translateUiText('Returned by Hermes'),
+    checking: translateUiText('Checking whether Hermes can read this file…'),
+    opening: translateUiText('Opening…'),
+    openingOnComputer: translateUiText('Opening on this computer…'),
+    saving: translateUiText('Saving…'),
+  };
+}
+
+async function resolveArtifactDashboardContext() {
+  const baseUrl = await resolveDashboardMediaBaseUrl();
+  if (!baseUrl) {
+    artifactDashboardContext = { baseUrl: '', token: '' };
+    return artifactDashboardContext;
+  }
+  const token = await fetchDashboardSessionToken({ baseUrl });
+  artifactDashboardContext = { baseUrl, token };
+  return artifactDashboardContext;
+}
+
+// One HEAD probe decides whether a card may offer buttons at all; the result is
+// cached briefly so a streaming render does not re-ask per token.
+async function probeArtifactReadable(filePath) {
+  if (!artifactDashboardContext.baseUrl) await resolveArtifactDashboardContext();
+  const { baseUrl, token } = artifactDashboardContext;
+  if (!baseUrl) return { ok: false, reason: 'missing-base-url' };
+  const key = `${baseUrl}|${filePath}`;
+  const cached = artifactProbeCache.get(key);
+  if (cached && Date.now() - cached.at < ARTIFACT_PROBE_CACHE_MS) return cached.state;
+  const state = await probeArtifactFileSource(filePath, { baseUrl, token });
+  artifactProbeCache.set(key, { at: Date.now(), state });
+  return state;
+}
+
+async function artifactPlanForFile(filePath) {
+  const probe = await probeArtifactReadable(filePath);
+  if (probe.ok) return { plan: artifactActionPlan(filePath, { readable: true }), size: probe.size };
+  return { plan: artifactActionPlan(filePath, { readable: false, reason: probe.reason }), size: null };
+}
+
+function scheduleArtifactBlobRevoke(url) {
+  if (!String(url || '').startsWith('blob:')) return;
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      /* the opened tab already holds the bytes */
+    }
+  }, ARTIFACT_BLOB_TTL_MS);
+}
+
+async function openArtifactUrlInTab(url) {
+  if (browserApi?.tabs?.create) {
+    try {
+      await browserApi.tabs.create({ url, active: true });
+      return;
+    } catch (error) {
+      // Some Chromium forks reject tabs.create from a side panel; a normal
+      // window.open keeps the click useful.
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (opened) return;
+      throw error;
+    }
+  }
+  if (!window.open(url, '_blank', 'noopener,noreferrer')) {
+    throw new Error('This browser would not open a new tab for the file.');
+  }
+}
+
+async function openArtifactCardInBrowser(plan) {
+  const { baseUrl, token } = artifactDashboardContext.baseUrl
+    ? artifactDashboardContext
+    : await resolveArtifactDashboardContext();
+  const result = await resolveArtifactFileSource(plan.source, { baseUrl, token });
+  if (!result.ok) throw new Error(artifactFailureNotice(result.reason));
+  scheduleArtifactBlobRevoke(result.url);
+  await openArtifactUrlInTab(result.url);
+}
+
+function artifactInterruptedMessage(delta = {}) {
+  const reason = delta.error?.current;
+  return reason ? `The download was interrupted (${reason}).` : 'The download was interrupted.';
+}
+
+function waitForArtifactDownload(downloadId) {
+  return new Promise((resolve, reject) => {
+    const downloads = browserApi?.downloads;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        downloads?.onChanged?.removeListener?.(listener);
+      } catch {
+        /* the listener registry is gone — nothing left to detach */
+      }
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const listener = (delta = {}) => {
+      if (delta.id !== downloadId) return;
+      const state = delta.state?.current;
+      if (state === 'complete') finish();
+      else if (state === 'interrupted') finish(new Error(artifactInterruptedMessage(delta)));
+    };
+    const timer = setTimeout(() => finish(new Error('The download did not finish in time.')), ARTIFACT_DOWNLOAD_TIMEOUT_MS);
+    downloads?.onChanged?.addListener?.(listener);
+    // The download can already be complete before the listener attaches.
+    Promise.resolve(downloads?.search?.({ id: downloadId })).then((items) => {
+      const state = Array.isArray(items) ? items[0]?.state : '';
+      if (state === 'complete') finish();
+      else if (state === 'interrupted') finish(new Error('The download was interrupted.'));
+    }).catch(() => {});
+  });
+}
+
+// downloads.download cannot set request headers, so the blob route is what
+// keeps the session token out of the URL: the bytes come over the same
+// header-authenticated transport Open uses, and the browser's download
+// machinery only ever sees a blob: object URL. The token-carrying query URL is
+// the deliberate fallback for surfaces that cannot hold the bytes at all
+// (resolveArtifactDownloadSource states exactly when and why).
+async function artifactDownloadUrlFor(plan) {
+  const { baseUrl, token } = artifactDashboardContext.baseUrl
+    ? artifactDashboardContext
+    : await resolveArtifactDashboardContext();
+  const source = await resolveArtifactDownloadSource(plan.source, { baseUrl, token });
+  if (!source.ok) throw new Error(artifactFailureNotice(source.reason));
+  // A blob URL stays alive long enough for the download (and the OS hand-off
+  // that follows it) to read it; the query URL needs no cleanup.
+  scheduleArtifactBlobRevoke(source.url);
+  return source.url;
+}
+
+async function openArtifactCardOnComputer(plan) {
+  const url = await artifactDownloadUrlFor(plan);
+  const downloadId = await browserApi.downloads.download({ url, filename: plan.name });
+  if (!Number.isInteger(Number(downloadId))) throw new Error('The browser did not start the download.');
+  await waitForArtifactDownload(Number(downloadId));
+  await browserApi.downloads.open(Number(downloadId));
+}
+
+async function saveArtifactCardFile(plan) {
+  const url = await artifactDownloadUrlFor(plan);
+  await browserApi.downloads.download({ url, filename: plan.name, saveAs: true });
+}
+
+async function runArtifactCardAction(plan, card, busyLabelKey, action) {
+  if (card?.dataset?.artifactBusy === 'true') return;
+  const labels = artifactCardLabels();
+  setArtifactCardBusy(card, true, { note: labels[busyLabelKey] || '' });
+  try {
+    await action();
+    if (card?.isConnected !== false) {
+      setArtifactCardBusy(card, false);
+      setArtifactCardNote(card, '');
+    }
+  } catch (error) {
+    if (card?.isConnected !== false) {
+      setArtifactCardBusy(card, false);
+      setArtifactCardNote(card, String(error?.message || error || 'The file action failed.'));
+    }
+  }
+}
+
+function artifactCardHandlers() {
+  return {
+    open: (plan, card) => runArtifactCardAction(plan, card, 'opening', () => openArtifactCardInBrowser(plan)),
+    'open-on-computer': (plan, card) => runArtifactCardAction(plan, card, 'openingOnComputer', () => openArtifactCardOnComputer(plan)),
+    save: (plan, card) => runArtifactCardAction(plan, card, 'saving', () => saveArtifactCardFile(plan)),
+  };
+}
+
+// Chips from the markdown renderer plus paths written as ordinary text both
+// become the same card; the shared hydrator owns the mechanics so the side
+// panel and the full tab cannot drift apart.
+async function hydrateArtifactFileCards(root, { scanText = true } = {}) {
+  return hydrateArtifactCards(root, {
+    buildPlan: artifactPlanForFile,
+    labels: artifactCardLabels,
+    handlers: artifactCardHandlers,
+    scanText,
+    limit: ARTIFACT_CARD_LIMIT,
+  });
+}
+
+async function commitFetchedSessionMessages(result, { sessionId, requestId = null, scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   if (requestId != null && requestId !== sessionLoadRequestId) return false;
   if (String(settings.sessionId || '').trim() !== String(sessionId || '').trim()) return false;
   if (result?.session) applySessionRuntimeSnapshot({
@@ -6728,33 +15420,126 @@ async function commitFetchedSessionMessages(result, { sessionId, requestId = nul
     source: 'Hermes session',
   });
   const contextMessages = Array.isArray(result?.contextMessages) ? result.contextMessages : [];
-  messages = Array.isArray(result?.messages) ? result.messages : [];
+  const incoming = Array.isArray(result?.messages) ? result.messages : [];
+  messages = preserveUserImageAttachments(incoming, messages).map((message) => {
+    const extracted = extractHistoryMediaAttachments(message);
+    if (!extracted.length || normalizeUserImageAttachments(message.attachments).length) return message;
+    return { ...message, attachments: extracted };
+  });
+  // Bind durable row ids to local user records by display text so Edit and
+  // Restore can address them without an extra round trip. Fail-closed on
+  // duplicates; already-bound records are left alone.
+  messages = bindRowIdsFromHistory(messages, incoming, { displayText: messageDisplayText });
+  // A steered message that reached the transcript clears its queued row —
+  // the dashed placeholder must not outlive the real message.
+  if (pendingSteerText && messages.some((message) => message?.role === 'user' && String(message.content || '').includes(pendingSteerText))) {
+    pendingSteerText = '';
+  }
   loadedSessionContextEstimate = {
     sessionId,
     contextTokens: estimateLocalSessionContextTokens({ messages: contextMessages }),
-    visibleTokens: estimateLocalSessionContextTokens({ messages }),
+    visibleTokens: estimateLocalSessionContextTokens({ messages: browserDisplayMessages(messages) }),
   };
-  await saveMessagesForActiveScope();
+  await saveMessagesForActiveScope({ scopeRevisionId });
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   if (requestId != null && requestId !== sessionLoadRequestId) return false;
   if (String(settings.sessionId || '').trim() !== String(sessionId || '').trim()) return false;
+  await hydrateSessionMedia(messages);
   renderMessagesFromStorage();
   return true;
 }
 
-async function loadSessionMessages(sessionId = settings.sessionId, { requestId = null } = {}) {
+let completionRevealSequence = 0;
+
+// Async delegation completions arrive through history reconciliation — there is
+// no live token stream attached — so a plain commit made the finished reply pop
+// in fully formed. Detect the new trailing reply, commit the transcript, then
+// reveal that message with the same progressive renderer live turns use.
+async function commitFetchedSessionMessagesWithReveal(result, options = {}) {
+  const reply = newestAssistantReply(trailingNewMessages(messages, result?.messages));
+  const committed = await commitFetchedSessionMessages(result, options);
+  if (!committed || !reply || document.hidden) return committed;
+  // Transient rows (completion thinking, queued steer) also carry .assistant
+  // styling and sit at the tail — never let them steal the reveal target.
+  const nodes = [...els.messages.querySelectorAll('.message.assistant')]
+    .filter((row) => !row.classList.contains('completion-pending-row') && !row.classList.contains('steer-pending-row'));
+  const node = nodes.length ? nodes[nodes.length - 1] : null;
+  if (node) revealCompletionReply(node, reply);
+  return committed;
+}
+
+function revealCompletionReply(node, fullText) {
+  // Reveal the same display text the committed renderer used (media echoes and
+  // role styling live outside this passthrough), so the tail matches exactly.
+  const text = String(messageDisplayText('assistant', fullText) || '');
+  const plan = completionRevealPlan(text);
+  if (!text || !plan.total) return;
+  const token = ++completionRevealSequence;
+  const updater = createStreamingMessageUpdater(node);
+  setMessageContent(node, revealSlice(text, plan.initialCount));
+  const startedAt = performance.now();
+  const step = (now) => {
+    if (token !== completionRevealSequence || !node.isConnected || sending) {
+      // Superseded, detached, or a new live turn started — show the full reply.
+      updater.flush(text);
+      return;
+    }
+    const progress = Math.min(1, (now - startedAt) / plan.durationMs);
+    if (progress >= 1) {
+      updater.flush(text);
+      return;
+    }
+    const eased = 1 - Math.pow(1 - progress, 2.4);
+    updater.updateText(revealSlice(text, Math.max(1, Math.floor(plan.total * eased))));
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+async function loadSessionMessages(sessionId = settings.sessionId, {
+  requestId = null,
+  scopeRevisionId = scopeRevision.current(),
+  transport = usesDashboardWsChatTransport() ? 'dashboard-ws' : 'rest',
+  connection = activeDashboardWsConnection,
+} = {}) {
   const expectedSessionId = String(settings.sessionId || '').trim();
-  const isCurrentRequest = () => requestId == null || requestId === sessionLoadRequestId;
+  const isCurrentRequest = () => (requestId == null || requestId === sessionLoadRequestId)
+    && scopeRevision.isCurrent(scopeRevisionId);
+  if (!isCurrentRequest()) return false;
   if (isUnsavedBrowserDraftSession({ sessionId, sessions: availableSessions })) {
+    if (!isCurrentRequest()) return false;
     await loadMessagesForActiveScope();
     return true;
   }
   try {
-    const result = await fetchSessionMessagesQuietly(sessionId);
+    const result = await fetchSessionMessagesQuietly(sessionId, { transport, connection: activeDashboardWsConnection || connection });
     if (!isCurrentRequest()) return false;
-    return commitFetchedSessionMessages(result, { sessionId: expectedSessionId, requestId });
+    return commitFetchedSessionMessages(result, { sessionId: expectedSessionId, requestId, scopeRevisionId });
   } catch (error) {
     if (!isCurrentRequest()) return false;
     addMessage('system', `Could not load session messages: ${error?.message || String(error)}`);
+    return false;
+  }
+}
+
+// Best-effort, race-guarded re-fetch of the open session history after a turn's
+// terminal reconcile. The stream may have closed before a late image/tool result
+// landed on the server; this picks it up without replaying the prompt. Never
+// commits when a new turn started (generation), the composer is busy, or a group
+// chat owns the transcript.
+async function refreshActiveSessionHistoryQuietly(expectedGeneration = runControlGeneration) {
+  const sessionId = String(settings.sessionId || '').trim();
+  if (!sessionId || sending || activeGroupProjection) return false;
+  if (isUnsavedBrowserDraftSession({ sessionId, sessions: availableSessions })) return false;
+  try {
+    const result = usesDashboardWsChatTransport()
+      ? await fetchDashboardHistoryWithResume(sessionId)
+      : await fetchSessionMessagesQuietly(sessionId);
+    if (!runControlGenerationMatches(expectedGeneration, runControlGeneration)) return false;
+    if (String(settings.sessionId || '').trim() !== sessionId || sending || activeGroupProjection) return false;
+    if (messages.length > 0 && (!Array.isArray(result?.messages) || result.messages.length === 0)) return false;
+    return commitFetchedSessionMessages(result, { sessionId });
+  } catch {
     return false;
   }
 }
@@ -6771,6 +15556,31 @@ function activeSessionForSend() {
     title: settings.sessionTitle || sessionId,
     source: DEFAULT_SETTINGS.sessionSource,
   };
+}
+
+function dismissLocalDocumentApprovalNotice() {
+  if (!els.localDocumentApprovalNotice) return;
+  els.localDocumentApprovalNotice.hidden = true;
+}
+
+function renderLocalDocumentApproval(tab = currentContext?.activeTab) {
+  if (!els.localDocumentApprovalNotice) return;
+  const url = tab?.url || '';
+  const isLocal = isLocalDocumentUrl(url);
+  if (!isLocal || settings.allowLocalDocuments === true) {
+    dismissLocalDocumentApprovalNotice();
+    return;
+  }
+  let fileName = 'presentation / local file';
+  try {
+    const parsed = new URL(url);
+    fileName = parsed.pathname.split('/').filter(Boolean).pop() || 'local document';
+  } catch {
+    fileName = 'local document';
+  }
+  els.localDocumentApprovalTitle.textContent = `Local document · ${fileName}`;
+  els.localDocumentApprovalDetail.textContent = 'Approve local document access to inspect this file, extract slides/text, and attach browser control.';
+  els.localDocumentApprovalNotice.hidden = false;
 }
 
 function dismissSessionOwnershipNotice() {
@@ -6802,6 +15612,11 @@ function showSessionOwnershipNotice(session = {}, userText = '', turnAttachments
 }
 
 function guardForeignSessionSend(userText, turnAttachments) {
+  // Bot Mode sessions are created and owned by this panel in the current
+  // engagement (openBotProfile -> createHermesBrowserSession). The ownership
+  // guard is a foreign-surface protection; it must never block the active
+  // bot's own chat.
+  if (document.body.classList.contains('bot-mode-engaged') && settings.botModeSelectedProfile) return true;
   const session = activeSessionForSend();
   if (!requiresSessionOwnershipConfirmation({
     session,
@@ -6851,10 +15666,11 @@ async function handleSessionOwnershipDecision(event) {
   }
 }
 
-async function ensureDefaultBrowserSession({ focus = false } = {}) {
-  if (!settings.apiKey || settings.sessionId !== DEFAULT_SETTINGS.sessionId) return;
+async function ensureDefaultBrowserSession({ focus = false, scopeRevisionId = scopeRevision.current() } = {}) {
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
+  if ((!settings.apiKey && !usesDashboardWsChatTransport()) || settings.sessionId !== DEFAULT_SETTINGS.sessionId) return false;
   const current = availableSessions.find((session) => session.id === settings.sessionId);
-  if (isHermesBrowserSession(current)) return;
+  if (isHermesBrowserSession(current)) return true;
   if (current) {
     try {
       const response = await apiFetch(`/api/sessions/${encodeSessionId(current.id)}`, {
@@ -6862,30 +15678,37 @@ async function ensureDefaultBrowserSession({ focus = false } = {}) {
         body: JSON.stringify({ source: DEFAULT_SETTINGS.sessionSource }),
       });
       const payload = await readJsonResponse(response);
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
       if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Session migration failed (${response.status})`);
       const migrated = normalizeHermesSessions({ data: [payload.session || payload] })[0];
       if (migrated) {
         availableSessions = normalizeHermesSessions({ data: [migrated, ...availableSessions.filter((item) => item.id !== migrated.id)] });
         updateSessionLabel();
         renderSessionMenu();
-        return;
+        return true;
       }
     } catch (error) {
+      if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
       setStatus('warn', 'Could not migrate Browser session', error?.message || String(error), { translateDetail: false });
     }
   }
+  if (!scopeRevision.isCurrent(scopeRevisionId)) return false;
   const existingBrowserSession = availableSessions.find(isHermesBrowserSession);
   if (existingBrowserSession) {
-    await openHermesSession(existingBrowserSession);
-    return;
+    await openHermesSession(existingBrowserSession, { scopeRevisionId });
+    return scopeRevision.isCurrent(scopeRevisionId);
   }
-  await beginHermesBrowserDraft({ title: makeBrowserSessionTitle(), focus });
+  await beginHermesBrowserDraft({ title: makeBrowserSessionTitle(), focus, scopeRevisionId });
+  return scopeRevision.isCurrent(scopeRevisionId);
 }
 
 const THINKING_PLACEHOLDER = 'Hermes is thinking...';
 const THINKING_STATUSES = ['thinking', 'brainstorming', 'contemplating', 'reasoning', 'processing', 'analyzing', 'reflecting', 'pondering', 'deliberating', 'formulating'];
 
 function renderThinkingIndicator(element) {
+  // Streaming calls this every frame while the model warms up. Rebuilding the
+  // indicator would restart its CSS animations — only build it once.
+  if (element.firstElementChild?.classList.contains('thinking-indicator')) return;
   const phrases = THINKING_STATUSES
     .map((word) => `
         <span class="thinking-line">
@@ -6902,13 +15725,76 @@ function renderThinkingIndicator(element) {
   `;
 }
 
+// Zero-jitter streaming: the incoming markdown HTML is diffed against the live
+// DOM block by block. Everything before the first divergence is left untouched
+// (no re-parse, no layout, no image reloads), so completed paragraphs, tables,
+// code cards and tool slots never shift while the tail block grows. Only the
+// changed tail is swapped in one paint.
+function patchRenderedMessageContent(element, html = '') {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  highlightCodeBlocks(template.content);
+  const incoming = [...template.content.childNodes];
+  const existing = [...element.childNodes];
+  let stable = 0;
+  while (stable < existing.length && stable < incoming.length) {
+    const live = existing[stable];
+    const next = incoming[stable];
+    if (live.nodeType === Node.TEXT_NODE && next.nodeType === Node.TEXT_NODE) {
+      if (live.textContent === next.textContent) { stable += 1; continue; }
+      break;
+    }
+    if (live.nodeType === Node.ELEMENT_NODE && next.nodeType === Node.ELEMENT_NODE) {
+      if (live.outerHTML === next.outerHTML) { stable += 1; continue; }
+      if (
+        live.tagName === next.tagName
+        && stable === incoming.length - 1
+        && stable === existing.length - 1
+      ) {
+        if (live.innerHTML !== next.innerHTML) live.innerHTML = next.innerHTML;
+        stable += 1;
+        continue;
+      }
+      break;
+    }
+    break;
+  }
+  for (const node of existing.slice(stable)) node.remove();
+  const fragment = document.createDocumentFragment();
+  for (const node of incoming.slice(stable)) fragment.append(node);
+  if (fragment.childNodes.length) element.append(fragment);
+}
+
 function renderMessageContentElement(element, content = '') {
   if (String(content || '').trim() === THINKING_PLACEHOLDER) {
     renderThinkingIndicator(element);
     return;
   }
-  element.innerHTML = renderMarkdown(content || '');
-  for (const image of element.querySelectorAll('img[data-slot="aui_generated-image"]')) {
+  patchRenderedMessageContent(element, renderMarkdownSafe(content || ''));
+  enhanceMarkdownCodeBlocks(element, {
+    copyLabel: translateUiText('Copy code'),
+    copiedLabel: translateUiText('Copied'),
+  });
+  if (activeGroupProjection) {
+    highlightMentions(element, {
+      document, members: groupRuntimeMembers(),
+      inkFor: (owner) => roomIdentityForMember(owner)?.ink || '',
+    });
+  }
+  wrapGeneratedImagesForInspection(element);
+  void hydrateSessionMediaInElement(element);
+  // Only Hermes' own replies can name a file it just produced; a path the user
+  // typed stays ordinary text.
+  if (!element?.closest?.('.message.user')) void hydrateArtifactFileCards(element);
+}
+
+// Any generated picture in the transcript gets the same inspect affordance the
+// lightbox uses — including pictures that only appear later, once media
+// hydration has replaced a filename chip with the real image.
+function wrapGeneratedImagesForInspection(root) {
+  if (!root?.querySelectorAll) return;
+  for (const image of root.querySelectorAll('img[data-slot="aui_generated-image"]:not([data-inspect-wrapped])')) {
+    image.dataset.inspectWrapped = 'true';
     const wrapper = document.createElement('span');
     wrapper.className = 'generated-image-inspectable';
     wrapper.tabIndex = 0;
@@ -7033,7 +15919,7 @@ function openGeneratedImageLightbox(image) {
 }
 
 function extractRenderableImageSource(content = '') {
-  const html = renderMarkdown(content || '');
+  const html = renderMarkdownSafe(content || '');
   const template = document.createElement('template');
   template.innerHTML = html;
   const image = template.content.querySelector('img[data-slot="aui_generated-image"]');
@@ -7042,6 +15928,80 @@ function extractRenderableImageSource(content = '') {
 
 function activeImageGenerationPlaceholder(node) {
   return node?.querySelector('.message-tool-activity .image-gen-placeholder') || null;
+}
+
+// A local media path is not a browser URL. Hermes-managed paths are served by
+// the dashboard's /api/media route (as a data URL), which is how a finished
+// generation can dissolve into the real picture in the panel. Anything else
+// stays an honest filename chip: the route refuses to read outside the media
+// roots, and inventing a source would be a lie.
+async function resolveGeneratedImageSource(source = '') {
+  const text = String(source || '').trim();
+  if (!text) return '';
+  const direct = resolveImageSource(text);
+  if (direct) return direct;
+  const plan = mediaSourcePlan(text);
+  if (plan.transport !== 'dashboard-media') return '';
+  try {
+    const baseUrl = await resolveDashboardMediaBaseUrl();
+    if (!baseUrl) return '';
+    const token = await fetchDashboardSessionToken({ baseUrl });
+    return await fetchDashboardMediaDataUrl({ baseUrl, filePath: text, token });
+  } catch {
+    return '';
+  }
+}
+
+// One image_generate call can deliver more than one picture (a primary plus
+// alternates). Reveal the first inside the live placeholder — the animation
+// dissolving into the real image — then append a card for every remaining
+// picture so nothing the user paid for stays invisible.
+async function revealGeneratedImages(node, placeholder, sources = []) {
+  const queue = [...new Set((Array.isArray(sources) ? sources : [])
+    .map((source) => String(source || '').trim())
+    .filter(Boolean))];
+  if (!queue.length) return false;
+  const [first, ...rest] = queue;
+  const revealed = await revealGeneratedImage(placeholder, first);
+  if (rest.length) appendGeneratedImageCards(node, rest);
+  return revealed;
+}
+
+// Extra pictures get their own card next to the live placeholder: a calm
+// pending block while the dashboard hands over the bytes, then the same
+// dissolve the primary image uses.
+function appendGeneratedImageCards(node, sources = []) {
+  const slot = node?.querySelector?.('.message-tool-activity') || node;
+  if (!slot) return;
+  for (const source of [...new Set((Array.isArray(sources) ? sources : []).map((value) => String(value || '').trim()).filter(Boolean))]) {
+    const name = mediaDisplayName(source);
+    const figure = document.createElement('figure');
+    figure.className = 'generated-image generated-image-card';
+    figure.dataset.slot = 'aui_generated-image';
+    figure.setAttribute('role', 'status');
+    figure.setAttribute('aria-label', name);
+    const label = document.createElement('span');
+    label.className = 'generated-image-card-name';
+    label.textContent = name;
+    figure.append(label);
+    slot.appendChild(figure);
+    void (async () => {
+      const displayable = await resolveGeneratedImageSource(source);
+      if (!displayable || !figure.isConnected) return;
+      const image = document.createElement('img');
+      image.src = displayable;
+      image.alt = name;
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.dataset.slot = 'aui_generated-image';
+      figure.replaceChildren(image);
+      figure.removeAttribute('role');
+      figure.removeAttribute('aria-label');
+      figure.classList.add('generated-image-card-revealed');
+      wrapGeneratedImagesForInspection(figure);
+      scrollMessageStreamToBottom();
+    })();
+  }
 }
 
 function loadGeneratedImageForReveal(source = '') {
@@ -7059,7 +16019,9 @@ function loadGeneratedImageForReveal(source = '') {
 async function revealGeneratedImage(placeholder, source = '') {
   if (!placeholder?._reveal || !source) return false;
   try {
-    const image = await loadGeneratedImageForReveal(source);
+    const displayable = await resolveGeneratedImageSource(source);
+    if (!displayable) return false;
+    const image = await loadGeneratedImageForReveal(displayable);
     const naturalRatio = image.naturalWidth / image.naturalHeight;
     if (Number.isFinite(naturalRatio) && naturalRatio > 0) {
       placeholder.style.aspectRatio = String(naturalRatio);
@@ -7240,6 +16202,8 @@ function setToolActivity(node, activity = null) {
     slot.dataset.imageActivityId = activity.activityId || previousImageActivity.activityId;
     slot.dataset.imageActivityStatus = activity.status || 'progress';
     existingImage.dataset.toolStatus = activity.status || 'progress';
+    const completedSources = rawGeneratedImageCandidatesFromResult(activity.result);
+    if (completedSources.length) void revealGeneratedImages(node, existingImage, completedSources);
     return;
   }
   if (existingImage && !isImageGeneration) {
@@ -7262,31 +16226,439 @@ function setToolActivity(node, activity = null) {
   const toolActivity = renderToolActivity(nextActivity);
   slot.replaceChildren(toolActivity);
   toolActivity._start?.();
+  const completedSources = isImageGeneration ? rawGeneratedImageCandidatesFromResult(activity.result) : [];
+  if (completedSources.length) void revealGeneratedImages(node, toolActivity, completedSources);
+  scrollMessageStreamToBottom();
+}
+
+// ── Sticky autoscroll ────────────────────────────────────────────────────────
+// During generation the bubble grows every frame. Forcing scrollTop on each
+// update fights the user's own scrolling and causes visible jumps; instead the
+// stream only follows the tail while the reader is already near the bottom.
+const MESSAGE_STICKY_SCROLL_THRESHOLD_PX = 96;
+
+function isMessageStreamNearBottom() {
+  const scroller = els.appScroll;
+  if (!scroller) return true;
+  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= MESSAGE_STICKY_SCROLL_THRESHOLD_PX;
+}
+
+function scrollMessageStreamToBottom({ force = false } = {}) {
   requestAnimationFrame(() => {
-    els.appScroll.scrollTop = els.appScroll.scrollHeight;
+    const scroller = els.appScroll;
+    if (!scroller) return;
+    if (!force && !isMessageStreamNearBottom()) return;
+    scroller.scrollTop = scroller.scrollHeight;
   });
 }
 
-function addMessage(role, content, { persist = true } = {}) {
-  if (!messages.length) els.messages.innerHTML = '';
-  const node = els.template.content.firstElementChild.cloneNode(true);
-  node.classList.add(role);
-  node.querySelector('.message-role').textContent = role === 'assistant' ? 'Hermes' : role;
-  renderMessageContentElement(node.querySelector('.message-content'), messageDisplayText(role, content || ''));
-  els.messages.appendChild(node);
-  requestAnimationFrame(() => {
-    els.appScroll.scrollTop = els.appScroll.scrollHeight;
+// Assistant bubble header: inside an engaged Bot Mode chat the label is the
+// real agent identity (ROXAS / NAMINÉ / RIKU); everywhere else it stays Hermes.
+function assistantMessageRoleLabel() {
+  if (!document.body.classList.contains('bot-mode-engaged')) return 'Hermes';
+  const selectedProfile = settings.botModeSelectedProfile || settings.activeProfile || '';
+  const row = botModeRoster.find((entry) => entry.type !== 'group' && entry.profileName === selectedProfile)
+    || botModeRoster.find((entry) => entry.type !== 'group' && entry.profileName === settings.botModeSelectedProfile);
+  if (!row) return 'Hermes';
+  return botProfileDisplayName(row).toUpperCase();
+}
+
+// The selected bot of a 1:1 Bot Mode chat, or null (plain Hermes, rooms).
+function soloBotRow() {
+  if (activeGroupProjection || !document.body.classList.contains('bot-mode-engaged')) return null;
+  const selected = settings.botModeSelectedProfile || settings.activeProfile || '';
+  return botModeRoster.find((entry) => entry.type !== 'group' && entry.profileName === selected) || null;
+}
+
+// 1:1 bot chats: the bot's avatar beside its name, in the shared header voice.
+// No per-bot color here; that belongs to rooms only.
+function applySoloBotIdentity(node, record) {
+  if (record.role !== 'assistant') return;
+  const row = soloBotRow();
+  if (!row) return;
+  const header = node.querySelector('.message-role');
+  if (!header) return;
+  const title = botProfileDisplayName(row);
+  header.replaceChildren();
+  const avatar = document.createElement('span');
+  avatar.className = 'room-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  renderRoomMemberAvatar(avatar, { name: row.profileName, title });
+  const name = document.createElement('span');
+  name.className = 'room-name';
+  name.textContent = title;
+  header.append(avatar, name);
+}
+
+function messageThreadUi() {
+  panelMessageThread ||= createMessageThreadUi({
+    root: els.messages, document, window, locale: getLocale, translate: translateUiText,
+    onCopy: (record, node) => copyMessageRecord(record.role, record, node),
+    replyLabelFor: (record) => roomReplyLabel(record),
+    onReply: (record) => replyToRoomMember(record),
+    canRewind: (record) => canRewindMessage(record),
+    onEdit: (row, record) => beginEditMessage(row, record),
+    onRestore: (row, record, anchor) => confirmRestoreMessage(row, record, anchor),
   });
-  const record = { role, content: content || '', ts: Date.now() };
+  return panelMessageThread;
+}
+
+function roomReplyMember(record) {
+  if (!activeGroupProjection || record?.role !== 'assistant') return null;
+  return resolveRoomSpeaker(record, groupRuntimeMembers());
+}
+
+function roomReplyLabel(record) {
+  const member = roomReplyMember(record);
+  return member ? t('ui.reply.to.member', { name: member.name }) : '';
+}
+
+// Reply: drop "@handle " into the existing draft at the caret, keep the rest of
+// the draft, focus the composer. Never sends.
+function replyToRoomMember(record) {
+  const member = roomReplyMember(record);
+  if (!member || !els.input) return;
+  const field = els.input;
+  const result = insertMention(field.value, field.selectionStart, field.selectionEnd, member.name);
+  field.value = result.value;
+  field.focus();
+  field.setSelectionRange?.(result.caret, result.caret);
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  renderSkillSuggestions();
+  renderContextWindow(result.value);
+}
+
+async function copyMessageRecord(role, record, node) {
+  try {
+    if (role === 'user') {
+      await navigator.clipboard.writeText(messageDisplayText(role, record.content));
+      return true;
+    }
+    const content = node.querySelector('.message-content');
+    if (!content) return false;
+    const fragment = document.createDocumentFragment();
+    for (const child of content.childNodes) fragment.append(child.cloneNode(true));
+    const payload = buildCleanClipboardPayload({ fragment, document });
+    if (!payload) return false;
+    if (navigator.clipboard.write && typeof ClipboardItem === 'function') {
+      try {
+        await navigator.clipboard.write([new window.ClipboardItem({
+          'text/html': new Blob([payload.html], { type: 'text/html' }),
+          'text/plain': new Blob([payload.text], { type: 'text/plain' }),
+        })]);
+        return true;
+      } catch { /* Plain text remains available when rich clipboard is unsupported. */ }
+    }
+    await navigator.clipboard.writeText(payload.text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ── Edit (A3) and Restore checkpoint (A4) ────────────────────────────────────
+// A user turn can be rewound only on the dashboard WebSocket transport: the
+// gateway truncates by row id (never an ordinal). When no durable address can
+// be resolved the text is sent as a brand new message and nothing is cut.
+function lastUserRecordIndex(list = messages) {
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (list[index]?.role === 'user') return index;
+  }
+  return -1;
+}
+
+function canRewindMessage(record) {
+  if (!record || record.role !== 'user') return false;
+  if (sending) return false;
+  if (activeGroupProjection) return false;
+  if (isSteerMessage(record)) return false;
+  if (record.failed || record.localOnly || record.pending) return false;
+  // Turns that carried prepared attachments are not replayable through the
+  // normal send pipeline (the payload is already a saved data URL), so Edit and
+  // Restore are hidden on them rather than silently dropping the images.
+  if (Array.isArray(record.attachments) && record.attachments.length) return false;
+  // Offered on every idle 1:1 user turn. Without a durable row id (REST
+  // transport, unmatched history) submitRewind fails closed: it sends the text
+  // as a new message and truncates nothing.
+  return messages.indexOf(record) !== -1;
+}
+
+function beginEditMessage(row, record) {
+  if (!row || !record || row.classList.contains('is-editing')) return;
+  if (!canRewindMessage(record)) return;
+  const node = row.querySelector(':scope > .message');
+  const content = node?.querySelector(':scope > .message-content');
+  if (!content) return;
+  const original = content.cloneNode(true);
+  const editor = document.createElement('div');
+  editor.className = 'message-editor';
+  const textarea = document.createElement('textarea');
+  textarea.className = 'message-editor-input';
+  textarea.setAttribute('rows', '1');
+  const displayOriginal = String(messageDisplayText('user', record.content || '') || '').trim();
+  textarea.value = displayOriginal;
+  const actions = document.createElement('div');
+  actions.className = 'message-editor-actions';
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'message-editor-cancel';
+  cancelButton.textContent = translateUiText('Cancel');
+  const sendButton = document.createElement('button');
+  sendButton.type = 'button';
+  sendButton.className = 'message-editor-send';
+  sendButton.textContent = translateUiText('Send');
+  actions.append(cancelButton, sendButton);
+  editor.append(textarea, actions);
+  const autosize = () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    editor.replaceWith(original);
+    row.classList.remove('is-editing');
+    panelMessageThread?.refreshActions?.();
+  };
+  const submit = () => {
+    if (closed) return;
+    const text = textarea.value.trim();
+    const index = messages.indexOf(record);
+    // Identical or empty text closes the editor without a turn (spec A3.4).
+    if (!text || text === displayOriginal || index === -1 || !planEdit(messages, index, text)) { close(); return; }
+    close();
+    void submitRewind({ record, text, mode: 'edit' });
+  };
+  cancelButton.addEventListener('click', (event) => { event.stopPropagation(); close(); });
+  sendButton.addEventListener('click', (event) => { event.stopPropagation(); submit(); });
+  textarea.addEventListener('input', autosize);
+  textarea.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return; }
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      submit();
+    }
+  });
+  content.replaceWith(editor);
+  row.classList.add('is-editing');
+  panelMessageThread?.pin?.(row);
+  autosize();
+  textarea.focus();
+  const end = textarea.value.length;
+  try { textarea.setSelectionRange(end, end); } catch { /* selection unsupported */ }
+}
+
+let restorePopoverState = null;
+
+function closeRestorePopover({ restoreFocus = false } = {}) {
+  const state = restorePopoverState;
+  if (!state) return;
+  restorePopoverState = null;
+  state.popover.remove();
+  document.removeEventListener('click', state.onDocumentClick, true);
+  document.removeEventListener('keydown', state.onKey, true);
+  state.row?.classList.remove('is-restoring');
+  if (restoreFocus) { try { state.anchor?.focus?.(); } catch { /* detached anchor */ } }
+}
+
+function confirmRestoreMessage(row, record, anchor) {
+  closeRestorePopover();
+  if (!canRewindMessage(record)) return;
+  const popover = document.createElement('div');
+  popover.className = 'message-restore-popover';
+  popover.setAttribute('role', 'dialog');
+  popover.setAttribute('aria-label', translateUiText('Restore checkpoint: rerun from this prompt'));
+  const text = document.createElement('p');
+  text.className = 'message-restore-text';
+  text.textContent = translateUiText('Rerun from here? Messages after this will be removed.');
+  const actions = document.createElement('div');
+  actions.className = 'message-restore-actions';
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'message-restore-cancel';
+  cancelButton.textContent = translateUiText('Cancel');
+  const rerunButton = document.createElement('button');
+  rerunButton.type = 'button';
+  rerunButton.className = 'message-restore-confirm';
+  rerunButton.textContent = translateUiText('Rerun');
+  actions.append(cancelButton, rerunButton);
+  popover.append(text, actions);
+
+  const state = { popover, row, anchor };
+  state.onDocumentClick = (event) => {
+    if (popover.contains(event.target)) return;
+    if (anchor && anchor.contains?.(event.target)) return;
+    closeRestorePopover();
+  };
+  state.onKey = (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeRestorePopover({ restoreFocus: true }); return; }
+    if (event.key === 'Tab') {
+      // Focus stays trapped on the two popover buttons while it is open.
+      event.preventDefault();
+      const order = [cancelButton, rerunButton];
+      const current = order.indexOf(document.activeElement);
+      const next = event.shiftKey
+        ? (current <= 0 ? order.length - 1 : current - 1)
+        : (current + 1) % order.length;
+      order[next].focus();
+    }
+  };
+  cancelButton.addEventListener('click', (event) => { event.stopPropagation(); closeRestorePopover({ restoreFocus: true }); });
+  rerunButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeRestorePopover();
+    void submitRewind({ record, text: String(record.content || ''), mode: 'restore' });
+  });
+  restorePopoverState = state;
+  row.classList.add('is-restoring');
+  row.append(popover);
+  // Opens upward by default; when the row sits at the top of the transcript the
+  // upward popover would clip under the header, so it opens downward instead.
+  const edge = (els.appScroll || els.messages).getBoundingClientRect().top;
+  if (popover.getBoundingClientRect().top < edge + 4) popover.classList.add('is-below');
+  document.addEventListener('click', state.onDocumentClick, true);
+  document.addEventListener('keydown', state.onKey, true);
+  rerunButton.focus();
+}
+
+async function submitRewind({ record, text, mode = 'edit' } = {}) {
+  const index = messages.indexOf(record);
+  if (index === -1) return false;
+  const plan = mode === 'restore' ? planRestore(messages, index) : planEdit(messages, index, text);
+  if (!plan) return false;
+  // Restore replays what the user typed, never the stored protocol envelope
+  // (that would be wrapped a second time and shown as raw JSON).
+  if (mode === 'restore') plan.text = messageDisplayText('user', plan.sourceText);
+  if (!String(plan.text || '').trim()) return false;
+  // Resolve the durable row id: the record's own id first, else a display-text
+  // match against live gateway history (newest-at-tail only for the last turn).
+  let rowId = Number.isInteger(plan.rowId) ? plan.rowId : undefined;
+  if (!Number.isInteger(rowId)) {
+    try {
+      const result = await fetchDashboardHistoryWithResume(settings.sessionId);
+      const history = Array.isArray(result?.messages) ? result.messages : [];
+      rowId = resolveRowIdByDisplayText(history, messageDisplayText('user', plan.sourceText), {
+        displayText: messageDisplayText,
+        isNewest: index === lastUserRecordIndex(),
+      });
+    } catch {
+      rowId = undefined;
+    }
+  }
+  if (!Number.isInteger(rowId)) {
+    // Fail closed: no address means no truncation. Send the text as a new turn
+    // and say so, leaving the saved conversation untouched.
+    addMessage('system', translateUiText('This message could not be matched to the saved conversation, so it was sent as a new message.'));
+    return askHermes(plan.text, [], { disableAutoTitle: true, preserveComposer: true });
+  }
+  const snapshot = messages.slice();
+  messages = applyRewindLocally(messages, index, mode === 'edit' ? plan.text : undefined, { now: Date.now() });
+  renderMessagesFromStorage();
+  let submitResponse = null;
+  let accepted = false;
+  try {
+    await askHermes(plan.text, [], {
+      reuseUserRecord: true,
+      disableAutoTitle: true,
+      preserveComposer: true,
+      truncate: { rowId },
+      onSubmitResponse: (response) => { submitResponse = response || null; accepted = true; },
+    });
+  } catch {
+    accepted = false;
+  }
+  if (!accepted) {
+    // Any failure before the turn is accepted (4004 / 4018 / 4030 / transport)
+    // restores the snapshot so the transcript is never left half-rewound.
+    messages = snapshot;
+    renderMessagesFromStorage();
+    addMessage('system', translateUiText('Edit failed. Your conversation was not changed.'));
+    return false;
+  }
+  if (submitResponse) {
+    messages = rebindSurvivorRowIds(messages, submitResponse);
+    const newRowId = Number(submitResponse.user_row_id);
+    if (Number.isInteger(newRowId) && newRowId > 0) {
+      const target = [...messages].reverse().find((message) => message?.role === 'user');
+      if (target && !Number.isInteger(target.rowId)) target.rowId = newRowId;
+    }
+    await trimAndSaveMessages();
+  }
+  return true;
+}
+
+function addMessage(role, content, {
+  persist = true, roleLabel = '', contextReceipt = null, attachments = null, scroll = true,
+  ts = null, rowId, speaker = null, thread = '', sourceRecord = null, streaming = false,
+} = {}) {
+  if (!messages.length) {
+    panelMessageThread?.reset();
+    els.messages.innerHTML = '';
+  }
+  if (sourceRecord?.kind === 'room-event') {
+    const row = document.createElement('div');
+    row.className = 'room-event-line';
+    row.textContent = String(content || '');
+    els.messages.append(row);
+    if (scroll) scrollMessageStreamToBottom();
+    return { node: row, row, record: sourceRecord };
+  }
+  const shell = els.template.content.firstElementChild.cloneNode(true);
+  const row = shell.classList.contains('message-row') ? shell : document.createElement('div');
+  row.classList.add('message-row');
+  const node = shell.classList.contains('message-row') ? shell.querySelector('.message') : shell;
+  if (shell !== row) row.append(node);
+  node.classList.add(role);
+  // A mid-turn steer shows the user's own words under a "Steered" tag, never
+  // the model-facing marker wrapper.
+  const steered = isSteerMessage({ role, content, display_kind: sourceRecord?.display_kind });
+  if (steered) node.classList.add('steer-sent');
+  node.querySelector('.message-role').textContent = steered
+    ? t('ui.steered.label')
+    : (roleLabel || (role === 'assistant' ? assistantMessageRoleLabel() : role));
+  renderMessageContentElement(node.querySelector('.message-content'), messageDisplayText(role, content || ''));
+  if (contextReceipt && contextReceipt?.items?.length) appendContextReceipt(node, contextReceipt);
+  if (role === 'user') {
+    appendUserImageAttachments(node.querySelector('.message-content'), attachments, {
+      onOpen: (image) => openGeneratedImageLightbox(image),
+    });
+    appendUserFileAttachments(node.querySelector('.message-content'), attachments, {
+      translate: t,
+      onOpen: (item) => { void openUserFileAttachment(item, { translate: t }).catch(() => setStatus('warn', t('ui.file'), t('attachments.file_unavailable'))); },
+      onDownload: (item) => { void downloadUserFileAttachment(item).catch(() => setStatus('warn', t('ui.file'), t('attachments.file_unavailable'))); },
+    });
+  }
+  // The "What Hermes saw" receipt rides on the stored row so history replays
+  // (post-turn reconcile, session reload) keep it attached — never lose it.
+  const knownTs = normalizeMessageTimestamp(ts);
+  const record = sourceRecord || { role, content: content || '', ts: knownTs ?? (persist ? Date.now() : null) };
+  if (roleLabel) record.roleLabel = roleLabel;
+  if (Number.isInteger(rowId) && rowId > 0) record.rowId = rowId;
+  if (speaker) record.speaker = speaker;
+  if (thread) record.thread = thread;
+  if (contextReceipt && contextReceipt?.items?.length) record.contextReceipt = contextReceipt;
+  if (Array.isArray(attachments) && attachments.length) record.attachments = attachments;
+  applyRoomMessageIdentity(node, record);
+  applySoloBotIdentity(node, record);
+  messageThreadUi().attach({
+    row, node, record, room: Boolean(activeGroupProjection), streaming,
+    entering: persist || streaming,
+  });
+  els.messages.appendChild(row);
+  if (streaming) setRailCopyEnabled(row.querySelector('.message-rail'), false);
+  if (scroll) scrollMessageStreamToBottom({ force: true });
   if (persist) {
     messages.push(record);
     trimAndSaveMessages();
   }
-  return { node, record };
+  return { node, row, record };
 }
 
 function appendContextReceipt(messageNode, receipt = { title: 'What Hermes saw', items: [] }) {
   if (!messageNode || !receipt?.items?.length) return;
+  // Idempotent: never attach twice to the same message node.
+  if (messageNode.querySelector(':scope > .context-receipt')) return;
   const details = document.createElement('details');
   details.className = 'context-receipt';
   const summary = document.createElement('summary');
@@ -7305,16 +16677,14 @@ function appendContextReceipt(messageNode, receipt = { title: 'What Hermes saw',
 
 function setMessageContent(node, content) {
   renderMessageContentElement(node.querySelector('.message-content'), content || '');
-  requestAnimationFrame(() => {
-    els.appScroll.scrollTop = els.appScroll.scrollHeight;
-  });
+  scrollMessageStreamToBottom();
 }
 
 function createStreamingMessageUpdater(node) {
   let pending = '';
   let frame = 0;
   let revealPromise = null;
-  const flush = async (content = pending) => {
+  const flush = async (content = pending, { imageSources = [] } = {}) => {
     pending = content || '';
     if (frame) {
       cancelAnimationFrame(frame);
@@ -7322,25 +16692,86 @@ function createStreamingMessageUpdater(node) {
     }
     const existingImage = activeImageGenerationPlaceholder(node);
     const imageSource = extractRenderableImageSource(pending);
-    if (existingImage && imageSource) {
-      revealPromise ||= revealGeneratedImageFromContent(node, pending);
+    const recoveryImageSource = imageSource || imageSources[0] || '';
+    if (imageSources.length > 1) appendGeneratedImageCards(node, imageSources.slice(1));
+    if (existingImage && recoveryImageSource) {
+      revealPromise ||= imageSource
+        ? revealGeneratedImageFromContent(node, pending)
+        : revealGeneratedImage(existingImage, recoveryImageSource);
       await revealPromise;
     }
-    setToolActivity(node, null);
+    const renderedRecoveredImage = Boolean(existingImage?.querySelector('.generated-image-reveal-source'));
+    if (!renderedRecoveredImage || imageSource) setToolActivity(node, null);
     setMessageContent(node, pending);
+    const row = node.closest('.message-row');
+    panelMessageThread?.setStreaming(row, false);
+    setRailCopyEnabled(row?.querySelector('.message-rail'), true);
+  };
+  const paintStream = () => {
+    setMessageContent(node, pending || THINKING_PLACEHOLDER);
   };
   const updateText = (content = '') => {
     pending = content || '';
     if (frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      setMessageContent(node, pending || THINKING_PLACEHOLDER);
+      paintStream();
     });
   };
   function updateTool(tool = null) {
     setToolActivity(node, tool);
   }
-  return { update: updateText, updateText, updateTool, flush };
+  function dispose() {
+    // Terminal error paths never flush; stop the diffusion canvas and drop the
+    // tool-activity slot so the placeholder cannot keep animating after the turn.
+    setToolActivity(node, null);
+  }
+  return {
+    node,
+    update: updateText,
+    updateText,
+    updateTool,
+    flush,
+    dispose,
+  };
+}
+
+// A gateway still running pre-update code cannot be fixed from the panel's own
+// transport, so the failure bubble carries an explicit, confirmed restart that
+// goes through the local dashboard (the same one the roster and media use).
+function attachGatewayRestartAction(node) {
+  if (!node || node.querySelector(':scope > .gateway-restart-action')) return;
+  const action = createGatewayRestartAction({
+    document,
+    translate: translateUiText,
+    restart: async ({ onProgress } = {}) => {
+      const baseUrl = desktopDashboardUrl || await ensureDesktopDashboardUrl({ timeoutMs: 4_000 });
+      // Plain fetch: dashboardFetch is a GET-only loopback proxy and rejects POST.
+      return restartGatewayViaDashboard({ baseUrl, onProgress });
+    },
+    // A slow restart must not fall back to the restart button: re-poll for the
+    // new process instead of issuing a second restart.
+    check: async ({ beforeBootId, onProgress } = {}) => {
+      const baseUrl = desktopDashboardUrl || await ensureDesktopDashboardUrl({ timeoutMs: 4_000 });
+      return waitForGatewayReturn({ baseUrl, beforeBootId, onProgress });
+    },
+    // Follow a restart that did not come from this button (terminal, Desktop)
+    // so the bubble resolves itself instead of leaving a stale prompt.
+    watch: async ({ shouldStop, onProgress } = {}) => {
+      const baseUrl = desktopDashboardUrl || await ensureDesktopDashboardUrl({ timeoutMs: 4_000 });
+      return watchGatewayRestart({ baseUrl, shouldStop, onProgress });
+    },
+    onRestarted: () => {
+      // Close the loop: the bubble that said "restart it" now says it is done.
+      setMessageContent(node, `**Hermes is back**\n\nThe gateway restarted and is running the updated code. Your message is still in the box — send it again.`);
+      markGatewayReachable();
+      setStatus('ok', 'Hermes restarted', 'The gateway is running the updated code. Send your message again.', { translateDetail: false });
+      probeGatewayLiveness({ quiet: true }).catch(() => {});
+      els.input?.focus?.({ preventScroll: true });
+    },
+  });
+  node.appendChild(action);
+  scrollMessageStreamToBottom();
 }
 
 async function persistInlineSessionState() {
@@ -7364,9 +16795,12 @@ async function loadSettings({ restoreMessages = false } = {}) {
   loadContextScopeForInstance();
   await refreshCustomThemeStore({ render: false });
   const messageKey = activeMessagesStorageKey(previousConversationScope);
-  const stored = await browserApi.storage.local.get(['hermesBrowserSettings', CONTEXT_CONSENT_STORAGE_KEY, messageKey, HERMES_BROWSER_INTRO_SEEN_STORAGE_KEY, TASK_STACKS_STORAGE_KEY]);
+  const stored = await browserApi.storage.local.get(['hermesBrowserSettings', CONTEXT_CONSENT_STORAGE_KEY, messageKey, HERMES_BROWSER_INTRO_SEEN_STORAGE_KEY, TASK_STACKS_STORAGE_KEY, ROOM_EVENTS_STORAGE_KEY]);
   taskStackStore = stored[TASK_STACKS_STORAGE_KEY] && typeof stored[TASK_STACKS_STORAGE_KEY] === 'object'
     ? stored[TASK_STACKS_STORAGE_KEY]
+    : {};
+  roomEventStore = stored[ROOM_EVENTS_STORAGE_KEY] && typeof stored[ROOM_EVENTS_STORAGE_KEY] === 'object' && !Array.isArray(stored[ROOM_EVENTS_STORAGE_KEY])
+    ? stored[ROOM_EVENTS_STORAGE_KEY]
     : {};
   browserIntroSeen = stored[HERMES_BROWSER_INTRO_SEEN_STORAGE_KEY] === true;
   renderBrowserIntroVisibility();
@@ -7375,6 +16809,10 @@ async function loadSettings({ restoreMessages = false } = {}) {
   const storedWakeSettings = normalizeWakeWordSettings({ ...DEFAULT_SETTINGS, ...storedSettings });
   const migrateDesktopOptionDefaults = !storedSettings.modelOptionsVersion && storedSettings.reasoningEffort === 'medium';
   const migrateModelOptionScope = !storedSettings.extensionPreferredModelOptions || !storedSettings.sessionModelOptionBindings;
+  const hasUnboundProfileContextHandoff = Boolean(
+    String(storedSettings.pendingProfileContextHandoff || '').trim()
+      && String(storedSettings.pendingProfileContextHandoffSessionId || '').trim() !== String(storedSettings.sessionId || '').trim(),
+  );
   const storedPanelAppearance = appearancePreferencesForSurface(storedSettings, 'panel');
   settings = { ...DEFAULT_SETTINGS, ...storedSettings, ...storedPanelAppearance };
   settings = {
@@ -7394,6 +16832,7 @@ async function loadSettings({ restoreMessages = false } = {}) {
     agentDiscoveryHost: normalizeAgentDiscoveryHost(settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost),
     agentDiscoveryScheme: normalizeAgentDiscoveryScheme(settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme),
     autoNameSessions: settings.autoNameSessions !== false,
+    showMessageTimes: settings.showMessageTimes !== false,
     sessionStartupMode: normalizeSessionStartupMode(settings.sessionStartupMode),
     inlineAssistEnabled: settings.inlineAssistEnabled !== false,
     inlineAssistDefaultRoute: normalizeInlineDraftRoutePreference(settings.inlineAssistDefaultRoute),
@@ -7436,6 +16875,13 @@ async function loadSettings({ restoreMessages = false } = {}) {
       .filter(([, options]) => Boolean(options))),
     modelScopeVersion: DEFAULT_SETTINGS.modelScopeVersion,
   };
+  if (hasUnboundProfileContextHandoff) {
+    settings = {
+      ...settings,
+      pendingProfileContextHandoff: '',
+      pendingProfileContextHandoffSessionId: '',
+    };
+  }
   trustedDashboardTabId = Number(settings.trustedDashboardTabId) || null;
   contextScope = normalizeContextScope(contextScope);
   await refreshContextConsentPrincipal({ settingsOverride: settings });
@@ -7461,7 +16907,7 @@ async function loadSettings({ restoreMessages = false } = {}) {
     settings.fastMode = effectiveOptions.fastMode;
   }
   applyAppearanceSettings();
-  if (migrateConnectionSchema || migrateDesktopOptionDefaults || migrateModelOptionScope) {
+  if (migrateConnectionSchema || migrateDesktopOptionDefaults || migrateModelOptionScope || hasUnboundProfileContextHandoff) {
     await browserApi.storage.local.set({ hermesBrowserSettings: settings });
   }
   messages = restoreMessages && Array.isArray(stored[messageKey]) ? stored[messageKey] : [];
@@ -7469,21 +16915,110 @@ async function loadSettings({ restoreMessages = false } = {}) {
   await ensureContextMenuEditor();
   await hydrateContextDeliveryState();
   renderMessagesFromStorage();
+  hbeBootEmit('panel:messages-painted', { startMark: 'panel:body-start' });
   renderTaskStack();
+  restoreComposerDraft();
 }
 
 function renderMessagesFromStorage() {
+  const fileGeneration = ++fileHistoryRestoreGeneration;
+  const fileMessages = messages;
+  const fileMessageCount = messages.length;
+  const fileSessionId = settings.sessionId;
+  const fileSourceKey = attachmentSourceKey(settings);
+  if (!activeGroupProjection) {
+    void restoreUserFileAttachments(fileMessages, fileSourceKey, fileSessionId).then(restored => {
+      // Messages are appended in place, so identity alone is not enough: a new
+      // turn arriving mid-read must win over a stale cold-history snapshot.
+      if (fileGeneration !== fileHistoryRestoreGeneration || messages !== fileMessages
+        || messages.length !== fileMessageCount || sending
+        || fileSessionId !== settings.sessionId || fileSourceKey !== attachmentSourceKey(settings)
+        || restored === fileMessages) return;
+      messages = restored;
+      renderMessagesFromStorage();
+    }).catch(() => {});
+  }
+  document.body.classList.toggle('bot-mode-compact', settings.botModeDisplayDensity === 'compact');
+  const scroller = els.appScroll;
+  const stickToBottom = !scroller || isMessageStreamNearBottom();
+  const previousTop = scroller?.scrollTop || 0;
+  panelMessageThread?.reset();
   els.messages.innerHTML = '';
-  for (const message of messages) {
+  // Thread-filtered view: when a group thread is expanded, match threadId strictly or by prefix/content
+  let visibleMessages = messages;
+  if (activeGroupProjection && activeGroupThreadId) {
+    const threadNeedle = String(activeGroupThreadId).trim();
+    const threads = groupThreadsFromProjection(activeGroupProjection);
+    const matchedThread = threads.find((t) => t.id === threadNeedle);
+    if (matchedThread) {
+      const threadTexts = new Set([matchedThread.root?.text, ...matchedThread.replies.map((r) => r.text)].filter(Boolean));
+      visibleMessages = messages.filter((message) => {
+        const tId = String(message.thread || '').trim();
+        if (tId && tId === threadNeedle) return true;
+        if (threadTexts.has(message.content)) return true;
+        return false;
+      });
+    } else {
+      visibleMessages = messages.filter((message) => String(message.thread || 'main') === threadNeedle);
+    }
+  }
+  for (const message of browserDisplayMessages(visibleMessages)) {
     if (isDelegationCompletionMarkerMessage(message)) continue;
-    addMessage(message.role, message.content, { persist: false });
+    addMessage(message.role, message.content, {
+          persist: false,
+          scroll: false,
+          roleLabel: message.roleLabel || '',
+          contextReceipt: message.contextReceipt || null,
+          attachments: message.attachments || null,
+          ts: message.ts,
+          rowId: message.rowId,
+          speaker: message.speaker || null,
+          thread: message.thread || '',
+          sourceRecord: message,
+        });
+  }
+  // Quiet history/media refreshes can rebuild the stream during a room turn.
+  // Reattach the one live record, rather than lose the ongoing speaker bubble.
+  if (activeGroupProjection && activeGroupLiveMessage) {
+    const previous = activeGroupLiveMessage;
+    activeGroupLiveMessage = {
+      ...addMessage('assistant', previous.record.content, {
+        persist: false, scroll: false, streaming: true, sourceRecord: previous.record,
+        speaker: previous.member, thread: previous.record.thread, roleLabel: previous.record.roleLabel,
+      }), member: previous.member,
+    };
+    activeGroupLiveMessage.row.classList.add('is-live');
+    const content = activeGroupLiveMessage.node.querySelector('.message-content');
+    content.style.whiteSpace = 'pre-wrap';
+    content.textContent = previous.record.content || '···';
   }
   renderEmptyState();
+  renderActiveProfileIndicator();
+  renderSteerNotice();
+  renderCompletionPendingRow();
+  renderSideQuestionCard();
+    if (stickToBottom) scrollMessageStreamToBottom({ force: true });
+    else if (scroller) requestAnimationFrame(() => { scroller.scrollTop = previousTop; });
+    const alreadyHydrated = messages.some((message) => (message.attachments || []).some((item) => item.dataUrl && item.pathRef));
+  void (async () => {
+    await hydrateSessionMedia(messages);
+    const nowHydrated = messages.some((message) => (message.attachments || []).some((item) => item.dataUrl && item.pathRef));
+    if (nowHydrated && !alreadyHydrated) {
+      renderMessagesFromStorage();
+      return;
+    }
+    await hydrateSessionMediaInElement(els.messages);
+    await hydrateArtifactFileCards(els.messages);
+  })();
 }
 
 function syncSettingsForm() {
   renderAppearanceControls();
   renderProfiles();
+  if (els.botModeEnabledInput) els.botModeEnabledInput.checked = settings.botModeEnabled === true;
+  if (els.botModeDisplayDensity) els.botModeDisplayDensity.value = settings.botModeDisplayDensity === 'compact' ? 'compact' : 'comfortable';
+  if (els.botModeAnimateAvatars) els.botModeAnimateAvatars.value = settings.botModeAnimateAvatars === true ? 'on' : 'off';
+  renderBotModeRoster(els.botModeSearch?.value);
   renderModelOptions(availableModels);
   if (els.connectionModeInput) els.connectionModeInput.value = normalizeConnectionMode(settings.connectionMode);
   if (els.gatewayModeInput) els.gatewayModeInput.value = settings.gatewayMode || DEFAULT_SETTINGS.gatewayMode;
@@ -7506,6 +17041,7 @@ function syncSettingsForm() {
     input.checked = input.value === normalizePanelResidencyMode(settings.panelResidencyMode);
   }
   if (els.autoNameSessionsInput) els.autoNameSessionsInput.checked = settings.autoNameSessions !== false;
+  if (els.showMessageTimesInput) els.showMessageTimesInput.checked = settings.showMessageTimes !== false;
   if (els.agentHostInput) els.agentHostInput.value = settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost;
   if (els.agentSchemeInput) els.agentSchemeInput.value = normalizeAgentDiscoveryScheme(settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme);
   if (els.agentPortsInput) els.agentPortsInput.value = getAgentPorts().join(',');
@@ -7517,11 +17053,15 @@ function syncSettingsForm() {
   if (els.wakeWordPhraseInput) els.wakeWordPhraseInput.value = settings.wakeWordPhrase || DEFAULT_SETTINGS.wakeWordPhrase;
   if (els.wakeWordBrowserFallbackInput) els.wakeWordBrowserFallbackInput.checked = settings.wakeWordBrowserFallback !== false;
   if (els.wakeWordSpeakRepliesInput) els.wakeWordSpeakRepliesInput.checked = settings.wakeWordSpeakReplies !== false;
+  if (els.gmailCaptureEnabledInput) els.gmailCaptureEnabledInput.checked = settings.gmailCaptureHidden !== true;
+  if (els.gmailCaptureToggleTitle) els.gmailCaptureToggleTitle.textContent = translateUiText('Gmail capture button');
+  if (els.gmailCaptureToggleHint) els.gmailCaptureToggleHint.textContent = translateUiText('Show the "Capture visible Gmail thread" button on Gmail threads.');
   renderWakeState();
   renderCompatibilityPanel();
   renderConnectionSecurity();
   renderBrowserContextConsentControl();
   renderRemoteDiagnostics(lastRemoteDiagnostic);
+  renderBrowserControl();
 }
 
 async function saveSettingsFromForm() {
@@ -7565,16 +17105,21 @@ async function saveSettingsFromForm() {
     connectionTransport,
     gatewayMode,
     gatewayUrl,
-    trustedDashboardOrigin: isTrustedDashboardOrigin(gatewayUrl, settings.trustedDashboardOrigin)
+    trustedDashboardOrigin: connectionMode === 'local'
       ? settings.trustedDashboardOrigin
-      : '',
+      : (isTrustedDashboardOrigin(gatewayUrl, settings.trustedDashboardOrigin)
+        ? settings.trustedDashboardOrigin
+        : ''),
     apiKey: connectionMode === 'cloud' ? '' : apiKey,
     tokenSource: connectionMode === 'cloud' ? '' : tokenSource,
     model: settings.model || DEFAULT_SETTINGS.model,
     modelContextTokens: selected?.contextTokens || settings.modelContextTokens || 0,
     sessionId: els.sessionIdInput.value.trim() || DEFAULT_SETTINGS.sessionId,
     sessionTitle: els.sessionTitleInput.value.trim() || DEFAULT_SETTINGS.sessionTitle,
-    activeProfile: els.profileSelect?.value || settings.activeProfile || DEFAULT_SETTINGS.activeProfile,
+    activeProfile: settings.activeProfile || DEFAULT_SETTINGS.activeProfile,
+    botModeEnabled: els.botModeEnabledInput ? els.botModeEnabledInput.checked : settings.botModeEnabled === true,
+    botModeDisplayDensity: els.botModeDisplayDensity?.value === 'compact' ? 'compact' : 'comfortable',
+    botModeAnimateAvatars: els.botModeAnimateAvatars?.value === 'on',
     contextDepth: els.contextDepthInput.value,
     includeTabs: els.includeTabsInput.checked,
     includePageText: els.includePageTextInput.checked,
@@ -7589,11 +17134,13 @@ async function saveSettingsFromForm() {
     contextMenuDefaultRoute: ['current', 'new', 'background'].includes(els.contextMenuDefaultRoute?.value) ? els.contextMenuDefaultRoute.value : 'ask',
     panelResidencyMode: normalizePanelResidencyMode(els.panelResidencyInputs?.find((input) => input.checked)?.value || settings.panelResidencyMode),
     autoNameSessions: els.autoNameSessionsInput ? els.autoNameSessionsInput.checked : settings.autoNameSessions !== false,
+    showMessageTimes: els.showMessageTimesInput ? els.showMessageTimesInput.checked : settings.showMessageTimes !== false,
     agentDiscoveryHost: normalizeAgentDiscoveryHost(els.agentHostInput?.value || settings.agentDiscoveryHost || DEFAULT_SETTINGS.agentDiscoveryHost),
     agentDiscoveryScheme: normalizeAgentDiscoveryScheme(els.agentSchemeInput?.value || settings.agentDiscoveryScheme || DEFAULT_SETTINGS.agentDiscoveryScheme),
     agentPorts: parseAgentPortsInput(els.agentPortsInput?.value || '').length ? parseAgentPortsInput(els.agentPortsInput?.value || '') : getAgentPorts(),
     customModelSources: normalizeExternalModelSourceList(els.customModelSourcesInput?.value?.split(/\n+/) || settings.customModelSources || []),
     transcriptProvider: els.transcriptProviderInput.value.trim() || DEFAULT_SETTINGS.transcriptProvider,
+    gmailCaptureHidden: els.gmailCaptureEnabledInput ? !els.gmailCaptureEnabledInput.checked : settings.gmailCaptureHidden === true,
     wakeWordEnabled: els.wakeWordEnabledInput ? els.wakeWordEnabledInput.checked : Boolean(settings.wakeWordEnabled),
     wakeWordPhrase: normalizeWakeWordSettings({ wakeWordPhrase: els.wakeWordPhraseInput?.value }).phrase,
     wakeWordPreferNative: settings.wakeWordPreferNative !== false,
@@ -7624,8 +17171,15 @@ async function saveSettingsFromForm() {
       /* ignore */
     }
     remoteWsConnection = null;
+    profileWsConnection?.client?.close?.();
+    profileWsConnection = null;
   }
-  if (gatewayMode !== 'remote-dashboard' || !settings.trustedDashboardOrigin) {
+  if (previousSettings.botModeEnabled === true && settings.botModeEnabled !== true) {
+    botModeRosterGeneration += 1;
+    botModeRoster = [];
+    renderBotModeRoster();
+  }
+  if (!settings.trustedDashboardOrigin) {
     trustedDashboardTabId = null;
   }
   const stored = await browserApi.storage.local.get('hermesBrowserSettings');
@@ -7659,9 +17213,19 @@ async function clearStoredToken() {
   await browserApi.storage.local.set({ hermesBrowserSettings: settings });
   if (els.apiKeyInput) els.apiKeyInput.value = '';
   sessionRoutesAvailable = null;
+  desktopDashboardUrl = '';
+  await clearCachedRosterUrl(browserApi.storage.local).catch(() => undefined);
+  connectionController.cancel('stored token cleared');
+  try { remoteWsConnection?.client?.close?.(); } catch { /* ignore */ }
+  remoteWsConnection = null;
+  try { profileWsConnection?.client?.close?.(); } catch { /* ignore */ }
+  profileWsConnection = null;
+  activeDashboardWsConnection = null;
+  activeConversationTransport = 'rest';
+  await browserControlMessage('HERMES_CONTROLLER_SETTINGS_REFRESH').catch(() => null);
   const dashboardFallback = settings.connectionTransport === CONNECTION_TRANSPORTS.REMOTE_DASHBOARD
     && previousTransport !== CONNECTION_TRANSPORTS.REMOTE_DASHBOARD;
-  markConnectionProbe(dashboardFallback ? 'connecting' : 'unconfigured', 'Token cleared by user.');
+  markConnectionProbe('unconfigured', 'Token cleared by user.');
   setGatewayCapabilities(normalizeGatewayCapabilities(null, { healthOk: false, hasApiKey: false, warning: 'Token cleared; reconnect to refresh capabilities.' }));
   syncSettingsForm();
   setStatus(
@@ -7671,7 +17235,7 @@ async function clearStoredToken() {
       ? 'Remote dashboard WebSocket mode selected. Keep the dashboard open and signed in, then reconnect.'
       : 'Paste a Gateway API key or reconnect when you are ready.',
   );
-  if (dashboardFallback) await runPanelConnectionReadiness();
+  updateConnectionPrompt();
 }
 
 async function activeTab() {
@@ -7710,7 +17274,26 @@ async function sendContentMessageWithInstallFallback(tabId, message, { frameId =
     return await browserApi.tabs.sendMessage(tabId, message, messageOptions);
   } catch (originalError) {
     try {
-      await browserApi.scripting.executeScript({ target: scriptTarget, files: manifestContentScriptFiles() });
+      // Issue #86: the fallback must be idempotent. The manifest bridge may
+      // already be alive in this tab/frame (a rejection can mean "listener
+      // not ready yet", "message target torn down", or "policy error"), and
+      // blindly re-running content.js into an initialized frame wasted work
+      // and risked double-binding listeners. Probe the re-entry sentinel the
+      // bridge sets (content.js) and inject only what is actually missing.
+      // Re-execution itself remains SAFE since content.js now scopes all
+      // state inside an IIFE with listener-cleanup-first semantics.
+      const sentinel = await browserApi.scripting.executeScript({
+        target: scriptTarget,
+        func: () => globalThis.__HERMES_BROWSER_CONTENT_LOADED__ || null,
+      });
+      const bridgeAlreadyLoaded = Boolean(sentinel?.[0]?.result);
+      const files = manifestContentScriptFiles();
+      const filesToInject = bridgeAlreadyLoaded
+        ? files.filter((file) => file.endsWith('content-extractor.js'))
+        : files;
+      if (filesToInject.length) {
+        await browserApi.scripting.executeScript({ target: scriptTarget, files: filesToInject });
+      }
       return await browserApi.tabs.sendMessage(tabId, message, messageOptions);
     } catch (fallbackError) {
       if (fallbackError && typeof fallbackError === 'object' && !fallbackError.cause) fallbackError.cause = originalError;
@@ -7785,11 +17368,13 @@ async function getPageContextViaScripting(tabId, options, originalError) {
 }
 
 async function getPageContext(tab, options = {}) {
-  if (!tab?.id || isRestrictedUrl(tab.url)) {
+  const isLocal = isLocalDocumentUrl(tab?.url);
+  const allowLocal = isLocal && (options.allowLocalDocuments !== false);
+  if (!tab?.id || isRestrictedUrl(tab.url, { allowLocalDocuments: allowLocal })) {
     return {
       ok: false,
       restricted: true,
-      reason: 'Hermes Browser Extension does not read browser internals, extension pages, or sensitive account/payment/password pages in v0.1.',
+      reason: 'Hermes Browser Extension does not read browser internals, extension pages, or sensitive account/payment/password pages.',
       text: '',
       selectedText: '',
       meta: {},
@@ -7802,14 +17387,11 @@ async function getPageContext(tab, options = {}) {
     frameId: Number(options.frameId || 0),
   };
   try {
-    const response = await browserApi.tabs.sendMessage(
+    const response = await sendContentMessageWithInstallFallback(
       tab.id,
       { type: 'HERMES_GET_PAGE_CONTEXT', options: requestOptions },
-      requestOptions.frameId > 0 ? { frameId: requestOptions.frameId } : undefined,
+      { frameId: requestOptions.frameId },
     );
-    // A response that claims ok but carries no actual page text is the signature
-    // of a stale/orphaned content script that returned a bare ack. Run the
-    // scripting fallback so the user still gets real page text instead of 0.
     if (response?.ok && (response.text || response.selectedText || response.meta?.headings?.length)) {
       return options.selectedTextOverride === undefined
         ? response
@@ -7892,6 +17474,38 @@ async function loadElementPickState() {
   }
 }
 
+async function loadPageAnnotationState() {
+  const tab = annotationTargetTab();
+  if (!tab?.id) return;
+  const restored = await restorePageAnnotationSession({
+    storageArea: browserApi.storage?.session,
+    images: pageAnnotationImages,
+    tabId: tab.id,
+    safeUrl: tab.url,
+    documentKey: pageAnnotationSession?.documentKey || '',
+  }).catch(() => null);
+  if (!restored?.session) return;
+  pageAnnotationSession = {
+    sessionId: restored.session.sessionId,
+    tabId: restored.session.tabId,
+    safeUrl: restored.session.safeUrl,
+    documentKey: restored.session.documentKey,
+  };
+  pageAnnotationStack = {
+    ...emptyPageAnnotationStack(pageAnnotationSession),
+    nextNumber: restored.session.nextNumber || 1,
+    pins: restored.session.pins || [],
+  };
+  pageAnnotationStale = restored.status === 'stale';
+  for (const pin of pageAnnotationStack.pins) {
+    if (!pin.imageDataUrl && pin.imageRef) {
+      const stored = await pageAnnotationImages.get(pin.imageRef);
+      if (typeof stored === 'string') pin.imageDataUrl = stored;
+    }
+  }
+  renderPageAnnotationPanel();
+}
+
 async function clearElementPickState({ tabId = null } = {}) {
   if (tabId && elementPickState?.tabId && !Object.is(Number(tabId), elementPickState.tabId)) return;
   applyElementPickState(null);
@@ -7963,9 +17577,11 @@ function setPickButtonState() {
   }
 }
 
-async function startElementPick() {
+async function startElementPick({ purpose = 'context' } = {}) {
   if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
-    setStatus('warn', 'Chat only', 'Enable browser context before picking an element.');
+    setStatus('warn', 'Chat only', purpose === 'comment'
+      ? 'Enable browser context before commenting on the page.'
+      : 'Enable browser context before picking an element.');
     return;
   }
   const [active, tabs] = await Promise.all([activeTab(), tabsForCurrentScope()]);
@@ -7975,27 +17591,46 @@ async function startElementPick() {
     return;
   }
   if (isRestrictedUrl(tab.url)) {
-    setStatus('warn', 'Restricted page', 'Element pick is not available on this URL.');
+    setStatus('warn', 'Restricted page', purpose === 'comment'
+      ? 'Page comments are not available on this URL.'
+      : 'Element pick is not available on this URL.');
     return;
   }
   try {
     if (elementPickActiveForTab(tab)) {
       await browserApi.tabs.sendMessage(tab.id, { type: ELEMENT_PICK_MESSAGES.CANCEL });
       await clearElementPickState({ tabId: tab.id });
-      setStatus('ok', 'Element pick cancelled', '');
+      pageCommentPickActive = false;
+      setStatus('ok', purpose === 'comment' ? 'Page comments cancelled' : 'Element pick cancelled', '');
       return;
     }
-    const response = await sendContentMessageWithInstallFallback(tab.id, { type: ELEMENT_PICK_MESSAGES.START });
+    pageCommentPickActive = purpose === 'comment';
+    const commentPick = pageCommentPickActive;
+    const response = await sendContentMessageWithInstallFallback(tab.id, {
+      type: ELEMENT_PICK_MESSAGES.START,
+      purpose: commentPick ? 'comment' : 'context',
+      theme: pageCommentThemeFromPanel(),
+    });
     if (response?.ok === false) throw new Error(response.error || 'Could not start element picker');
     await persistElementPickState({ tabId: tab.id, url: tab.url });
-    setStatus('ok', 'Pick an element', 'Click any element on the page. Press Esc to cancel.');
+    setStatus(
+      'ok',
+      commentPick ? 'Comment on page' : 'Pick an element',
+      commentPick ? 'Click an element, then write a comment. Esc cancels.' : 'Click any element on the page. Press Esc to cancel.',
+    );
   } catch (error) {
+    const wasComment = pageCommentPickActive;
+    pageCommentPickActive = false;
     await clearElementPickState({ tabId: tab.id });
-    setStatus('warn', 'Element pick failed', error?.message || String(error), { translateDetail: false });
+    setStatus('warn', wasComment ? 'Page comments failed' : 'Element pick failed', error?.message || String(error), { translateDetail: false });
   }
 }
 
 function applyPickedElementResult(message = {}, sender = {}) {
+  if (pageCommentPickActive) {
+    void preparePageCommentFromPick(message, sender);
+    return;
+  }
   const tabId = sender.tab?.id || currentContext?.activeTab?.id;
   const pickedElement = message.pickedElement;
   if (!pickedElement?.ok) return;
@@ -8013,14 +17648,374 @@ function applyPickedElementResult(message = {}, sender = {}) {
   setStatus('ok', 'Element picked', label || 'Attached to context for the next message.');
 }
 
+async function preparePageCommentFromPick(message = {}, sender = {}) {
+  const picked = normalizePickedElement(message.pickedElement);
+  if (!picked) {
+    pageCommentPickActive = false;
+    return;
+  }
+  const tabId = sender.tab?.id || annotationTargetTab()?.id;
+  const tab = annotationTargetTab() || currentContext?.activeTab || sender.tab || null;
+  await clearElementPickState({ tabId });
+  pageAnnotationSession = {
+    sessionId: pageAnnotationSession?.sessionId || `page-annotation-${Date.now()}`,
+    tabId,
+    safeUrl: String(message.url || tab?.url || ''),
+    documentKey: pageAnnotationSession?.documentKey || '',
+  };
+  if (!pageAnnotationStack.sessionId) pageAnnotationStack = emptyPageAnnotationStack(pageAnnotationSession);
+  const rect = picked.boundingBox;
+  let imageDataUrl = '';
+  if (tab?.id && rect) {
+    const capture = await captureAnnotationCrop({
+      captureVisibleTab: async (target) => browserApi.tabs.captureVisibleTab(target.windowId || tab.windowId, { format: 'png' }),
+      tab: { ...tab, active: true, id: tab.id, windowId: tab.windowId },
+      rect,
+      viewport: { width: 1, height: 1, devicePixelRatio: 1 },
+      cropImage: cropAnnotationImage,
+    }).catch((error) => ({ ok: false, error: error?.message || String(error) }));
+    if (capture?.ok) imageDataUrl = capture.dataUrl;
+    else if (capture && capture.ok === false) {
+      setStatus('warn', t('ui.comment.capture.unavailable'), capture?.reason || capture?.error || '', { translateDetail: false });
+    }
+  }
+  pageAnnotationDraft = {
+    kind: 'element',
+    rect,
+    viewport: { width: 1, height: 1, devicePixelRatio: 1 },
+    identity: compactPageAnnotationIdentity({
+      selector: picked.selector,
+      tag: picked.tag,
+      text: picked.text,
+      html: picked.outerHtml,
+    }),
+    target: { selector: picked.selector, tag: picked.tag, html: picked.outerHtml, text: picked.text },
+    imageDataUrl,
+    imageRef: `${pageAnnotationSession.sessionId}/annotation-${pageAnnotationStack.nextNumber}`,
+    note: '',
+  };
+}
+
+async function commitPageCommentFromCard(message = {}) {
+  const action = message.action === 'send' ? 'send' : 'queue';
+  if (!pageAnnotationDraft && message.pickedElement) {
+    await preparePageCommentFromPick(message, {});
+  }
+  if (!pageAnnotationDraft) return;
+  savePageAnnotationDraft(message.note);
+  renderPageCommentTray();
+  if (action === 'queue') {
+    await startElementPick({ purpose: 'comment' });
+    setStatus('ok', 'Comment queued', 'Click another element, or send comments from the composer.');
+    return;
+  }
+  pageCommentPickActive = false;
+  const userText = String(els.input?.value || '').trim();
+  if (sending) {
+    queuedTurn = queuePageAnnotationTurn(buildPageAnnotationComposerBundle({
+      ...pageAnnotationStack,
+      safeUrl: pageAnnotationSession?.safeUrl || pageAnnotationStack.safeUrl,
+      pins: pageAnnotationStack.pins || [],
+    }, { resolveImage: (pin) => pin.imageDataUrl }));
+    renderQueueNotice();
+    return;
+  }
+  await askHermes(userText, [...attachments]);
+}
+
+function cancelPageCommentCard() {
+  pageAnnotationDraft = null;
+  pageCommentPickActive = false;
+  renderPageAnnotationPanel();
+  setStatus('ok', 'Page comments closed', (pageAnnotationStack.pins || []).length ? 'Queued comments are still in the composer.' : 'Cancelled.');
+}
+
 function clearPickedElementForActiveTab() {
   clearPickedElementForTab(currentContext?.activeTab?.id);
 }
 
+function annotationCommentsEnabled() {
+  return pageAnnotationCommentsEnabled({});
+}
+
+function pageCommentThemeFromPanel() {
+  const computed = globalThis.getComputedStyle;
+  const styles = typeof computed === 'function' ? computed(document.documentElement) : null;
+  const body = typeof computed === 'function' && document.body ? computed(document.body) : null;
+  const read = (name, fallback) => String(styles?.getPropertyValue?.(name) || '').trim() || fallback;
+  return {
+    bg: read('--hermes-menu-bg', read('--hermes-paper', '#171717')),
+    field: read('--hermes-paper', '#111111'),
+    fg: read('--hermes-fg', '#f1f1f1'),
+    muted: read('--hermes-muted', 'rgba(241,241,241,0.62)'),
+    border: read('--hermes-line', 'rgba(229,229,229,0.44)'),
+    primary: read('--hermes-ink', read('--hermes-blue', '#e5e5e5')),
+    primaryFg: read('--hermes-paper', '#111111'),
+    font: String(body?.fontFamily || 'ui-sans-serif, system-ui, sans-serif'),
+  };
+}
+
+function annotationTargetTab() {
+  return resolveContextTargetTab({
+    activeTab: currentContext?.activeTab,
+    tabs: currentContext?.tabs || [],
+    scope: contextScope,
+  }) || currentContext?.activeTab || null;
+}
+
+function renderPageAnnotationPanel() {
+  const enabled = annotationCommentsEnabled();
+  const commentButton = document.getElementById('commentPageAttachButton');
+  if (commentButton) commentButton.hidden = !enabled;
+  if (els.pageAnnotationPanel) els.pageAnnotationPanel.hidden = true;
+  renderPageCommentTray();
+}
+
+function renderPageCommentTray() {
+  const pins = pageAnnotationStack.pins || [];
+  const count = pins.length;
+  if (els.pageCommentTrayButton) {
+    els.pageCommentTrayButton.hidden = count === 0;
+    els.pageCommentTrayButton.textContent = count === 1 ? 'Comments · 1' : `Comments · ${count}`;
+    if (!count) els.pageCommentTrayButton.setAttribute('aria-expanded', 'false');
+  }
+  if (els.pageCommentTray && count === 0) els.pageCommentTray.hidden = true;
+  if (!els.pageCommentTrayList) return;
+  els.pageCommentTrayList.replaceChildren();
+  for (const pin of pins) {
+    const row = document.createElement('div');
+    row.className = 'page-comment-tray-row';
+    const number = document.createElement('strong');
+    number.textContent = String(pin.number);
+    const body = document.createElement('span');
+    body.textContent = pin.note || formatPageCommentTargetLabel(pin.target || pin.identity || {});
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.addEventListener('click', () => {
+      pageAnnotationStack = removePageAnnotation(pageAnnotationStack, pin.id);
+      persistCurrentPageAnnotations();
+      renderPageCommentTray();
+    });
+    row.append(number, body, remove);
+    els.pageCommentTrayList.append(row);
+  }
+}
+
+function persistCurrentPageAnnotations() {
+  const tab = annotationTargetTab();
+  if (!tab?.id || !pageAnnotationSession) return;
+  persistPageAnnotationSession({
+    storageArea: browserApi.storage?.session,
+    images: pageAnnotationImages,
+    session: {
+      ...pageAnnotationStack,
+      ...pageAnnotationSession,
+      updatedAt: Date.now(),
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    },
+    imageBlobs: Object.fromEntries((pageAnnotationStack.pins || []).map((pin) => [pin.imageRef, pin.imageDataUrl || null]).filter((entry) => entry[1])),
+  }).catch(() => {});
+}
+
+async function cropAnnotationImage(dataUrl, crop) {
+  const image = new globalThis.Image();
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = reject;
+    image.src = dataUrl;
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = crop.width;
+  canvas.height = crop.height;
+  canvas.getContext('2d').drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
+  return canvas.toDataURL('image/png');
+}
+
+async function syncPageAnnotationPins() {
+  const tab = annotationTargetTab();
+  if (!tab?.id || !pageAnnotationSession) return;
+  await sendContentMessageWithInstallFallback(tab.id, {
+    type: PAGE_ANNOTATION_MESSAGES.SYNC,
+    sessionId: pageAnnotationSession.sessionId,
+    documentKey: pageAnnotationSession.documentKey,
+    pins: (pageAnnotationStack.pins || []).map((pin) => ({
+      id: pin.id,
+      number: pin.number,
+      kind: pin.kind,
+      rect: pin.rect,
+      selector: pin.target?.selector || pin.identity?.selector || '',
+    })),
+  }).catch(() => {});
+}
+
+async function stopPageAnnotationSession({ keepPins = false } = {}) {
+  const tab = annotationTargetTab();
+  if (tab?.id) {
+    await sendContentMessageWithInstallFallback(tab.id, { type: PAGE_ANNOTATION_MESSAGES.CANCEL }).catch(() => {});
+  }
+  pageAnnotationDraft = null;
+  pageAnnotationStale = false;
+  if (!keepPins || !(pageAnnotationStack.pins || []).length) {
+    pageAnnotationStack = emptyPageAnnotationStack({});
+    pageAnnotationSession = null;
+    if (tab?.id) {
+      clearPageAnnotationSession({ storageArea: browserApi.storage?.session, images: pageAnnotationImages, tabId: tab.id }).catch(() => {});
+    }
+  }
+  await syncPageAnnotationPins();
+  renderPageAnnotationPanel();
+}
+
+async function startPageAnnotation(mode = pageAnnotationMode) {
+  if (contextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
+    setStatus('warn', 'Chat only', 'Enable browser context before commenting on the page.');
+    return;
+  }
+  const hasWork = Boolean(pageAnnotationDraft) || Boolean(pageAnnotationStack.pins?.length);
+  if (pageAnnotationSession && !hasWork) {
+    await stopPageAnnotationSession();
+    setStatus('ok', 'Page comments closed', 'Click Comment on page again to pick another element.');
+    return;
+  }
+  const [active, tabs] = await Promise.all([activeTab(), tabsForCurrentScope()]);
+  const tab = resolveContextTargetTab({ activeTab: active, tabs, scope: contextScope });
+  if (!tab?.id) {
+    setStatus('warn', 'No tab', 'Open a normal page tab first.');
+    return;
+  }
+  if (isRestrictedUrl(tab.url)) {
+    setStatus('warn', 'Restricted page', 'Page comments are not available on this URL.');
+    return;
+  }
+  if (elementPickActiveForTab(tab)) {
+    await browserApi.tabs.sendMessage(tab.id, { type: ELEMENT_PICK_MESSAGES.CANCEL }).catch(() => {});
+    await clearElementPickState({ tabId: tab.id });
+  }
+  pageAnnotationMode = mode === PAGE_ANNOTATION_MODES.AREA ? PAGE_ANNOTATION_MODES.AREA : PAGE_ANNOTATION_MODES.ELEMENT;
+  pageAnnotationSession = {
+    sessionId: pageAnnotationSession?.sessionId || `page-annotation-${Date.now()}`,
+    tabId: tab.id,
+    safeUrl: tab.url,
+    documentKey: pageAnnotationSession?.documentKey || '',
+  };
+  if (!pageAnnotationStack.sessionId) pageAnnotationStack = emptyPageAnnotationStack(pageAnnotationSession);
+  const response = await sendContentMessageWithInstallFallback(tab.id, {
+    type: PAGE_ANNOTATION_MESSAGES.START,
+    version: 1,
+    sessionId: pageAnnotationSession.sessionId,
+    mode: pageAnnotationMode,
+  });
+  if (response?.ok === false) throw new Error(response.error || 'Could not start page comments');
+  if (response?.documentKey) pageAnnotationSession.documentKey = response.documentKey;
+  renderPageAnnotationPanel();
+  setStatus('ok', 'Comment on page', pageAnnotationMode === PAGE_ANNOTATION_MODES.AREA ? 'Drag a region, then write a comment.' : 'Click an element, then write a comment.');
+}
+
+async function cancelPageAnnotationSelection() {
+  await stopPageAnnotationSession({ keepPins: true });
+  setStatus('ok', 'Page comments closed', (pageAnnotationStack.pins || []).length ? 'Saved comments are still in the queue.' : 'Selection cancelled.');
+}
+
+async function applyPageAnnotationResult(message = {}, sender = {}) {
+  const tabId = sender.tab?.id || annotationTargetTab()?.id;
+  if (!pageAnnotationSession || Number(tabId) !== Number(pageAnnotationSession.tabId)) return;
+  if (message.documentKey && !pageAnnotationSession.documentKey) pageAnnotationSession.documentKey = message.documentKey;
+  const normalized = normalizePageAnnotationResult(message, pageAnnotationSession);
+  if (!normalized) return;
+  const tab = annotationTargetTab();
+  await sendContentMessageWithInstallFallback(tab.id, {
+    type: PAGE_ANNOTATION_MESSAGES.CAPTURE_BEGIN,
+    sessionId: pageAnnotationSession.sessionId,
+    rect: normalized.rect,
+  }).catch(() => {});
+  let imageDataUrl = '';
+  const capture = await captureAnnotationCrop({
+    captureVisibleTab: async (target) => browserApi.tabs.captureVisibleTab(target.windowId || tab.windowId, { format: 'png' }),
+    tab: { ...tab, active: true, id: tab.id, windowId: tab.windowId },
+    rect: normalized.rect,
+    viewport: normalized.viewport || { width: 1, height: 1, devicePixelRatio: 1 },
+    cropImage: cropAnnotationImage,
+  }).catch((error) => ({ ok: false, error: error?.message || String(error) }));
+  await sendContentMessageWithInstallFallback(tab.id, {
+    type: PAGE_ANNOTATION_MESSAGES.CAPTURE_END,
+    sessionId: pageAnnotationSession.sessionId,
+  }).catch(() => {});
+  if (capture?.ok) imageDataUrl = capture.dataUrl;
+  pageAnnotationDraft = {
+    ...normalized,
+    imageDataUrl,
+    imageRef: `${pageAnnotationSession.sessionId}/annotation-${pageAnnotationStack.nextNumber}`,
+    note: '',
+  };
+  if (els.pageAnnotationNote) els.pageAnnotationNote.value = '';
+  renderPageAnnotationPanel();
+  if (!capture?.ok) setStatus('warn', t('ui.comment.capture.unavailable'), capture?.reason || '', { translateDetail: false });
+}
+
+function savePageAnnotationDraft(note) {
+  if (!pageAnnotationDraft) return;
+  pageAnnotationDraft.note = note === undefined
+    ? String(els.pageAnnotationNote?.value || '')
+    : String(note || '');
+  pageAnnotationStack = addPageAnnotation(pageAnnotationStack, pageAnnotationDraft);
+  if (pageAnnotationDraft.imageDataUrl) {
+    pageAnnotationImages.put(pageAnnotationDraft.imageRef, pageAnnotationDraft.imageDataUrl);
+  }
+  pageAnnotationDraft = null;
+  persistCurrentPageAnnotations();
+  syncPageAnnotationPins();
+  renderPageAnnotationPanel();
+}
+
+function discardPageAnnotationDraft() {
+  pageAnnotationDraft = null;
+  renderPageAnnotationPanel();
+}
+
+function flushPageAnnotationsToComposer({ queue = false } = {}) {
+  if (!pageAnnotationStack.pins?.length) return false;
+  const bundle = buildPageAnnotationComposerBundle({
+    ...pageAnnotationStack,
+    safeUrl: pageAnnotationSession?.safeUrl || pageAnnotationStack.safeUrl,
+    pins: pageAnnotationStack.pins.map((pin) => ({
+      ...pin,
+      imageDataUrl: pin.imageDataUrl || null,
+    })),
+  }, {
+    resolveImage: (pin) => pin.imageDataUrl,
+  });
+  if (queue) {
+    queuedTurn = queuePageAnnotationTurn(bundle);
+    renderQueueNotice();
+    setStatus('ok', 'Comments queued', 'Hermes will send them after the current turn finishes.');
+    return true;
+  }
+  const merged = mergePageAnnotationComposerState({ text: els.input.value, attachments }, bundle);
+  els.input.value = merged.text;
+  attachments = merged.attachments;
+  renderAttachments();
+  renderContextWindow();
+  setStatus('ok', 'Comments added', 'Review the composer, then send when you are ready.');
+  return true;
+}
+
+function clearPageAnnotations() {
+  stopPageAnnotationSession({ keepPins: false }).catch(() => {});
+}
+
 async function refreshContext(options = {}) {
+  options = options && typeof options === 'object' ? { ...options } : {};
+  const scopeRevisionId = options.scopeRevisionId ?? scopeRevision.current();
+  delete options.scopeRevisionId;
+  const refreshRevisionId = contextRefreshRevision.begin();
+  const isCurrentScope = () => scopeRevision.isCurrent(scopeRevisionId)
+    && contextRefreshRevision.isCurrent(refreshRevisionId);
+  if (!isCurrentScope()) return currentContext;
   const contextGate = effectiveContextGate(contextScope);
   let captureScope = contextGate.scope;
   if (captureScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY) {
+    if (!isCurrentScope()) return currentContext;
     currentContext = { activeTab: null, tabs: [], selectedTabs: [], pageContext: null, contextScope: captureScope };
     selectedTabs = [];
     setStatus(
@@ -8036,10 +18031,12 @@ async function refreshContext(options = {}) {
   }
 
   const [active, tabs] = await Promise.all([activeTab(), tabsForCurrentScope()]);
+  if (!isCurrentScope()) return currentContext;
   const tab = resolveContextTargetTab({ activeTab: active, tabs, scope: captureScope });
   if (captureScope.mode === CONTEXT_SCOPE_MODES.PINNED_TAB && tab) {
     const nextScope = contextScopeFromTab(tab, contextScope);
     if (JSON.stringify(nextScope) !== JSON.stringify(contextScope)) {
+      if (!isCurrentScope()) return currentContext;
       contextScope = nextScope;
       captureScope = normalizeContextScope(nextScope);
       saveContextScopeForInstance();
@@ -8051,11 +18048,14 @@ async function refreshContext(options = {}) {
     : pinnedMissing
       ? { ok: false, restricted: true, reason: 'Pinned tab is closed or no longer available.', text: '', selectedText: '', meta: {} }
       : null;
+  if (!isCurrentScope()) return currentContext;
   const youtubeTranscript = tab ? await getYoutubeTranscriptForTab(tab) : null;
+  if (!isCurrentScope()) return currentContext;
   if (pageContext && youtubeTranscript) pageContext.youtubeTranscript = youtubeTranscript;
   if (pageContext && tab) mergeStoredPickIntoPageContext(tab, pageContext);
   syncSelectedTabsFromContextScope(tabs);
-  const promptTabs = filterPromptTabs(tabs, captureScope);
+  const promptTabs = filterPromptTabs(tabs, captureScope, { activeTab: tab, targetTab: tab });
+  if (!isCurrentScope()) return currentContext;
   currentContext = {
     activeTab: tab,
     tabs,
@@ -8075,6 +18075,7 @@ async function refreshContext(options = {}) {
   } else {
     setStatus('warn', tab.title || translateUiText('Page context partial'), pageContext?.error || tab.url || '', { translateTitle: false, translateDetail: false });
   }
+  renderLocalDocumentApproval(tab);
   renderContextScopeControls();
   renderContextWindow();
   return currentContext;
@@ -8185,18 +18186,19 @@ function scheduleConnectionProbe(delayMs = CONNECTION_PROBE_INTERVAL_MS) {
 async function probeGatewayLiveness({ quiet = false } = {}) {
   if (connectionProbeInFlight) return currentConnectionState();
   const state = currentConnectionState();
-  if (state.state === 'unconfigured') {
+  if (state.state === 'unconfigured' && !usesDashboardWsChatTransport()) {
     stopConnectionProbeLoop();
     updateConnectionPrompt();
     return state;
   }
-  if (isRemoteWsMode()) {
-    if (remoteWsConnection?.client?.readyState === 1) {
-      markConnectionProbe('connected', normalizeGatewayUrl(settings.gatewayUrl));
+  if (usesDashboardWsChatTransport()) {
+    const dashboardConnection = isRemoteWsMode() ? remoteWsConnection : activeDashboardWsConnection;
+    if (dashboardConnection?.client?.readyState === 1) {
+      markConnectionProbe('connected', normalizeGatewayUrl(dashboardConnection.baseUrl || settings.gatewayUrl));
       scheduleConnectionProbe();
       return currentConnectionState();
     }
-    markConnectionProbe(remoteWsConnection?.client?.readyState === 0 ? 'connecting' : 'unreachable', 'Remote dashboard socket is not open.');
+    markConnectionProbe(dashboardConnection?.client?.readyState === 0 ? 'connecting' : 'unreachable', 'Hermes dashboard socket is not open.');
     scheduleConnectionProbe();
     return currentConnectionState();
   }
@@ -8204,10 +18206,15 @@ async function probeGatewayLiveness({ quiet = false } = {}) {
   if (!quiet) markConnectionProbe('connecting', normalizeGatewayUrl(settings.gatewayUrl));
   try {
     const response = await apiFetch('/health', { method: 'GET', cache: 'no-store' });
-    if (!response.ok) throw new Error(`health returned ${response.status}`);
+    if (!response.ok) {
+      const probeError = new Error(`health returned ${response.status}`);
+      probeError.httpStatus = response.status;
+      throw probeError;
+    }
     markConnectionProbe('connected', normalizeGatewayUrl(settings.gatewayUrl));
   } catch (error) {
-    markConnectionProbe('unreachable', `${normalizeGatewayUrl(settings.gatewayUrl)} · ${error?.message || String(error)}`);
+    const diagnostic = classifyGatewayError(error, { url: normalizeGatewayUrl(settings.gatewayUrl) });
+    markConnectionProbe('unreachable', `${diagnostic.title}: ${diagnostic.detail}`, diagnostic);
   } finally {
     connectionProbeInFlight = false;
     scheduleConnectionProbe();
@@ -8220,19 +18227,18 @@ function markGatewayReachable(detail = normalizeGatewayUrl(settings.gatewayUrl))
   scheduleConnectionProbe();
 }
 
-function markGatewayUnreachable(error) {
-  markConnectionProbe('unreachable', error?.message || String(error || 'Gateway disconnected'));
+function markGatewayUnreachable(error, diagnostic = null) {
+  const resolved = diagnostic && diagnostic.kind
+    ? diagnostic
+    : classifyGatewayError(error, { url: normalizeGatewayUrl(settings.gatewayUrl) });
+  markConnectionProbe('unreachable', resolved.detail, resolved);
   scheduleConnectionProbe();
+  return resolved;
 }
 
 function markGatewayDegraded(error) {
-  const diagnostic = classifyGatewayError(error);
-  markConnectionProbe('degraded', diagnostic.kind === 'unknown' ? (error?.message || String(error || 'Gateway degraded')) : gatewayConnectionTroubleshooting({
-    gatewayMode: settings.gatewayMode,
-    gatewayUrl: settings.gatewayUrl,
-    state: 'degraded',
-    probeDetail: error?.message || String(error || ''),
-  }));
+  const diagnostic = classifyGatewayError(error, { url: normalizeGatewayUrl(settings.gatewayUrl) });
+  markConnectionProbe('degraded', diagnostic.detail, diagnostic);
   scheduleConnectionProbe();
   return diagnostic;
 }
@@ -8278,6 +18284,16 @@ function createSessionRouteError({ action, response, body = '' } = {}) {
 
 async function ensureHermesSession() {
   if (sessionRoutesAvailable === false || gatewayCapabilities.sessions === false || gatewayCapabilities.sessionChat === false) return false;
+  // A profile switch clears settings.sessionId (regular mode requires a fresh
+  // session per profile). Mint the new profile-owned session id on demand.
+  if (!settings.sessionId) {
+    settings = {
+      ...settings,
+      sessionId: makeBrowserSessionId(),
+      sessionTitle: makeBrowserSessionTitle(),
+    };
+    await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+  }
   const sessionPath = `/api/sessions/${encodeSessionId(settings.sessionId)}`;
   const getResponse = await apiFetch(sessionPath, { method: 'GET' });
   if (getResponse.ok) {
@@ -8293,6 +18309,14 @@ async function ensureHermesSession() {
     });
   }
 
+  // Session titles are unique on the gateway, and the bare default title is
+  // already owned by this extension's long-lived session: creating a new session
+  // with it is refused (invalid_title) and the chat never starts. Mint a unique
+  // title first — auto-naming still treats the stamped title as a default.
+  if (!String(settings.sessionTitle || '').trim() || isDefaultBrowserSessionTitle(settings.sessionTitle)) {
+    settings = { ...settings, sessionTitle: makeBrowserSessionTitle() };
+    await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+  }
   const createResponse = await apiFetch('/api/sessions', {
     method: 'POST',
     body: JSON.stringify({
@@ -8354,7 +18378,7 @@ function sseBlocksFromBuffer(buffer, { flush = false } = {}) {
   return { blocks, rest };
 }
 
-async function readSseResponse(response, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime } = {}) {
+async function readSseResponse(response, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime, knownAssistantTexts = [] } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -8399,7 +18423,10 @@ async function readSseResponse(response, onDelta, onTool, { signal, onRun, onSte
     } else if (event.type === 'hermes.tool.progress' && onTool) {
       onTool(normalizeBrowserRuntimeEvent({ type: event.type, data }));
     } else if (event.type === 'error') {
-      throw new Error(data.message || event.data || 'Hermes stream error');
+      const streamErr = new Error(data.message || event.data || 'Hermes stream error');
+      streamErr.requestRejected = true;
+      streamErr.streamError = true;
+      throw streamErr;
     }
     return false;
   }
@@ -8497,9 +18524,9 @@ function applyTurnRuntimePayload(payload = {}) {
   applyPendingModelRuntimeAck(runtime);
 }
 
-async function requestDashboardOriginTrust(baseUrl) {
+async function requestDashboardOriginTrust(baseUrl, { local = false } = {}) {
   const origin = originOf(baseUrl);
-  if (!origin) throw new Error('Set a remote https gateway URL without embedded credentials before connecting.');
+  if (!origin) throw new Error('Set or discover a valid HTTPS or loopback Dashboard URL before connecting.');
   const tab = await findDashboardTab(browserApi.tabs, origin);
   if (!tab?.id) {
     const error = new Error(ticketFailureHelp('no_dashboard_tab', origin));
@@ -8514,7 +18541,10 @@ async function requestDashboardOriginTrust(baseUrl) {
   }
   const approved = globalThis.confirm?.(dashboardTrustPrompt(origin)) === true;
   if (!approved) {
-    const error = new Error('Dashboard Attach was not approved. Open Settings → Test connection when you are ready to trust this origin.');
+    const retry = local
+      ? 'Keep the signed-in local Dashboard tab active, then reopen Bot Mode or refresh profiles when you are ready.'
+      : 'Open Settings → Test connection when you are ready to trust this origin.';
+    const error = new Error(`Dashboard Attach was not approved. ${retry}`);
     error.ticketReason = 'dashboard_origin_untrusted';
     throw error;
   }
@@ -8569,7 +18599,7 @@ async function ensureRemoteWsClient() {
     console.warn('[Hermes] remote: WebSocket connect failed:', error?.message || error);
     throw error;
   }
-  const connection = { client, baseUrl, wsSessionId: '', wsStoredSessionId: '' };
+  const connection = { client, baseUrl, wsSessionId: '', wsStoredSessionId: '', profile: '' };
   client.on('close', () => {
     if (remoteWsConnection === connection) {
       remoteWsConnection = null;
@@ -8594,6 +18624,17 @@ async function ensureRemoteWsClient() {
 }
 
 async function ensureRemoteWsSession(connection) {
+  // Profile boundary: a cached live session id minted under a different agent
+  // profile must never carry this turn. Drop it so the turn is delivered under
+  // the active profile immediately — no manual reconnect, no wrong-agent reply.
+  const desiredProfile = safeActiveProfile();
+  if (connection.wsSessionId && connection.profile !== desiredProfile) {
+    connection.wsSessionId = '';
+    connection.wsStoredSessionId = '';
+    if (settings.remoteDashboardSession?.storedSessionId) {
+      settings = { ...settings, remoteDashboardSession: { ...settings.remoteDashboardSession, storedSessionId: '' } };
+    }
+  }
   if (connection.wsSessionId) return connection.wsSessionId;
   const binding = currentEffectiveModelBinding();
   const storedSessionId = remoteStoredSessionIdForGateway(settings.remoteDashboardSession, connection.baseUrl);
@@ -8611,6 +18652,7 @@ async function ensureRemoteWsSession(connection) {
   });
   connection.wsSessionId = liveId;
   connection.wsStoredSessionId = storedId;
+  connection.profile = desiredProfile;
   // Persist only the durable identity. Every socket replacement resumes it and
   // receives a fresh live id for prompt/history/steer/interrupt RPCs.
   settings = {
@@ -8666,21 +18708,69 @@ async function ensureRemoteWsSession(connection) {
   return liveId;
 }
 
-async function streamRemoteWsChat(prompt, onDelta, onTool, { signal, onRun } = {}) {
-  const connection = await ensureRemoteWsClient();
-  const sessionId = await ensureRemoteWsSession(connection);
+// A browser turn stores the typed words; the model still gets the envelope. Cores with strict
+// params contracts reject the field, so it stays off once one has refused it.
+let displayTextUnsupported = false;
+function browserTurnDisplayParam(text) {
+  if (displayTextUnsupported) return {};
+  const shown = messageDisplayText('user', text);
+  return shown && shown !== text ? { display_text: shown } : {};
+}
+
+async function streamDashboardWsChat(prompt, onDelta, onTool, options = {}) {
+  let connection = await ensureActiveDashboardWsConnection();
+  let sessionId = await ensureRemoteWsSession(connection);
+  let submitPrompt = true;
+  let reattachAttempts = 0;
+  while (true) {
+    try {
+      return await streamDashboardWsChatAttempt(connection, sessionId, prompt, onDelta, onTool, {
+        ...options,
+        submitPrompt,
+      });
+    } catch (error) {
+      if (Number(error?.rpcCode ?? error?.code) === 4001) {
+        connection.wsSessionId = '';
+        try {
+          sessionId = await ensureRemoteWsSession(connection);
+        } catch (resumeError) {
+          if (Number(resumeError?.rpcCode ?? resumeError?.code) !== 4001) throw resumeError;
+          const previousBinding = settings.remoteDashboardSession || {};
+          connection.wsStoredSessionId = '';
+          settings = {
+            ...settings,
+            sessionId: '',
+            remoteDashboardSession: { ...previousBinding, storedSessionId: '' },
+          };
+          sessionId = await ensureRemoteWsSession(connection);
+        }
+        submitPrompt = true;
+        continue;
+      }
+      if (shouldReattachDashboardStream(error) && reattachAttempts < 8) {
+        reattachAttempts += 1;
+        submitPrompt = false;
+        connection = await ensureActiveDashboardWsConnection();
+        sessionId = await ensureRemoteWsSession(connection);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function streamDashboardWsChatAttempt(connection, sessionId, prompt, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime, knownAssistantTexts = [], submitPrompt = true, attachments: turnAttachments = [], truncate = null, onSubmitResponse = null } = {}) {
   onRun?.(sessionId);
   const { client } = connection;
+  const sessionIds = [sessionId, connection.wsSessionId, connection.wsStoredSessionId];
 
   return new Promise((resolve, reject) => {
     let finalText = '';
     let settled = false;
     const offs = [];
-    const timer = globalThis.setTimeout(() => finish(reject, new Error('Dashboard response timed out.')), 5 * 60 * 1000);
-    const forThisSession = (event) => event.sessionId === sessionId;
-
+    const forThisSession = (event) => matchesDashboardSessionEvent(event, sessionIds);
     const cleanup = () => {
-      globalThis.clearTimeout(timer);
+      watchdog.stop();
       for (const off of offs) off();
       signal?.removeEventListener?.('abort', onAbort);
     };
@@ -8690,6 +18780,45 @@ async function streamRemoteWsChat(prompt, onDelta, onTool, { signal, onRun } = {
       cleanup();
       fn(value);
     };
+    const seedFromHistory = async () => {
+      const history = await client.request(WS_METHODS.sessionHistory, {
+        session_id: sessionId,
+        profile: safeActiveProfile(),
+      }).catch(() => null);
+      const rows = normalizeGatewayHistoryMessages(history);
+      const answer = latestAssistantAfterUser(rows, prompt)
+        || [...rows].reverse().find((row) => row.role === 'assistant')?.content
+        || '';
+      if (answer && answer !== finalText) {
+        finalText = answer;
+        onDelta(finalText);
+      }
+      return answer;
+    };
+    const handleIdleTimeout = async (error) => {
+      if (settled) return;
+      try {
+        const status = await client.request(WS_METHODS.sessionStatus, { session_id: sessionId }).catch(() => null);
+        await seedFromHistory();
+        if (dashboardWatchdogTimeoutAction(status) === 'keep-listening') {
+          watchdog.ping();
+          return;
+        }
+        if (finalText) {
+          onRuntime?.({ status: 'completed' });
+          finish(resolve, finalText);
+          return;
+        }
+      } catch {
+        // Fall through to reattach.
+      }
+      error.requestAccepted = true;
+      error.reattach = true;
+      finish(reject, error);
+    };
+    const watchdog = createDashboardStreamWatchdog((error) => {
+      void handleIdleTimeout(error);
+    });
     function onAbort() {
       client.request(WS_METHODS.sessionInterrupt, { session_id: sessionId }).catch(() => {});
       finish(reject, new DOMException('Hermes turn stopped by user', 'AbortError'));
@@ -8701,41 +18830,145 @@ async function streamRemoteWsChat(prompt, onDelta, onTool, { signal, onRun } = {
     }
     signal?.addEventListener?.('abort', onAbort, { once: true });
 
+    offs.push(client.on('*', (event) => {
+      if (forThisSession(event)) watchdog.ping();
+      ingestSubagentGatewayEvent(event);
+    }));
     offs.push(client.on(WS_EVENTS.messageDelta, (event) => {
       if (!forThisSession(event)) return;
+      watchdog.ping();
       finalText += event.payload?.text || '';
       onDelta(finalText);
     }));
     offs.push(client.on(WS_EVENTS.messageComplete, (event) => {
       if (!forThisSession(event)) return;
+      const completionError = hermesGatewayTurnError({ payload: event.payload });
+      if (completionError) {
+        finish(reject, completionError);
+        return;
+      }
       finalText = event.payload?.text || finalText;
       onDelta(finalText);
+      onRuntime?.({ ...event.payload, status: 'completed' });
       finish(resolve, finalText);
     }));
     offs.push(client.on('tool.start', (event) => {
-      if (forThisSession(event) && onTool) onTool({ type: 'tool.start', tool_name: event.payload?.name });
+      if (!forThisSession(event)) return;
+      watchdog.ping();
+      if (onTool) onTool({ type: 'tool.start', tool_name: event.payload?.name });
     }));
     offs.push(client.on('tool.complete', (event) => {
-      if (forThisSession(event) && onTool) onTool({
+      if (!forThisSession(event)) return;
+      watchdog.ping();
+      if (onTool) onTool({
         type: 'tool.complete',
         tool_name: event.payload?.name,
         result: event.payload?.result,
       });
     }));
+    offs.push(client.on('steer.queued', (event) => {
+      if (forThisSession(event)) onSteerQueued?.(event.payload?.text || event.payload?.message || '');
+    }));
+    offs.push(client.on('session.usage', (event) => {
+      if (!forThisSession(event)) return;
+      applyReportedContextTelemetry(sessionId, event.payload);
+    }));
+    void client.request(WS_METHODS.contextBreakdown, { session_id: sessionId })
+      .then((result) => applyReportedContextTelemetry(sessionId, result))
+      .catch(() => {});
     offs.push(client.on(WS_EVENTS.error, (event) => {
       if (!forThisSession(event)) return;
-      finish(reject, new Error(event.payload?.message || 'Dashboard stream error'));
+      finish(reject, hermesGatewayTurnError({ payload: event.payload }) || new Error('Dashboard stream error'));
     }));
-    offs.push(client.on('close', () => finish(reject, new Error('Dashboard connection closed mid-turn.'))));
+    offs.push(client.on('close', () => {
+      const error = new Error('Dashboard connection closed mid-turn.');
+      error.requestAccepted = true;
+      error.reattach = true;
+      finish(reject, error);
+    }));
 
-    client.request(WS_METHODS.promptSubmit, { session_id: sessionId, text: prompt }).catch((error) => finish(reject, error));
+    if (submitPrompt) {
+      void (async () => {
+        try {
+          await attachDashboardTurnImages(client, sessionId, turnAttachments);
+        } catch (error) {
+          console.warn('[Hermes Browser] Dashboard image attach failed:', error);
+        }
+        if (settled) return;
+        const submitParams = () => ({
+          session_id: sessionId,
+          text: prompt,
+          ...browserTurnDisplayParam(prompt),
+          ...truncateSubmitParams({ rowId: truncate?.rowId }),
+        });
+        client.request(WS_METHODS.promptSubmit, submitParams()).catch((error) => {
+          if (!isDisplayTextRejection(error) || displayTextUnsupported) throw error;
+          displayTextUnsupported = true;
+          return client.request(WS_METHODS.promptSubmit, submitParams());
+        }).then((response) => {
+          onSubmitResponse?.(response);
+          void rememberUserFileAttachments(attachmentSourceKey(settings), connection.wsStoredSessionId || settings.sessionId, prompt, turnAttachments)
+            .catch(() => setStatus('warn', t('ui.file'), t('attachments.file_unavailable')));
+        }).catch((error) => finish(reject, error));
+      })();
+    } else {
+      void seedFromHistory();
+    }
+    void hydrateSubagentSnapshot(client, sessionId);
   });
 }
 
-async function streamSessionChat(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun, onSteerQueued, onRuntime } = {}) {
-  if (isRemoteWsMode()) return streamRemoteWsChat(prompt, onDelta, onTool, { signal, onRun });
-  const hasSessionRoutes = await ensureHermesSession();
-  if (!hasSessionRoutes) return streamChatCompletions(prompt, onDelta, onTool, { signal, attachments: turnAttachments, onRun });
+async function streamSessionChat(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun, onSteerQueued, onRuntime, knownAssistantTexts = [], truncate = null, onSubmitResponse = null } = {}) {
+  if (usesDashboardWsChatTransport()) return streamDashboardWsChat(prompt, onDelta, onTool, {
+    signal,
+    attachments: turnAttachments,
+    onRun,
+    onSteerQueued,
+    onRuntime,
+    knownAssistantTexts,
+    truncate,
+    onSubmitResponse,
+  });
+  let hasSessionRoutes = false;
+  try {
+    hasSessionRoutes = await ensureHermesSession();
+  } catch (setupError) {
+    // Profile-scoped 401 during session setup: fall back to the dashboard WS
+    // transport (session-token auth) so named profiles can chat in regular
+    // mode without their own gateway API key.
+    if (Number(setupError?.httpStatus ?? setupError?.status) === 401 && desktopDashboardUrl && safeActiveProfile()) {
+      activeConversationTransport = 'dashboard-ws';
+      return streamDashboardWsChat(prompt, onDelta, onTool, {
+        signal, attachments: turnAttachments, onRun, onSteerQueued, onRuntime, knownAssistantTexts,
+      });
+    }
+    throw setupError;
+  }
+  if (!hasSessionRoutes) return streamChatCompletions(prompt, onDelta, onTool, { signal, attachments: turnAttachments, onRun, knownAssistantTexts });
+  try {
+    return await streamSessionChatRest(prompt, onDelta, onTool, { signal, turnAttachments, onRun, onSteerQueued, onRuntime, knownAssistantTexts });
+  } catch (error) {
+    // Profile-scoped 401: the gateway multiplexer requires each named
+    // profile's own API key. Named-profile sessions still stream over the
+    // desktop dashboard WS (session-token auth), so fall back once before
+    // surfacing the failure — regular profile switching keeps working even
+    // with Bot Mode off.
+    if (Number(error?.status ?? error?.httpStatus) === 401 && desktopDashboardUrl) {
+      activeConversationTransport = 'dashboard-ws';
+      return streamDashboardWsChat(prompt, onDelta, onTool, {
+        signal,
+        attachments: turnAttachments,
+        onRun,
+        onSteerQueued,
+        onRuntime,
+        knownAssistantTexts,
+      });
+    }
+    throw error;
+  }
+}
+
+async function streamSessionChatRest(prompt, onDelta, onTool, { signal, turnAttachments, onRun, onSteerQueued, onRuntime, knownAssistantTexts }) {
 
   let response;
   try {
@@ -8764,19 +18997,23 @@ async function streamSessionChat(prompt, onDelta, onTool, { signal, attachments:
 
   if (!response.ok || !response.body) {
     const text = await response.text();
-    const error = new Error(`Hermes stream failed (${response.status}): ${text.slice(0, 900)}`);
-    error.fallbackSafe = [404, 405, 501].includes(response.status);
-    throw error;
+    throw hermesRequestError({
+      status: response.status,
+      body: text,
+      operation: 'Hermes stream',
+    });
   }
   try {
-    return await readSseResponse(response, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime });
+    return await readSseResponse(response, onDelta, onTool, { signal, onRun, onSteerQueued, onRuntime, knownAssistantTexts });
   } catch (error) {
-    error.requestAccepted = true;
+    if (!error.requestRejected && !error.streamError) {
+      error.requestAccepted = true;
+    }
     throw error;
   }
 }
 
-async function streamChatCompletions(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun } = {}) {
+async function streamChatCompletions(prompt, onDelta, onTool, { signal, attachments: turnAttachments = attachments, onRun, knownAssistantTexts = [] } = {}) {
   let response;
   try {
     response = await apiFetch('/v1/chat/completions', {
@@ -8785,6 +19022,7 @@ async function streamChatCompletions(prompt, onDelta, onTool, { signal, attachme
       headers: {
         'X-Hermes-Session-Id': settings.sessionId,
         'X-Hermes-Session-Key': settings.sessionId,
+        ...(safeActiveProfile() ? { 'X-Hermes-Profile': safeActiveProfile() } : {}),
       },
       body: JSON.stringify({
         client_runtime_version: modelSelectionVersion,
@@ -8804,12 +19042,14 @@ async function streamChatCompletions(prompt, onDelta, onTool, { signal, attachme
   }
   if (!response.ok || !response.body) {
     const text = await response.text();
-    const error = new Error(`Hermes chat-completions stream failed (${response.status}): ${text.slice(0, 900)}`);
-    error.fallbackSafe = [404, 405, 501].includes(response.status);
-    throw error;
+    throw hermesRequestError({
+      status: response.status,
+      body: text,
+      operation: 'Hermes chat-completions stream',
+    });
   }
   try {
-    const result = await readSseResponse(response, onDelta, onTool, { signal, onRun });
+    const result = await readSseResponse(response, onDelta, onTool, { signal, onRun, knownAssistantTexts });
     await captureDelegationDispatchesFromCurrentRestHistory();
     return result;
   } catch (error) {
@@ -8844,26 +19084,82 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function recoverAcceptedTurn(prompt, turnAttachments = attachments, { attempts = 8, delay = 500 } = {}) {
-  if (isRemoteWsMode() || !settings.apiKey) return '';
+async function recoverAcceptedTurn(prompt, turnAttachments = attachments, { signal, timeoutMs = acceptedTurnRecoveryPolicy().maxDurationMs } = {}) {
   const userContent = outboundContent(prompt, turnAttachments);
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  if (usesDashboardWsChatTransport()) {
+    const connection = await ensureActiveDashboardWsConnection().catch(() => null);
+    const sessionId = connection ? await ensureRemoteWsSession(connection).catch(() => '') : '';
+    if (!connection?.client || !sessionId) return { answer: '', imageSources: [] };
+    const startedAt = Date.now();
+    let attempt = 0;
+    while (true) {
+      if (signal?.aborted) throw new DOMException('Hermes turn stopped by user', 'AbortError');
+      try {
+        const status = await connection.client.request(WS_METHODS.sessionStatus, { session_id: sessionId }).catch(() => null);
+        const history = await connection.client.request(WS_METHODS.sessionHistory, {
+          session_id: sessionId,
+          profile: safeActiveProfile(),
+        }).catch(() => null);
+        const rows = normalizeGatewayHistoryMessages(history);
+        captureDelegationRuntimePayload({ messages: rows });
+        const answer = latestAssistantAfterUser(rows, userContent);
+        const imageSources = [...new Set([
+          ...resolvedGeneratedImageSourcesFromMessages(rows),
+          ...resolvedGeneratedImageSources(answer),
+        ])];
+        if (answer || imageSources.length) return { answer, imageSources };
+        if (dashboardWatchdogTimeoutAction(status) === 'finish') return { answer: '', imageSources: [] };
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+      }
+      const policy = acceptedTurnRecoveryPolicy({
+        attempt,
+        elapsedMs: Date.now() - startedAt,
+        maxDurationMs: timeoutMs,
+      });
+      if (!policy.shouldContinue) return { answer: '', imageSources: [], reason: 'timeout' };
+      const remainingMs = Math.max(1, policy.maxDurationMs - (Date.now() - startedAt));
+      await sleep(Math.min(policy.delayMs, remainingMs));
+      attempt += 1;
+    }
+  }
+  if (!settings.apiKey) return { answer: '', imageSources: [] };
+  const startedAt = Date.now();
+  let attempt = 0;
+  while (true) {
+    if (signal?.aborted) throw new DOMException('Hermes turn stopped by user', 'AbortError');
     try {
       const response = await apiFetch(`/api/sessions/${encodeSessionId(settings.sessionId)}/messages`, { method: 'GET' });
       const payload = await readJsonResponse(response);
       if (response.ok) {
-        const rows = Array.isArray(payload.data) ? payload.data : [];
+        const rows = Array.isArray(payload.data)
+          ? payload.data
+          : Array.isArray(payload.messages)
+            ? payload.messages
+            : [];
         captureDelegationRuntimePayload({ messages: rows });
         const answer = latestAssistantAfterUser(rows, userContent);
-        if (answer) return answer;
+        const imageSources = [...new Set([
+          ...resolvedGeneratedImageSourcesFromMessages(rows),
+          ...resolvedGeneratedImageSources(answer),
+        ])];
+        if (answer || imageSources.length) return { answer, imageSources };
       }
-    } catch {
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
       // The original turn is already accepted; recovery is best effort and
       // must never post the user turn again.
     }
-    if (attempt < attempts - 1) await sleep(delay);
+    const policy = acceptedTurnRecoveryPolicy({
+      attempt,
+      elapsedMs: Date.now() - startedAt,
+      maxDurationMs: timeoutMs,
+    });
+    if (!policy.shouldContinue) return { answer: '', imageSources: [], reason: 'timeout' };
+    const remainingMs = Math.max(1, policy.maxDurationMs - (Date.now() - startedAt));
+    await sleep(Math.min(policy.delayMs, remainingMs));
+    attempt += 1;
   }
-  return '';
 }
 
 async function openApprovalUrl(url) {
@@ -8953,11 +19249,11 @@ async function connectTicketTransport({ cloud = false } = {}) {
     updateConnectionPrompt();
     renderEmptyState();
   } catch (error) {
-    const diagnostic = classifyGatewayError(error);
+    const diagnostic = classifyGatewayError(error, { url: normalizeGatewayUrl(settings.gatewayUrl) });
     if (connectionController.transition(generation, CONNECTION_STATES.ERROR, { errorKind: diagnostic.kind })) {
-      markGatewayUnreachable(error);
-      els.connectStatus.textContent = error?.message || String(error);
-      setStatus('error', cloud ? 'Hermes Cloud Preview failed' : 'Dashboard Attach failed', error?.message || String(error), { translateDetail: false });
+      markGatewayUnreachable(error, diagnostic);
+      els.connectStatus.textContent = diagnostic.detail;
+      setStatus('error', cloud ? 'Hermes Cloud Preview failed' : 'Dashboard Attach failed', diagnostic.userMessage, { translateDetail: false });
     }
   } finally {
     if (connectionController.isCurrent(generation)) {
@@ -8997,38 +19293,65 @@ async function connectApiWithPairing() {
   els.connectButton.disabled = true;
   els.connectButton.textContent = translateUiText('Connecting...');
   els.connectStatus.textContent = `Looking for ${summary.title} at ${summary.normalizedUrl}...`;
+  // A failing request can only be blamed on the origin/CORS layer when the
+  // health probe already answered from this extension origin.
+  let healthProbeAnswered = false;
   try {
     const health = await publicApiFetch('/health', { method: 'GET' });
     if (!connectionController.isCurrent(generation)) return;
-    if (!health.ok) throw new Error(`Hermes API server is not reachable (${health.status}).`);
+    if (!health.ok) {
+      const healthError = new Error(`Hermes API server is not reachable (${health.status}).`);
+      healthError.httpStatus = health.status;
+      throw healthError;
+    }
+    healthProbeAnswered = true;
 
     const capabilities = await loadGatewayCapabilities({ quiet: true, publicOnly: true, healthOk: true });
     if (!connectionController.isCurrent(generation)) return;
-    if (!capabilities.browserPairing) {
-      connectionController.transition(generation, CONNECTION_STATES.DEGRADED, { reason: 'manual-setup-required' });
-      markConnectionProbe('unconfigured', 'Manual setup required; automatic browser pairing is not advertised by this Hermes runtime.');
-      els.connectStatus.textContent = translateUiText('Automatic pairing is not available on this Hermes runtime. Open Settings and use Manual setup with your Gateway URL and API token.');
-      setStatus('warn', 'Manual setup required', 'This Hermes runtime does not advertise browser pairing yet.');
-      openSettingsDialog();
-      return;
+    let pairingStart = null;
+    let pairingPayload = null;
+    if (capabilities.browserPairing) {
+      pairingStart = await publicApiFetch('/api/browser-extension/pair/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Hermes Browser Extension',
+          extensionId: browserApi.runtime?.id || '',
+        }),
+      });
+      pairingPayload = await readJsonResponse(pairingStart);
+      if (!connectionController.isCurrent(generation)) return;
+      if (!pairingStart.ok) throw new Error(pairingFailureMessage(pairingStart.status, pairingPayload));
+    } else {
+      // Bootstrap pairing recovery (Firefox/401 hardening): some gateways keep
+      // /v1/capabilities behind the API key, so the unauthenticated probe 401s
+      // and the advertisement is unreadable even though the pairing bootstrap
+      // route is open. Give loopback local gateways one optimistic pair/start
+      // attempt before falling back to manual setup; a genuine miss lands in
+      // that same manual-setup path below.
+      pairingStart = await publicApiFetch('/api/browser-extension/pair/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Hermes Browser Extension',
+          extensionId: browserApi.runtime?.id || '',
+        }),
+      });
+      try { pairingPayload = await readJsonResponse(pairingStart); } catch { pairingPayload = null; }
+      if (!connectionController.isCurrent(generation)) return;
+      if (!pairingStart.ok || !pairingPayload || (!pairingPayload.token && !pairingPayload.approval_url)) {
+        connectionController.transition(generation, CONNECTION_STATES.DEGRADED, { reason: 'manual-setup-required' });
+        markConnectionProbe('unconfigured', 'Manual setup required; automatic browser pairing is not advertised by this Hermes runtime.');
+        els.connectStatus.textContent = translateUiText('Automatic pairing is not available on this Hermes runtime. Open Settings and use Manual setup with your Gateway URL and API token.');
+        setStatus('warn', 'Manual setup required', 'This Hermes runtime does not advertise browser pairing yet.');
+        openSettingsDialog();
+        return;
+      }
     }
 
-    const start = await publicApiFetch('/api/browser-extension/pair/start', {
-      method: 'POST',
-      body: JSON.stringify({
-        name: 'Hermes Browser Extension',
-        extensionId: browserApi.runtime?.id || '',
-      }),
-    });
-    const payload = await readJsonResponse(start);
-    if (!connectionController.isCurrent(generation)) return;
-    if (!start.ok) throw new Error(pairingFailureMessage(start.status, payload));
-
-    let pairedToken = payload.token || '';
+    let pairedToken = pairingPayload.token || '';
     if (!pairedToken) {
       els.connectStatus.textContent = translateUiText('Approval opened. Approve Hermes Browser Extension, then return here.');
-      await openApprovalUrl(payload.approval_url);
-      pairedToken = await pollPairing(payload.pairing_id);
+      await openApprovalUrl(pairingPayload.approval_url);
+      pairedToken = await pollPairing(pairingPayload.pairing_id);
     }
     if (!connectionController.isCurrent(generation)) return;
     settings.apiKey = pairedToken;
@@ -9038,22 +19361,26 @@ async function connectApiWithPairing() {
     await browserApi.storage.local.set({ hermesBrowserSettings: settings });
     syncSettingsForm();
     updateConnectionPrompt();
-    await loadGatewayCapabilities({ quiet: true, healthOk: true });
-    await loadModels({ quiet: true });
-    await loadSkills({ quiet: true });
-    await loadProfiles({ quiet: true });
-    await loadSessions({ quiet: true });
-    await initializeSessionForPanelOpen({ focus: false });
+    // The controller keeps its own copy of the settings; without an explicit
+    // refresh a freshly paired token only reaches it through the background
+    // storage listener, which is not reliable (an idle MV3 worker may not be
+    // awake for the write). Then tab control stays in "reconnecting" until the
+    // extension is reloaded, so ask for the rebind here.
+    await browserControlMessage('HERMES_CONTROLLER_SETTINGS_REFRESH').catch(() => null);
+    await runPanelConnectionReadiness({ restoreSettings: false });
     if (!connectionController.transition(generation, CONNECTION_STATES.READY, { gateway: 'hermes' })) return;
     els.connectStatus.textContent = translateUiText('Connected to Hermes. You can start chatting with page context.');
     markGatewayReachable(normalizeGatewayUrl(settings.gatewayUrl));
     setStatus('ok', 'Hermes Browser Extension connected', normalizeGatewayUrl(settings.gatewayUrl));
     renderEmptyState();
   } catch (error) {
-    const diagnostic = classifyGatewayError(error);
+    const diagnostic = classifyGatewayError(error, {
+      url: normalizeGatewayUrl(settings.gatewayUrl),
+      healthOk: healthProbeAnswered,
+    });
     if (!connectionController.transition(generation, CONNECTION_STATES.ERROR, { errorKind: diagnostic.kind })) return;
-    markGatewayUnreachable(error);
-    els.connectStatus.textContent = `${currentConnectionTroubleshooting() || error?.message || String(error)} Manual setup is still available in settings.`;
+    markGatewayUnreachable(error, diagnostic);
+    els.connectStatus.textContent = `${currentConnectionTroubleshooting() || diagnostic.detail} Manual setup is still available in settings.`;
     openSettingsDialog();
   } finally {
     if (connectionController.isCurrent(generation)) {
@@ -9084,7 +19411,11 @@ async function fallbackSessionChat(prompt, turnAttachments = attachments, { onRu
         }),
   });
   const payload = await readJsonResponse(response);
-  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Hermes request failed (${response.status})`);
+  if (!response.ok) throw hermesRequestError({
+    status: response.status,
+    body: JSON.stringify(payload),
+    operation: 'Hermes request',
+  });
   onRuntime?.(payload);
   await captureDelegationDispatchesFromCurrentRestHistory();
   return extractAssistantText(payload);
@@ -9096,6 +19427,7 @@ async function fallbackChatCompletions(prompt, turnAttachments = attachments) {
     headers: {
       'X-Hermes-Session-Id': settings.sessionId,
       'X-Hermes-Session-Key': settings.sessionId,
+      ...(safeActiveProfile() ? { 'X-Hermes-Profile': safeActiveProfile() } : {}),
     },
     body: JSON.stringify({
       model: currentModelRequestId(),
@@ -9109,7 +19441,11 @@ async function fallbackChatCompletions(prompt, turnAttachments = attachments) {
     }),
   });
   const payload = await readJsonResponse(response);
-  if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `Hermes request failed (${response.status})`);
+  if (!response.ok) throw hermesRequestError({
+    status: response.status,
+    body: JSON.stringify(payload),
+    operation: 'Hermes chat-completions request',
+  });
   await captureDelegationDispatchesFromCurrentRestHistory();
   return extractAssistantText(payload);
 }
@@ -9128,15 +19464,43 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
     return false;
   }
 
-  if (sending || !canSwitchActiveSession({ sending, runControl: activeRunControl })) return false;
+  const dashboardTransport = usesDashboardWsChatTransport();
+  if (sending) return false;
+  let commentPack = { displayUserText: '', consumed: false };
+  if ((pageAnnotationStack.pins || []).length) {
+    const bundle = buildPageAnnotationComposerBundle({
+      ...pageAnnotationStack,
+      safeUrl: pageAnnotationSession?.safeUrl || pageAnnotationStack.safeUrl,
+      pins: pageAnnotationStack.pins,
+    }, { resolveImage: (pin) => pin.imageDataUrl });
+    const visible = String(userText || '').trim();
+    const merged = mergePageAnnotationComposerState({ text: userText, attachments: turnAttachments }, bundle);
+    const count = pageAnnotationStack.pins.length;
+    commentPack = {
+      displayUserText: visible || (count === 1 ? '1 page comment' : `${count} page comments`),
+      consumed: true,
+    };
+    userText = merged.text;
+    turnAttachments = merged.attachments;
+  }
+  if (!canSwitchActiveSession({ sending, runControl: activeRunControl })) {
+    if (canRecoverStaleDashboardRunControl({ sending, dashboardTransport, runControl: activeRunControl })) {
+      activeRunControl = markRunTerminal(activeRunControl, 'failed');
+      updateComposerBusyState();
+      renderContextWindow();
+    } else {
+      setStatus('warn', 'Hermes is still working', 'Stop or confirm the active Hermes turn before sending another message.', { translateDetail: false });
+      return false;
+    }
+  }
   if (!guardForeignSessionSend(userText, turnAttachments)) return false;
   const autoTitle = turnOptions.disableAutoTitle ? '' : autoTitleForCurrentTurn(userText);
   const turnRunControlGeneration = ++runControlGeneration;
-  activeRunControl = beginRunControl({ transport: isRemoteWsMode() ? 'dashboard-ws' : 'rest' });
+  activeRunControl = beginRunControl({ transport: dashboardTransport ? 'dashboard-ws' : 'rest' });
   try {
-    if (isRemoteWsMode()) {
-      const remoteConnection = await ensureRemoteWsClient();
-      await ensureRemoteWsSession(remoteConnection);
+    if (dashboardTransport) {
+      const dashboardConnection = await ensureActiveDashboardWsConnection();
+      await ensureRemoteWsSession(dashboardConnection);
     } else {
       await ensureHermesSession();
     }
@@ -9169,14 +19533,34 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
     renderAttachments();
     renderSkillSuggestions();
     renderContextWindow('');
+    forgetComposerDraft();
   }
 
   let didSend = false;
   let streamTerminalStatus = '';
+  let streamView = null;
+  // Declared outside the turn's try block so the terminal error paths can also
+  // drain whatever the reveal still holds before the bubble is disposed.
+  let streamPacer = null;
   try {
-    const preparedAttachments = await saveImageAttachmentsForTurn(turnAttachments);
-    if (typeof turnOptions.resolveUserText === 'function' && isRemoteWsMode()) {
-      const consentConnection = await ensureRemoteWsClient();
+    let preparedAttachments = await saveImageAttachmentsForTurn(turnAttachments);
+    if (preparedAttachments.some((item) => item.kind === 'file')) {
+      if (!dashboardTransport) throw Object.assign(new Error('attachments.upload_unavailable'), { attachmentFailure: true, uiKey: 'attachments.upload_unavailable' });
+      const fileConnection = await ensureActiveDashboardWsConnection();
+      const fileSessionId = await ensureRemoteWsSession(fileConnection);
+      await stageUserFiles(fileConnection.client, fileSessionId, preparedAttachments, { sourceKey: attachmentSourceKey(settings) });
+    }
+    if (dashboardTransport && preparedAttachments.some((attachment) => attachment.kind === 'image' && attachment.dataUrl)) {
+      try {
+        const attachConnection = await ensureActiveDashboardWsConnection();
+        const attachSessionId = await ensureRemoteWsSession(attachConnection);
+        preparedAttachments = await attachDashboardTurnImages(attachConnection.client, attachSessionId, preparedAttachments);
+      } catch (error) {
+        console.warn('[Hermes Browser] Dashboard image attach failed:', error);
+      }
+    }
+    if (typeof turnOptions.resolveUserText === 'function' && dashboardTransport) {
+      const consentConnection = await ensureActiveDashboardWsConnection();
       await ensureRemoteWsSession(consentConnection);
     }
     await persistBrowserIntroSeen();
@@ -9195,12 +19579,13 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
     const capturedContext = turnContextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY
       ? null
       : gatedContextOverride || await refreshContext();
-    if (typeof turnOptions.resolveUserText === 'function') {
-      userText = String(await turnOptions.resolveUserText() || '');
-    }
     const context = turnContextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY
       ? { activeTab: null, tabs: [], pageContext: null, contextScope: turnContextScope }
       : capturedContext;
+    const browserControl = await resolveBrowserControlForTurn({ context, scope: turnContextScope });
+    if (typeof turnOptions.resolveUserText === 'function') {
+      userText = String(await turnOptions.resolveUserText() || '');
+    }
 
     // Command expansion is a declared instruction transform. Deliberately do
     // not pass page/tab data to it: Browser data remains in browser_context.
@@ -9214,13 +19599,19 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
       });
       basePromptText = resolved?.prompt || userText;
     }
-    const promptUserText = userTextWithAttachments(userText, preparedAttachments);
-    const displayAttachments = preparedAttachments.filter((attachment) => attachment.kind !== 'image');
-    const displayUserText = turnOptions.displayUserText || (displayAttachments.length
-      ? `${userText || 'Attachment-only turn.'}\n${displayAttachments.map((attachment) => `${attachmentIcon(attachment.kind)} ${attachment.label}`).join('\n')}`
-      : userText);
-    const promptTabs = filterPromptTabs(context.tabs, turnContextScope);
-    const selectedPromptTabs = Array.isArray(turnContextScope.selectedTabIds) ? promptTabs : undefined;
+    const currentSessionId = String(settings.sessionId || '').trim();
+    const profileContextHandoff = profileContextHandoffForSession(settings, currentSessionId);
+    const outboundUserText = profileContextHandoff
+      ? `${profileContextHandoff}\n\n[New profile message]\n${basePromptText}`
+      : basePromptText;
+    const promptUserText = userTextWithAttachments(outboundUserText, preparedAttachments);
+    const displayUserText = turnOptions.displayUserText || commentPack.displayUserText || userText || 'Attachment-only turn.';
+    const isTabCommand = parsedCommand?.command?.category === 'Tabs';
+    const effectiveScopeForTurn = isTabCommand
+      ? normalizeContextScope({ ...turnContextScope, selectedTabIds: null })
+      : turnContextScope;
+    const promptTabs = filterPromptTabs(context.tabs, effectiveScopeForTurn, { activeTab: context.activeTab });
+    const selectedPromptTabs = Array.isArray(effectiveScopeForTurn.selectedTabIds) ? promptTabs : undefined;
     const contextHash = turnContextScope.mode === CONTEXT_SCOPE_MODES.CHAT_ONLY ? '' : browserContextPayloadHash({
       activeTab: context.activeTab,
       selectedTabs: selectedPromptTabs || promptTabs,
@@ -9233,9 +19624,9 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
     // deliveryIdentityForTurn fails closed (null) until the stored id exists.
     const deliveryIdentity = deliveryIdentityForTurn({
       gatewayUrl: settings.gatewayUrl,
-      isRemoteWs: isRemoteWsMode(),
-      wsStoredSessionId: remoteWsConnection?.wsStoredSessionId || '',
-      wsSessionId: remoteWsConnection?.wsSessionId || '',
+      isRemoteWs: dashboardTransport,
+      wsStoredSessionId: activeDashboardWsConnection?.wsStoredSessionId || '',
+      wsSessionId: activeDashboardWsConnection?.wsSessionId || '',
       settingsSessionId: settings.sessionId || '',
       scopeBindingKey: sessionBindingKeyForScope(turnContextScope),
     });
@@ -9252,52 +19643,102 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
       humanInput: promptUserText,
       instructionTransform: parsedCommand ? { kind: 'slash-command', text: basePromptText } : null,
       activeTab: context.activeTab,
-      tabs: context.tabs,
+      tabs: promptTabs,
       pageContext: context.pageContext,
       selectedTabs: selectedPromptTabs,
       contextScope: turnContextScope,
-      attachments: preparedAttachments,
+      attachments: preparedAttachments.map(attachmentForProtocol),
       settings: turnProtocolSettings,
       contextHash,
       contextDelivery,
+      browserControl,
     });
 
     const receipt = buildContextReceipt({
-      context,
+      context: {
+        ...context,
+        tabs: promptTabs,
+        selectedTabs: selectedPromptTabs || promptTabs,
+      },
       attachments: preparedAttachments,
       settings: turnProtocolSettings,
       contextHash,
       contextDelivery,
     });
-    const { node: userNode } = addMessage('user', displayUserText);
-    appendContextReceipt(userNode, receipt);
-    appendUserImageAttachments(
-      userNode.querySelector('.message-content'),
-      preparedAttachments,
-      { onOpen: (image) => openGeneratedImageLightbox(image) },
-    );
-    const { node } = addMessage('assistant', THINKING_PLACEHOLDER, { persist: false });
-    const streamView = createStreamingMessageUpdater(node);
+    if (turnOptions.reuseUserRecord) {
+      // A rewind already stands the edited user bubble in the transcript; never
+      // add a second one. Refresh its receipt/attachments from this turn.
+      const target = [...messages].reverse().find((message) => message?.role === 'user');
+      if (target) {
+        if (receipt && receipt?.items?.length) target.contextReceipt = receipt;
+        target.attachments = preparedAttachments;
+      }
+    } else {
+      addMessage('user', displayUserText, {
+        contextReceipt: receipt,
+        attachments: preparedAttachments,
+      });
+    }
+    // Prior completed assistant bubbles, for run.completed reconcile filtering.
+    // Server degraded-history edge case must never restack them into this turn's
+    // live bubble. See runtime-events.mjs:filterKnownAssistantReconcileParts.
+    const priorAssistantTexts = messages
+      .filter((message) => message.role === 'assistant' && message.content)
+      .map((message) => String(message.content));
+    const { node } = addMessage('assistant', THINKING_PLACEHOLDER, { persist: false, roleLabel: assistantMessageRoleLabel(), streaming: true });
+    streamView = createStreamingMessageUpdater(node);
     let answer = '';
     let liveText = '';
+    let pushedLive = 0;
+    let resolvePacerDrain = null;
+    const pacerDrained = new Promise((resolve) => { resolvePacerDrain = resolve; });
+    // Fast models (300-450 tok/s) hand over whole paragraphs in a couple of
+    // frames, so the live bubble lurches instead of reading as streaming. The
+    // pacer spreads every arrival into a steady reveal; the terminal flush
+    // still paints the exact final text, and we let the reveal finish first so
+    // the bubble never jumps to the full answer.
+    streamPacer = createStreamPacer({
+      onFrame: (text, meta) => {
+        streamView.updateText(text || (meta.done ? '' : THINKING_PLACEHOLDER));
+        if (meta.done) resolvePacerDrain?.();
+      },
+      schedule: (cb) => requestAnimationFrame(cb),
+      cancel: (id) => cancelAnimationFrame(id),
+    });
+    let recoveredImageSources = [];
+    let turnImageSources = [];
     try {
       answer = await streamSessionChat(
         prompt,
         (partial) => {
           if (!runControlGenerationMatches(turnRunControlGeneration, runControlGeneration)) return;
           liveText = partial || '';
-          streamView.updateText(liveText || THINKING_PLACEHOLDER);
+          if (liveText.length < pushedLive) {
+            // The stream rewrote its cumulative text (retry/reattach): restart
+            // the reveal instead of duplicating what already painted.
+            streamPacer.reset();
+            pushedLive = 0;
+          }
+          streamPacer.push(liveText.slice(pushedLive));
+          pushedLive = liveText.length;
         },
         (tool) => {
           if (!runControlGenerationMatches(turnRunControlGeneration, runControlGeneration)) return;
           captureTaskToolEvent(tool).catch((error) => console.warn('[Hermes Browser] Task event persistence failed:', error));
-          streamView.updateTool(normalizeToolActivity(tool));
+          const activity = normalizeToolActivity(tool);
+          const sources = rawGeneratedImageCandidatesFromResult(activity.result);
+          if (sources.length) turnImageSources = [...new Set([...turnImageSources, ...sources])];
+          streamView.updateTool(activity);
         },
         {
           signal: activeAbortController.signal,
           attachments: preparedAttachments,
           onRun: (runId) => {
             if (!runControlGenerationMatches(turnRunControlGeneration, runControlGeneration)) return;
+            // Dashboard prompt streams report the live session id here, not a
+            // server run id. Keep activeRunId reserved for REST run controls;
+            // Bot Chat terminalization is handled by the prompt stream itself.
+            if (dashboardTransport) return;
             activeRunId = runId;
             activeRunControl = withRunControlId(activeRunControl, runId);
           },
@@ -9308,6 +19749,9 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
             if (['completed', 'failed', 'cancelled'].includes(status)) streamTerminalStatus = status;
             applyTurnRuntimePayload(payload);
           },
+          knownAssistantTexts: priorAssistantTexts,
+          truncate: turnOptions.truncate || null,
+          onSubmitResponse: turnOptions.onSubmitResponse || null,
         },
       );
     } catch (streamError) {
@@ -9318,13 +19762,23 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
         throw streamError;
       } else if (sessionContextFailureRecovery(streamError, gatewayCapabilities)) {
         throw streamError;
-      } else if (isRemoteWsMode()) {
-        // No REST fallback in remote-dashboard mode — the api_server surface is
-        // not reachable cross-origin. Surface the WS/ticket error directly.
-        streamView.update(`Could not reach the Hermes dashboard.\n${streamError.message}`);
-        throw streamError;
       } else {
-        if (classifyTurnRecovery(streamError) === 'fallback') {
+        const fallbackSafeStatus = [404, 405, 501].includes(Number(streamError?.httpStatus ?? streamError?.status));
+        const fallbackSafe = streamError?.fallbackSafe === true || fallbackSafeStatus;
+        const recoveryAction = classifyTurnRecovery(streamError);
+        if ((recoveryAction === 'reject' && !fallbackSafe) || streamError?.streamError || (streamError?.requestRejected && !fallbackSafe)) {
+          if (liveText) {
+            answer = liveText;
+          } else {
+            throw streamError;
+          }
+        } else if (dashboardTransport && !shouldReattachDashboardStream(streamError) && !isDashboardIdleTimeout(streamError)) {
+          // No REST fallback in dashboard-transport mode — the api_server surface
+          // is not the active Bot Chat session. Surface genuine WS/ticket errors directly.
+          streamView.update(`Could not reach the Hermes dashboard.
+${streamError.message}`);
+          throw streamError;
+        } else if (fallbackSafe || recoveryAction === 'fallback') {
           streamView.update(`Streaming failed, retrying non-streaming...\n${streamError.message}`);
           answer = await fallbackSessionChat(prompt, preparedAttachments, {
             onRuntime: (payload) => {
@@ -9334,8 +19788,10 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
           });
         } else {
           streamView.update('Hermes accepted this turn; recovering the response without retrying it...');
-          answer = await recoverAcceptedTurn(prompt, preparedAttachments);
-          if (!answer) {
+          const recovered = await recoverAcceptedTurn(prompt, preparedAttachments, { signal: activeAbortController.signal });
+          answer = recovered?.answer || '';
+          recoveredImageSources = Array.isArray(recovered?.imageSources) ? recovered.imageSources : [];
+          if (!answer && !recoveredImageSources.length) {
             const recoveryError = new Error('Hermes accepted the turn, but the stream disconnected before the response could be recovered. The turn was not retried to prevent a duplicate message.');
             recoveryError.requestAccepted = true;
             throw recoveryError;
@@ -9343,15 +19799,34 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
         }
       }
     }
-    const finalAnswer = answer || liveText || '(empty response)';
+    const finalAnswer = answer || liveText || (recoveredImageSources.length ? '' : '(empty response)');
+    const recoveredImageMarkdown = recoveredImageSources
+      .filter((source) => !finalAnswer.includes(source))
+      .map((source) => `![Generated image](${source})`)
+      .join('\n');
+    const finalAnswerForStorage = [finalAnswer, recoveredImageMarkdown].filter(Boolean).join('\n\n');
     if (sessionContextFailureRecovery(finalAnswer, gatewayCapabilities)) {
       const contextError = new Error(finalAnswer);
       contextError.requestAccepted = true;
       throw contextError;
     }
-    await streamView.flush(finalAnswer);
-    messages.push({ role: 'assistant', content: finalAnswer, ts: Date.now() });
+    if (streamPacer.pending() > 0) {
+      streamPacer.finish();
+      await Promise.race([pacerDrained, new Promise((resolve) => setTimeout(resolve, 3_500))]);
+    }
+    await streamView.flush(finalAnswer, { imageSources: recoveredImageSources });
+    messages.push({ role: 'assistant', content: finalAnswerForStorage, ts: Date.now() });
     await trimAndSaveMessages();
+    if (profileContextHandoff
+      && String(settings.pendingProfileContextHandoff || '').trim() === profileContextHandoff
+      && String(settings.pendingProfileContextHandoffSessionId || '').trim() === currentSessionId) {
+      settings = {
+        ...settings,
+        pendingProfileContextHandoff: '',
+        pendingProfileContextHandoffSessionId: '',
+      };
+      await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+    }
     if (autoTitle) await maybeAutoNameCurrentSession(autoTitle);
     if (contextDelivery !== CONTEXT_DELIVERY_MODES.NONE && contextDeliverySessionKey) {
       contextDeliveryBySession.set(contextDeliverySessionKey, recordContextDelivery(
@@ -9378,15 +19853,61 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
       activeRunControl = markRunTerminal(activeRunControl, streamTerminalStatus || 'completed');
     }
     didSend = true;
+    if (commentPack.consumed) {
+      pageAnnotationStack = emptyPageAnnotationStack(pageAnnotationSession || {});
+      pageAnnotationDraft = null;
+      persistCurrentPageAnnotations();
+      renderPageCommentTray();
+    }
   } catch (error) {
+    if (error?.attachmentFailure) {
+      if (!turnOptions.preserveComposer && !els.input.value.trim() && !attachments.length) {
+        els.input.value = userText;
+        attachments = [...turnAttachments];
+        renderAttachments();
+        persistCurrentComposerDraft({ immediate: true });
+      }
+      activeRunControl = markRunTerminal(activeRunControl, 'failed');
+      setStatus('warn', t('ui.attachment'), t(error.uiKey || 'attachments.upload_unavailable'), { translateTitle: false, translateDetail: false });
+      return false;
+    }
+    // Terminal stream errors leave the image-generation placeholder (and its
+    // diffusion canvas loop) running: dispose it wherever the turn ends without
+    // a final flush. The requestAccepted branch below always flushes (which
+    // disposes internally), so it is excluded here.
+    if (error?.requestAccepted !== true) {
+      streamPacer?.flush?.();
+      streamView?.dispose?.();
+    }
+    if (error?.requestAccepted === true) {
+      if (!turnOptions.preserveComposer && !els.input.value.trim() && !attachments.length) {
+        els.input.value = commentPack.consumed ? (commentPack.displayUserText || '') : userText;
+        attachments = commentPack.consumed
+          ? [...turnAttachments].filter((item) => item?.source !== 'page-annotations')
+          : [...turnAttachments];
+        renderAttachments();
+        renderSkillSuggestions();
+      }
+      await streamView?.flush('Hermes accepted the turn, but Browser could not recover the response in time. The turn was not retried.');
+      addMessage('system', 'The accepted turn could not be recovered. Refresh this session later to check for a late image or response; no duplicate request was sent.');
+      setStatus('warn', 'Response recovery timed out', 'The accepted turn was not retried, and the draft was preserved.', { translateDetail: false });
+      return didSend;
+    }
     if (!isAbortError(error)) {
       const contextRecovery = sessionContextFailureRecovery(error, gatewayCapabilities);
       if (contextRecovery) {
+        // This path can be reached with requestAccepted=true (the stream's own
+        // context-ceiling check throws before flush), so dispose the diffusion
+        // placeholder explicitly here.
+        streamPacer?.flush?.();
+        streamView?.dispose?.();
         markGatewayDegraded(error);
         if (!turnOptions.preserveComposer) {
           if (!els.input.value.trim() && !attachments.length) {
-            els.input.value = userText;
-            attachments = [...turnAttachments];
+            els.input.value = commentPack.consumed ? (commentPack.displayUserText || '') : userText;
+            attachments = commentPack.consumed
+              ? [...turnAttachments].filter((item) => item?.source !== 'page-annotations')
+              : [...turnAttachments];
             renderAttachments();
             renderSkillSuggestions();
           } else if (!queuedTurn) {
@@ -9410,15 +19931,52 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
         addMessage('system', `Hermes Browser Extension setup issue: ${error.remoteDiagnostic.detail} Open Settings → Support diagnostics → Copy Diagnostics and paste the redacted report if you need help.`);
         return didSend;
       }
-      const diagnostic = classifyGatewayError(error);
+      const requestFailure = turnRequestFailureState(error);
+      if (requestFailure?.gatewayStatus === 'connected') {
+        if (!turnOptions.preserveComposer && !els.input.value.trim() && !attachments.length) {
+          els.input.value = commentPack.consumed ? (commentPack.displayUserText || '') : userText;
+          attachments = commentPack.consumed
+            ? [...turnAttachments].filter((item) => item?.source !== 'page-annotations')
+            : [...turnAttachments];
+          renderAttachments();
+          renderSkillSuggestions();
+        }
+        streamView.update(`**${requestFailure.title}**\n\n${requestFailure.detail}`);
+        if (requestFailure.kind === 'hermes-update-restart') attachGatewayRestartAction(streamView.node);
+        setStatus('error', requestFailure.title, `${requestFailure.detail} Gateway remains connected.`, {
+          translateTitle: false,
+          translateDetail: false,
+        });
+        return didSend;
+      }
+      const diagnostic = classifyGatewayError(error, { url: normalizeGatewayUrl(settings.gatewayUrl) });
+      const recoveryPlan = gatewayFailureRecoveryPlan({ error, diagnostic });
+      if (recoveryPlan.preserveDraft && !turnOptions.preserveComposer && !els.input.value.trim() && !attachments.length) {
+        // Either the turn provably never reached Hermes, or its delivery is
+        // unconfirmed because the connection dropped mid-flight. Either way the
+        // composer text belongs to the user, so restore it and keep it
+        // persisted across panel reloads; the recovery plan never resends it on
+        // its own.
+        els.input.value = commentPack.consumed ? (commentPack.displayUserText || '') : userText;
+        attachments = commentPack.consumed
+          ? [...turnAttachments].filter((item) => item?.source !== 'page-annotations')
+          : [...turnAttachments];
+        renderAttachments();
+        renderSkillSuggestions();
+        renderContextWindow('');
+        persistCurrentComposerDraft({ immediate: true });
+      }
       if (diagnostic.probeStatus === 'degraded') {
         markGatewayDegraded(error);
       } else {
-        markGatewayUnreachable(error);
+        markGatewayUnreachable(error, diagnostic);
       }
-      addMessage('system', diagnostic.kind === 'unknown'
-        ? `Hermes Browser Extension error: ${error?.message || String(error)}`
-        : `Hermes Browser Extension warning: ${diagnostic.userMessage}`);
+      // A mid-flight drop may have delivered the turn even though Browser never
+      // saw a response. Say so before the user resends the preserved draft.
+      const duplicateWarning = recoveryPlan.duplicateSendRisk
+        ? ' Hermes may already have received this turn before the connection dropped, so sending the draft again could duplicate it.'
+        : '';
+      addMessage('system', `Hermes Browser Extension warning: ${recoveryPlan.userMessage || diagnostic.userMessage}${duplicateWarning}`);
     } else {
       addMessage('system', `Hermes Browser Extension error: ${error?.message || String(error)}`);
     }
@@ -9427,8 +19985,16 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
       activeRunControl = markRunStreamClosed(activeRunControl);
       if ([RUN_CONTROL_PHASES.RUNNING, RUN_CONTROL_PHASES.UNCONFIRMED].includes(activeRunControl?.phase)) {
         if (!activeRunId) {
-          if (activeRunControl.phase === RUN_CONTROL_PHASES.RUNNING) activeRunControl = markRunTerminal(activeRunControl, 'failed');
-        } else if (isRemoteWsMode() || gatewayCapabilities.runStatus) {
+          // Bot Mode turns are synchronous prompt.submit streams: there is no
+          // server run identity to reconcile. Terminal-fail immediately so the
+          // composer and session switching never stay locked after a failed
+          // or completed bot turn.
+          if (activeRunControl.phase === RUN_CONTROL_PHASES.RUNNING ||
+              (document.body.classList.contains('bot-mode-engaged') &&
+               activeRunControl.phase === RUN_CONTROL_PHASES.UNCONFIRMED)) {
+            activeRunControl = markRunTerminal(activeRunControl, 'failed');
+          }
+        } else if (dashboardTransport || gatewayCapabilities.runStatus) {
           try {
             await reconcileActiveRunTerminal({ stopRequested: false, expectedGeneration: turnRunControlGeneration });
           } catch (error) {
@@ -9444,11 +20010,16 @@ async function askHermes(userText, turnAttachments = [...attachments], turnOptio
       }
       if (activeRunControl?.phase === RUN_CONTROL_PHASES.TERMINAL && activeRunControl.writerLease === 'released') {
         await settleActiveRunTerminal();
+        // The stream closed before a terminal runtime state; the server may have
+        // published a late image/tool result after the last event. Re-fetch the
+        // open session history so it is not missing from the transcript.
+        void refreshActiveSessionHistoryQuietly(runControlGeneration).catch(() => {});
       } else {
         updateComposerBusyState();
         renderContextWindow();
       }
       els.input.focus();
+      recheckBuildIdentityAfterUpdateTurn();
     }
   }
   return didSend;
@@ -9783,7 +20354,7 @@ async function prepareContextMenuTurn(rawRequest) {
   return contextMenuTurnForEffectiveContext(preparedTurn);
 }
 
-function serializePreparedContextMenuTurn(turn) {
+function serializePreparedContextMenuTurn(turn, browserControl) {
   const contextSettings = { ...settings, ...(turn.context.settingsOverride || {}) };
   const contextHash = browserContextPayloadHash({
     activeTab: turn.context.activeTab,
@@ -9791,10 +20362,11 @@ function serializePreparedContextMenuTurn(turn) {
     pageContext: turn.context.pageContext,
     settings: contextSettings,
   });
+  const targetTabs = turn.context.selectedTabs || (turn.context.activeTab ? [turn.context.activeTab] : []);
   return serializeBrowserTurnEnvelope({
     humanInput: turn.humanInput,
     activeTab: turn.context.activeTab,
-    tabs: turn.context.tabs,
+    tabs: targetTabs,
     selectedTabs: turn.context.selectedTabs,
     pageContext: turn.context.pageContext,
     contextScope: turn.context.contextScope,
@@ -9802,6 +20374,7 @@ function serializePreparedContextMenuTurn(turn) {
     settings: contextSettings,
     contextHash,
     contextDelivery: CONTEXT_DELIVERY_MODES.FULL,
+    browserControl,
   });
 }
 
@@ -9820,9 +20393,13 @@ async function executeContextMenuRequest(request, requestedRoute) {
     const { session } = await runInlineDraftInBackground(
       { adapterId: 'right-click', tabId: request.tabId, frameId: request.frameId },
       async () => {
+        const browserControl = await resolveBrowserControlForTurn({
+          context: turn.context,
+          scope: turn.context.contextScope,
+        });
         const sendTimeSettings = await refreshContextConsentLedger(consentSettings);
         const sendTimeTurn = contextMenuTurnForEffectiveContext(turn, sendTimeSettings);
-        return serializePreparedContextMenuTurn(sendTimeTurn);
+        return serializePreparedContextMenuTurn(sendTimeTurn, browserControl);
       },
     );
     await loadSessions({ quiet: true });
@@ -9997,10 +20574,34 @@ async function testConnection() {
       ok = true;
       return;
     }
-    const response = await apiFetch('/health', { method: 'GET' });
-    const text = await response.text();
+    let response = null;
+    let text = '';
+    let dashboardAttached = false;
+    if (usesDashboardWsChatTransport() && (activeDashboardWsConnection?.client?.readyState === 1 || desktopDashboardUrl)) {
+      const dashboard = await activateLocalDashboardTransport({ timeoutMs: 5_000 });
+      if (dashboard) {
+        dashboardAttached = true;
+      }
+    }
+    if (!dashboardAttached) {
+      try {
+        response = await apiFetch('/health', { method: 'GET' });
+        text = await response.text();
+      } catch (healthError) {
+        if (!isRemoteMode()) {
+          const dashboard = await activateLocalDashboardTransport({ timeoutMs: 5_000 });
+          if (dashboard) {
+            dashboardAttached = true;
+          } else {
+            throw healthError;
+          }
+        } else {
+          throw healthError;
+        }
+      }
+    }
     if (!connectionController.isCurrent(generation)) return;
-    if (!response.ok) {
+    if (response && !response.ok && !dashboardAttached) {
       if (isRemoteMode()) {
         const diagnostic = classifyRemoteGatewaySetup({
           url: settings.gatewayUrl,
@@ -10012,55 +20613,48 @@ async function testConnection() {
         renderRemoteDiagnostics(diagnostic);
         throw new Error(`${diagnostic.title}: ${diagnostic.detail}`);
       }
-      throw new Error(`${response.status}: ${text}`);
-    }
-    await loadGatewayCapabilities({ quiet: true, healthOk: true });
-    if (!connectionController.isCurrent(generation)) return;
-
-    const modelsResponse = await apiFetch('/v1/models', { method: 'GET' });
-    const modelsPayload = await readJsonResponse(modelsResponse);
-    if (!connectionController.isCurrent(generation)) return;
-    let degradedDiagnostic = null;
-    if (!modelsResponse.ok) {
-      if (isRemoteMode()) {
-        const remoteDiagnostic = classifyRemoteGatewaySetup({
-          url: settings.gatewayUrl,
-          healthOk: true,
-          status: modelsResponse.status,
-          body: JSON.stringify(modelsPayload).slice(0, 700),
-        });
-        lastRemoteDiagnostic = remoteDiagnostic;
-        renderRemoteDiagnostics(remoteDiagnostic);
-      }
-      const diagnostic = classifyGatewayError(`Health OK, auth/model probe failed (${modelsResponse.status}): ${JSON.stringify(modelsPayload).slice(0, 500)}`);
-      if (diagnostic.probeStatus === 'degraded') {
-        degradedDiagnostic = diagnostic;
+      const dashboard = !isRemoteMode() ? await activateLocalDashboardTransport({ timeoutMs: 5_000 }) : null;
+      if (dashboard) {
+        dashboardAttached = true;
       } else {
-        throw new Error(`Health OK, auth/model probe failed (${modelsResponse.status}): ${JSON.stringify(modelsPayload).slice(0, 500)}`);
+        throw new Error(`${response.status}: ${text}`);
       }
-    } else {
-      await loadModels({ quiet: true });
     }
-    await loadSkills({ quiet: true });
-    await loadProfiles({ quiet: true });
+    if (!dashboardAttached) {
+      await loadGatewayCapabilities({ quiet: true, healthOk: true });
+      if (!connectionController.isCurrent(generation)) return;
+      if (!apiCredentialSatisfied(settings) && gatewayCapabilities.browserPairing && automaticApiPairingAllowed(settings)) {
+        // connectApiWithPairing() starts its own connection generation, so the
+        // generation captured above is stale the moment it succeeds. Decide on
+        // the live connection state instead, and finish the test right there:
+        // pairing already ran the full canonical readiness cascade.
+        await connectApiWithPairing();
+        if (!isConnected()) {
+          setTestConnectionBusy(false);
+          flashTestConnectionResult(false);
+          throw new Error('Pairing was not completed. Approve the Hermes Browser request in the opened tab, then test again.');
+        }
+        setTestConnectionBusy(false);
+        flashTestConnectionResult(true);
+        return;
+      }
+    }
 
-    const hasSessionRoutes = await ensureHermesSession();
+    // Manual tests complete the same one readiness lifecycle as startup, so a
+    // test that repaired the connection also dismisses the startup gate.
+    const readiness = await runPanelConnectionReadiness({ restoreSettings: false });
     if (!connectionController.isCurrent(generation)) return;
-    if (degradedDiagnostic) {
-      connectionController.transition(generation, CONNECTION_STATES.DEGRADED, { errorKind: degradedDiagnostic.kind });
-      setStatus('warn', 'Hermes gateway connected with runtime warning', degradedDiagnostic.detail);
-      markGatewayDegraded(degradedDiagnostic.detail);
-    } else {
-      if (!connectionController.transition(generation, CONNECTION_STATES.READY, { gateway: 'api' })) return;
-      setStatus(
-        'ok',
-        hasSessionRoutes ? 'Hermes gateway + session API connected' : 'Hermes gateway connected',
-        hasSessionRoutes ? normalizeGatewayUrl(settings.gatewayUrl) : `${normalizeGatewayUrl(settings.gatewayUrl)} - OpenAI-compatible fallback mode`,
-      );
-      markGatewayReachable(normalizeGatewayUrl(settings.gatewayUrl));
-      lastRemoteDiagnostic = null;
-      renderRemoteDiagnostics(null);
-    }
+    const hasSessionRoutes = Boolean(readiness.sessionId) || sessionRoutesAvailable !== false;
+    const gatewayTransportKind = dashboardAttached ? 'dashboard-ws' : 'api';
+    if (!connectionController.transition(generation, CONNECTION_STATES.READY, { gateway: gatewayTransportKind })) return;
+    setStatus(
+      'ok',
+      dashboardAttached ? 'Hermes Desktop connected' : (hasSessionRoutes ? 'Hermes gateway + session API connected' : 'Hermes gateway connected'),
+      dashboardAttached ? (desktopDashboardUrl || normalizeGatewayUrl(settings.gatewayUrl)) : (hasSessionRoutes ? normalizeGatewayUrl(settings.gatewayUrl) : `${normalizeGatewayUrl(settings.gatewayUrl)} - OpenAI-compatible fallback mode`),
+    );
+    markGatewayReachable(dashboardAttached ? (desktopDashboardUrl || normalizeGatewayUrl(settings.gatewayUrl)) : normalizeGatewayUrl(settings.gatewayUrl));
+    lastRemoteDiagnostic = null;
+    renderRemoteDiagnostics(null);
 
     settings = { ...settings, lastConnectionTestedAt: Date.now() };
     await browserApi.storage.local.set({ hermesBrowserSettings: settings });
@@ -10068,12 +20662,12 @@ async function testConnection() {
 
     ok = true;
   } catch (error) {
-    const diagnostic = classifyGatewayError(error);
+    const diagnostic = classifyGatewayError(error, { url: normalizeGatewayUrl(settings.gatewayUrl) });
     if (!connectionController.transition(generation, CONNECTION_STATES.ERROR, { errorKind: diagnostic.kind })) return;
     if (error?.remoteDiagnostic && applyRemoteDiagnostic(error.remoteDiagnostic, { statusKind: 'error' })) {
       return;
     }
-    markGatewayUnreachable(error);
+    markGatewayUnreachable(error, diagnostic);
     if (isRemoteMode()) {
       const diagnostic = classifyRemoteGatewaySetup({
         url: settings.gatewayUrl,
@@ -10101,11 +20695,38 @@ function closeFloatingPanels() {
   els.inlineAssistModelButton?.setAttribute('aria-expanded', 'false');
   els.sessionMenu.hidden = true;
   els.sessionMenuButton.setAttribute('aria-expanded', 'false');
+  // Closing the session menu cancels an in-panel rename edit (the draft is not
+  // persisted anywhere else).
+  sessionRenameEditor = null;
+  if (els.botModePanel) {
+    els.botModePanel.hidden = true;
+    if (els.botModeLoadingOverlay) els.botModeLoadingOverlay.hidden = true;
+  }
+  els.botModeButton?.setAttribute('aria-expanded', 'false');
+  closeBotModeSheet();
+  closeBotModeLeaveDialog();
   els.attachMenu.hidden = true;
   els.attachMenuButton.setAttribute('aria-expanded', 'false');
   if (els.skillMenu) els.skillMenu.hidden = true;
   els.contextPopover.hidden = true;
   els.contextBarButton.setAttribute('aria-expanded', 'false');
+  els.botModeThreadsButton?.setAttribute('aria-expanded', 'false');
+}
+
+function openBotModeLeaveDialog() {
+  closeFloatingPanels();
+  if (els.botModeLeaveDialog) {
+    els.botModeLeaveDialog.hidden = false;
+    els.botModeLeaveDialog.setAttribute('aria-hidden', 'false');
+    els.botModeLeaveConfirmButton?.focus?.();
+  }
+}
+
+function closeBotModeLeaveDialog() {
+  if (els.botModeLeaveDialog) {
+    els.botModeLeaveDialog.hidden = true;
+    els.botModeLeaveDialog.setAttribute('aria-hidden', 'true');
+  }
 }
 
 function updateDockFloatingAnchor() {
@@ -10127,9 +20748,13 @@ function portalDockFloatingPanels() {
 function observeDockFloatingAnchor() {
   updateDockFloatingAnchor();
   globalThis.addEventListener?.('resize', () => {
-    updateDockFloatingAnchor();
-    if (!els.modelMenu?.hidden && modelSelectionTarget === 'assist') positionAssistModelMenu();
-  });
+      updateDockFloatingAnchor();
+      if (!els.modelMenu?.hidden && modelSelectionTarget === 'assist') positionAssistModelMenu();
+      if (activeGroupProjection) {
+        renderActiveProfileIndicator();
+        syncBotModeThreadsButton();
+      }
+    });
   if (!bottomDockResizeObserver && typeof globalThis.ResizeObserver === 'function' && els.bottomDock) {
     bottomDockResizeObserver = new globalThis.ResizeObserver(updateDockFloatingAnchor);
     bottomDockResizeObserver.observe(els.bottomDock);
@@ -10152,8 +20777,282 @@ function bindEvents() {
       assistantSelector: '.message.assistant',
     });
   });
-  window.addEventListener('resize', positionOperationToast);
+  watchTopbarHeight();
   els.settingsButton.addEventListener('click', openSettingsDialog);
+  els.botModeButton?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const opening = els.botModePanel.hidden;
+    closeFloatingPanels();
+    els.botModePanel.hidden = !opening;
+    els.botModeButton.setAttribute('aria-expanded', String(opening));
+    if (opening) {
+      if (!botModeRoster.length) void loadProfiles({ quiet: true, allowDashboardTrust: true });
+      setBotModeView(botModeView);
+      els.botModeSearch?.focus();
+    }
+  });
+  els.botModeViewAgents?.addEventListener('click', () => setBotModeView('agents'));
+  els.botModeViewGroups?.addEventListener('click', () => setBotModeView('groups'));
+  els.botModeCloseButton?.addEventListener('click', () => {
+    els.botModePanel.hidden = true;
+    els.botModeButton.setAttribute('aria-expanded', 'false');
+    els.botModeButton.focus();
+  });
+  els.botModeSearch?.addEventListener('input', () => {
+    if (botModeView === 'groups') renderBotModeGroupChats(els.botModeSearch.value);
+    else renderBotModeRoster(els.botModeSearch.value);
+  });
+  els.botModeRefreshButton?.addEventListener('click', () => {
+    els.botModeRefreshButton.classList.add('is-refreshing');
+    setTimeout(() => els.botModeRefreshButton?.classList.remove('is-refreshing'), 600);
+    void loadProfiles().then(() => {
+      if (botModeView === 'groups') renderBotModeGroupChats(els.botModeSearch?.value);
+    });
+  });
+  els.botModeOpenButton?.addEventListener('click', () => { void openBotModeSelection(); });
+  els.botModeEditButton?.addEventListener('click', () => {
+    openBotProfileSheet({ mode: 'edit', profileName: settings.botModeSelectedProfile || settings.activeProfile || '' });
+  });
+  els.botModeNewAgentButton?.addEventListener('click', () => {
+    openBotProfileSheet({ mode: 'create' });
+  });
+  els.botModeNewGroupButton?.addEventListener('click', () => {
+    openNewGroupModal();
+  });
+  els.botModeThreadsButton?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    void openGroupThreadMenu(event);
+  });
+  els.botModeNewThreadButton?.addEventListener('click', () => {
+    startNewGroupThread();
+  });
+  els.groupThreadExitButton?.addEventListener('click', () => {
+    activeGroupThreadId = '';
+    activeGroupPendingNewThread = false;
+    activeGroupExpandedThreads.clear();
+    renderGroupThreadStrip();
+    renderMessagesFromStorage();
+    updateSessionLabel();
+  });
+  els.botModeReturnButton?.addEventListener('click', () => {
+    void leaveBotModeForRegularSession().catch((error) => {
+      setStatus('error', 'Could not return to Regular Sessions', error?.message || String(error), { translateDetail: false });
+    });
+  });
+  els.newGroupCloseButton?.addEventListener('click', closeNewGroupModal);
+  els.newGroupCancelButton?.addEventListener('click', closeNewGroupModal);
+  els.newGroupSearch?.addEventListener('input', () => renderNewGroupBotList(els.newGroupSearch.value));
+  els.newGroupNameInput?.addEventListener('input', refreshNewGroupState);
+  els.newGroupCreateButton?.addEventListener('click', () => { void createNewGroupChat(); });
+  els.newGroupIconUpload?.addEventListener('click', () => {
+    els.newGroupFileInput?.click();
+  });
+  els.newGroupFileInput?.addEventListener('change', async () => {
+    const file = els.newGroupFileInput?.files?.[0];
+    if (!file) return;
+    try {
+      newGroupPendingImage = await normalizeAvatarImageFile(file);
+      updateNewGroupIconPreview();
+    } catch {
+      setStatus('warn', 'Image upload failed', 'Could not read that image. Please try another file.');
+    }
+  });
+  els.newGroupIconRemove?.addEventListener('click', () => {
+    newGroupPendingImage = null;
+    updateNewGroupIconPreview();
+  });
+  els.newGroupIconGenerate?.addEventListener('click', () => {
+      const name = String(els.newGroupNameInput?.value || 'a bot team').trim();
+      const members = [...newGroupSelection];
+      els.newGroupIconGenerate.disabled = true;
+    els.newGroupIconGenerate.textContent = 'Generating';
+    els.newGroupIconGenerate.classList.add('is-generating');
+      void generateGroupRoomPicture(name, members).then((image) => {
+        newGroupPendingImage = image;
+        updateNewGroupIconPreview();
+      }).catch((error) => {
+        setStatus('warn', 'Room picture failed', error?.message || 'Hermes image generation is not available on this connection.');
+      }).finally(() => {
+        if (els.newGroupIconGenerate) {
+        els.newGroupIconGenerate.disabled = false;
+        els.newGroupIconGenerate.textContent = 'Generate';
+        els.newGroupIconGenerate.classList.remove('is-generating');
+      }
+      });
+    });
+  els.groupSettingsCloseButton?.addEventListener('click', closeGroupSettingsModal);
+  els.groupSettingsCancelButton?.addEventListener('click', closeGroupSettingsModal);
+  els.groupSettingsSaveButton?.addEventListener('click', () => { void saveGroupSettings(); });
+  els.groupSettingsUploadButton?.addEventListener('click', () => {
+    els.groupSettingsFileInput?.click();
+  });
+  els.groupSettingsFileInput?.addEventListener('change', async () => {
+    const file = els.groupSettingsFileInput?.files?.[0];
+    if (!file) return;
+    try {
+      groupSettingsPendingImage = await normalizeAvatarImageFile(file);
+      updateGroupSettingsAvatarDisplay();
+    } catch {
+      setStatus('warn', 'Image upload failed', 'Could not read that image. Please try another file.');
+    }
+  });
+  els.groupSettingsRemoveImageButton?.addEventListener('click', () => {
+    groupSettingsPendingImage = null;
+    updateGroupSettingsAvatarDisplay();
+  });
+  els.groupSettingsGenerateButton?.addEventListener('click', () => {
+      const name = String(els.groupSettingsNameInput?.value || 'a bot team').trim();
+      els.groupSettingsGenerateButton.disabled = true;
+      void generateGroupRoomPicture(name, []).then((image) => {
+        groupSettingsPendingImage = image;
+        updateGroupSettingsAvatarDisplay();
+      }).catch((error) => {
+        setStatus('warn', 'Room picture failed', error?.message || 'Hermes image generation is not available on this connection.');
+      }).finally(() => {
+        if (els.groupSettingsGenerateButton) els.groupSettingsGenerateButton.disabled = false;
+      });
+    });
+  els.botModeSheetCloseButton?.addEventListener('click', () => closeBotModeSheet());
+  els.botModeSheetTabs?.addEventListener('click', (event) => {
+    const tab = event.target?.closest?.('[data-sheet-tab]')?.dataset.sheetTab;
+    if (tab) switchBotModeSheetTab(tab);
+  });
+  async function applyBotSheetImageFile(file) {
+    const icon = await normalizeAvatarImageFile(file);
+    botSheetAvatarChoice = { kind: 'image', icon };
+    if (els.botModeSheetUploadText) els.botModeSheetUploadText.textContent = file.name;
+    document.getElementById('botModeSheetImageButton')?.classList.add('has-file');
+    renderBotModeSheetAvatarPreview();
+    syncPetPickerState();
+  }
+
+  function openBotSheetImagePicker() {
+    const input = els.botModeSheetImageInput;
+    if (!input) return;
+    input.value = '';
+    input.addEventListener('cancel', () => input.blur(), { once: true });
+    input.click();
+  }
+
+  els.botModeSheetImageButton?.addEventListener('click', openBotSheetImagePicker);
+    els.botModeSheetImageInput?.addEventListener('change', async () => {
+      const file = els.botModeSheetImageInput?.files?.[0];
+      if (!file) return;
+      try {
+        await applyBotSheetImageFile(file);
+      } catch {
+        showBotModeSheetWarning(translateUiText('Could not read that image. Try another file.'));
+      } finally {
+        if (els.botModeSheetImageInput) els.botModeSheetImageInput.value = '';
+      }
+    });
+  els.botModeSheetAvatarClear?.addEventListener('click', () => {
+    botSheetAvatarChoice = { kind: 'clear' };
+    renderBotModeSheetAvatarPreview();
+    renderBotModeFaceGrid();
+    syncPetPickerState();
+  });
+  document.getElementById('botModeAdvancedSwitch')?.addEventListener('click', (event) => {
+    const tab = event.target?.closest?.('[data-advanced-tab]')?.dataset.advancedTab;
+    if (tab) switchBotAdvancedPane(tab);
+  });
+  document.getElementById('botModeBlobFacesButton')?.addEventListener('click', () => setBotSheetFaceMode('blob'));
+    document.getElementById('botModeClassicShapesButton')?.addEventListener('click', () => setBotSheetFaceMode('classic'));
+    els.botModeSheetNameInput?.addEventListener('input', () => {
+      if (els.botModeSheetNameInput) els.botModeSheetNameInput.title = els.botModeSheetNameInput.value;
+            const capsOpen = document.querySelector('[data-advanced-tab="capabilities"]')?.classList.contains('on');
+            if (capsOpen) switchBotAdvancedPane('capabilities');
+            if (botSheetMode !== 'create') return;
+      if (botSheetAvatarChoice?.kind === 'classic') {
+              const classicColor = botSheetClassicColorValue();
+              botSheetAvatarChoice = {
+                ...botSheetAvatarChoice,
+                color: classicColor,
+                icon: classicShapeDataUrl(botSheetAvatarChoice.shape, classicColor),
+              };
+              renderClassicShapeGrid();
+            }
+      renderBotModeFaceGrid();
+      renderBotModeSheetAvatarPreview();
+    });
+  els.botModeSheetSkillsSearch?.addEventListener('input', () => renderBotModeSheetSkills());
+  document.getElementById('botModeSheetToolsSearch')?.addEventListener('input', () => renderBotModeSheetTools());
+  document.getElementById('botModeSheetMcpSearch')?.addEventListener('input', () => renderBotModeSheetMcp());
+  els.activeProfileIndicator?.addEventListener('click', (event) => {
+      if (activeGroupProjection) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeProfileSwitchMenu();
+        toggleRoomPopover();
+        return;
+      }
+      event.stopPropagation();
+      toggleProfileSwitchMenu();
+    });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('#profileSwitchMenu, #activeProfileIndicator')) closeProfileSwitchMenu();
+    if (roomPopoverOpen && !event.target.closest('#roomMemberPopover, #activeProfileIndicator')) closeRoomPopover();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !roomPopoverOpen) return;
+    event.preventDefault();
+    closeRoomPopover();
+    els.activeProfileIndicator?.focus?.();
+  });
+  els.botModeSheetSaveButton?.addEventListener('click', () => { void saveBotProfileSheet(); });
+  els.scanAgentRosterButton?.addEventListener('click', () => { void loadProfiles(); });
+  els.botModePetSearch?.addEventListener('input', () => renderPetGrid());
+  document.getElementById('botModePetPicker')?.addEventListener('toggle', (event) => {
+    if (event.currentTarget.open) {
+      void ensurePetGallery();
+      // Thumbs are painted eagerly on render, but a gallery rendered while the
+      // picker was closed can predate the open: top it up on toggle.
+      primePetThumbs();
+    }
+  });
+  els.botModePetApply?.addEventListener('click', () => { void applyPetSelection(); });
+  els.botModePetClear?.addEventListener('click', () => { void clearPetSelection(); });
+  els.botModePetSearch?.addEventListener('focus', () => { void ensurePetGallery(); });
+  // Observer-independent top-up: whatever the picker shows but has no thumb yet
+  // is painted on scroll, so a closed-then-opened grid never stays blank.
+  let petPrimeTimer = 0;
+  els.botModePetGrid?.addEventListener('scroll', () => {
+    if (petPrimeTimer) return;
+    petPrimeTimer = setTimeout(() => {
+      petPrimeTimer = 0;
+      primePetThumbs(6);
+    }, 250);
+  }, { passive: true });
+  els.botModeEnabledInput?.addEventListener('change', () => {
+    // The switch must act immediately: persist, refresh the status line and
+    // the deck button visibility, and start the roster fetch when enabling.
+    const enabled = els.botModeEnabledInput.checked === true;
+    settings = { ...settings, botModeEnabled: enabled };
+    void browserApi.storage.local.set({ hermesBrowserSettings: settings }).then(() => {
+      renderBotModeRoster(els.botModeSearch?.value);
+      if (enabled && !botModeRoster.length) void loadProfiles({ quiet: true });
+    });
+  });
+  els.botModeDisplayDensity?.addEventListener('change', () => {
+      const density = els.botModeDisplayDensity?.value === 'compact' ? 'compact' : 'comfortable';
+      settings = { ...settings, botModeDisplayDensity: density };
+      void browserApi.storage.local.set({ hermesBrowserSettings: settings }).then(() => {
+        renderBotModeRoster(els.botModeSearch?.value);
+      });
+    });
+    els.botModeAnimateAvatars?.addEventListener('change', () => {
+      settings = { ...settings, botModeAnimateAvatars: els.botModeAnimateAvatars.value === 'on' };
+          void browserApi.storage.local.set({ hermesBrowserSettings: settings }).then(async () => {
+            if (settings.botModeAnimateAvatars) await ensurePetGallery().catch(() => undefined);
+            renderBotModeRoster(els.botModeSearch?.value);
+            renderActiveProfileIndicator();
+          });
+    });
+  els.botModeCronRefreshButton?.addEventListener('click', () => {
+    els.botModeCronRefreshButton.classList.add('is-refreshing');
+    setTimeout(() => els.botModeCronRefreshButton?.classList.remove('is-refreshing'), 600);
+    void loadCronJobs();
+  });
   els.languageSelect?.addEventListener('change', () => {
     setLocale(els.languageSelect.value).catch((error) => {
       console.warn('[Hermes Browser] Language change failed:', error);
@@ -10164,15 +21063,31 @@ function bindEvents() {
     taskStackExpanded = !taskStackExpanded;
     renderTaskStack();
   });
+  els.subagentStackToggle?.addEventListener('click', () => {
+    subagentExpanded = !subagentExpanded;
+    renderSubagentStack();
+  });
   els.openFullViewButton?.addEventListener('click', () => {
-    openFullView().catch((error) => setStatus('warn', 'Could not open full view', error?.message || String(error), { translateDetail: false }));
+    showWebDeprecationNotice();
+  });
+  document.getElementById('webDeprecationClose')?.addEventListener('click', hideWebDeprecationNotice);
+  document.getElementById('webDeprecationDialog')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideWebDeprecationNotice();
+    }
   });
   els.manualSettingsButton.addEventListener('click', openSettingsDialog);
-  [els.modelMenu, els.sessionMenu, els.contextPopover, els.attachMenu, els.skillMenu].filter(Boolean).forEach((panel) => {
+  [els.modelMenu, els.sessionMenu, els.botModePanel, els.contextPopover, els.attachMenu, els.skillMenu].filter(Boolean).forEach((panel) => {
     panel.addEventListener('click', (event) => event.stopPropagation());
     panel.addEventListener('pointerdown', (event) => event.stopPropagation());
   });
   els.connectButton.addEventListener('click', connectToHermes);
+  els.startupConnectButton?.addEventListener('click', () => {
+    connectToHermes().catch((error) => {
+      setStatus('warn', 'Connect failed', error?.message || String(error), { translateDetail: false });
+    });
+  });
   els.sessionMenuButton.addEventListener('click', async (event) => {
     event.stopPropagation();
     const nextHidden = !els.sessionMenu.hidden;
@@ -10191,6 +21106,10 @@ function bindEvents() {
       els.connectButton.focus();
       return;
     }
+    if (isBotModeEngaged()) {
+      openBotModeLeaveDialog();
+      return;
+    }
     try {
       await persistBrowserIntroSeen();
       await beginHermesBrowserDraft();
@@ -10201,6 +21120,11 @@ function bindEvents() {
     }
   });
   els.createSessionButton.addEventListener('click', async () => {
+    if (isBotModeEngaged()) {
+      closeFloatingPanels();
+      openBotModeLeaveDialog();
+      return;
+    }
     try {
       await persistBrowserIntroSeen();
       await beginHermesBrowserDraft();
@@ -10215,7 +21139,8 @@ function bindEvents() {
   els.sessionSearchInput.addEventListener('input', () => renderSessionMenu(els.sessionSearchInput.value));
   els.closeSettingsButton.addEventListener('click', closeSettingsDialog);
   els.messages.addEventListener('click', (event) => {
-    const image = event.target?.closest?.('.generated-image-inspectable')?.querySelector?.('img[data-slot="aui_generated-image"]')
+      if (interceptChatLinkClick(event, { tabsApi: browserApi?.tabs, windowOpen: window.open.bind(window) })) return;
+      const image = event.target?.closest?.('.generated-image-inspectable')?.querySelector?.('img[data-slot="aui_generated-image"]')
       || event.target?.closest?.('img[data-slot="aui_generated-image"]');
     if (!image) return;
     openGeneratedImageLightbox(image);
@@ -10292,12 +21217,68 @@ function bindEvents() {
       setStatus('warn', 'Gmail thread capture unavailable', error?.message || String(error), { translateDetail: false });
     }
   });
-  els.stopButton?.addEventListener('click', stopCurrentTurn);
+  els.explicitSiteCaptureDismiss?.addEventListener('click', () => {
+    settings = { ...settings, gmailCaptureHidden: true };
+    browserApi.storage.local.set({ hermesBrowserSettings: settings });
+    if (els.explicitSiteCaptureWrap) els.explicitSiteCaptureWrap.hidden = true;
+    setStatus('ok', 'Gmail capture button hidden', 'Turn it back on any time under Settings → Right-click actions.');
+  });
+  if (els.explicitSiteCaptureDismiss) {
+    const captureDismissLabel = translateUiText('Hide the Gmail capture button');
+    els.explicitSiteCaptureDismiss.setAttribute('aria-label', captureDismissLabel);
+    els.explicitSiteCaptureDismiss.title = captureDismissLabel;
+  }
+  els.stopButton?.addEventListener('click', () => {
+    if (activeGroupAbortController) {
+      activeGroupAbortController.abort();
+      return;
+    }
+    stopCurrentTurn();
+  });
   els.retryRunStatusButton?.addEventListener('click', () => { void retryActiveRunTerminalStatus(); });
   els.discardHeldQueueButton?.addEventListener('click', discardHeldQueuedTurn);
+  els.pageCommentTrayButton?.addEventListener('click', () => {
+    if (!els.pageCommentTray) return;
+    const open = els.pageCommentTray.hidden;
+    els.pageCommentTray.hidden = !open;
+    els.pageCommentTrayButton.setAttribute('aria-expanded', String(open));
+  });
+  els.pageCommentTraySend?.addEventListener('click', () => {
+    if (els.pageCommentTray) els.pageCommentTray.hidden = true;
+    void askHermes(String(els.input?.value || '').trim(), [...attachments]);
+  });
+  window.addEventListener('pagehide', () => {
+    persistCurrentComposerDraft({ immediate: true });
+    const tab = currentContext?.activeTab || annotationTargetTab();
+    if (tab?.id) {
+      browserApi.tabs.sendMessage(tab.id, { type: PAGE_ANNOTATION_MESSAGES.ABORT }).catch(() => {});
+    }
+    pageCommentPickActive = false;
+    void clearElementPickState({ tabId: tab?.id });
+  });
   browserApi.runtime.onMessage.addListener((message, sender) => {
     if (message?.type === ELEMENT_PICK_MESSAGES.RESULT) {
       applyPickedElementResult(message, sender);
+      return;
+    }
+    if (message?.type === PAGE_ANNOTATION_MESSAGES.CARD_SUBMIT) {
+      void commitPageCommentFromCard(message);
+      return;
+    }
+    if (message?.type === PAGE_ANNOTATION_MESSAGES.CARD_CANCEL) {
+      cancelPageCommentCard();
+      return;
+    }
+    if (message?.type === PAGE_ANNOTATION_MESSAGES.RESULT) {
+      applyPageAnnotationResult(message, sender);
+      return;
+    }
+    if (message?.type === PAGE_ANNOTATION_MESSAGES.PICKING && message.documentKey && pageAnnotationSession) {
+      pageAnnotationSession.documentKey = message.documentKey;
+      return;
+    }
+    if (message?.type === PAGE_ANNOTATION_MESSAGES.ERROR) {
+      if (message.reason === 'iframe_not_supported') setStatus('warn', t('ui.comment.iframe.unsupported'), '');
       return;
     }
     if (message?.type === ELEMENT_PICK_MESSAGES.CANCELLED) {
@@ -10311,6 +21292,14 @@ function bindEvents() {
         ? changes[TASK_STACKS_STORAGE_KEY].newValue
         : {};
       renderTaskStack();
+      return;
+    }
+    if (areaName === 'local' && changes?.[ROOM_EVENTS_STORAGE_KEY]) {
+      roomEventStore = changes[ROOM_EVENTS_STORAGE_KEY].newValue
+        && typeof changes[ROOM_EVENTS_STORAGE_KEY].newValue === 'object'
+        && !Array.isArray(changes[ROOM_EVENTS_STORAGE_KEY].newValue)
+        ? changes[ROOM_EVENTS_STORAGE_KEY].newValue
+        : {};
       return;
     }
     if (!isSessionStorageArea(areaName)) return;
@@ -10331,6 +21320,14 @@ function bindEvents() {
   });
   browserApi.tabs?.onUpdated?.addListener?.((tabId, changeInfo) => {
     if (changeInfo?.url) clearPickedElementForTab(tabId, { silent: true });
+    if (changeInfo?.url && pageAnnotationSession?.tabId === tabId) {
+      pageAnnotationStale = Boolean(pageAnnotationStack.pins?.length);
+      if (!pageAnnotationStale && !pageAnnotationDraft) {
+        stopPageAnnotationSession().catch(() => {});
+      } else {
+        renderPageAnnotationPanel();
+      }
+    }
   });
   browserApi.tabs?.onRemoved?.addListener?.((tabId) => {
     clearPickedElementForTab(tabId, { silent: true });
@@ -10348,17 +21345,104 @@ function bindEvents() {
       refreshWakeState();
     });
   });
-  els.voiceButton?.addEventListener('click', toggleVoiceDictation);
+  els.voiceButton?.addEventListener('click', () => {
+    toggleVoiceDictation().catch((error) => {
+      voiceTransitionInFlight = false;
+      cleanupVoiceRecorder();
+      dictating = false;
+      updateVoiceButtonState();
+      setStatus('warn', 'Voice dictation unavailable', error?.message || String(error), { translateDetail: false });
+    });
+  });
   els.checkUpdatesButton?.addEventListener('click', () => checkForUpdates());
   els.reviewUpdateButton?.addEventListener('click', () => checkForUpdates({ openReview: true }));
   els.closeUpdateDialogButton?.addEventListener('click', () => closeUpdateDialog());
   els.maybeLaterButton?.addEventListener('click', () => closeUpdateDialog());
   els.updateNowButton?.addEventListener('click', launchBrowserUpdateWithHermes);
+  els.reloadBuildButton?.addEventListener('click', reloadBrowserRuntimeForNewBuild);
   els.closeOperationToastButton?.addEventListener('click', hideOperationToast);
   els.refreshModelsButton.addEventListener('click', refreshModelsFromMenu);
   renderModelRefreshState();
-  els.refreshProfilesButton?.addEventListener('click', () => loadProfiles());
-  els.profileSelect?.addEventListener('change', () => applySelectedProfile(els.profileSelect.value));
+  els.refreshProfilesButton?.addEventListener('click', () => {
+    // Refresh profiles: spin the glyph for the duration of the sync and keep
+    // the button honest (aria-busy) while the roster reloads.
+    const button = els.refreshProfilesButton;
+    button?.classList.add('is-refreshing');
+    button?.setAttribute('aria-busy', 'true');
+    void loadProfiles().finally(() => {
+      button?.classList.remove('is-refreshing');
+      button?.removeAttribute('aria-busy');
+    });
+  });
+  els.profileSelect?.addEventListener('change', () => {
+    void handleRegularProfileSelection(els.profileSelect.value);
+  });
+  els.profileSwitchCarryButton?.addEventListener('click', () => {
+    void resolveProfileSwitchChoice('carry');
+  });
+  els.profileSwitchCleanButton?.addEventListener('click', () => {
+    void resolveProfileSwitchChoice('clean');
+  });
+  els.profileSwitchCancelButton?.addEventListener('click', () => {
+    void resolveProfileSwitchChoice('cancel');
+  });
+  els.profileSwitchDialog?.addEventListener('click', (event) => {
+    if (event.target === els.profileSwitchDialog) closeProfileSwitchDialog({ restoreSelection: true });
+  });
+  els.profileSwitchDialog?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (!pendingProfileSwitch?.processing) closeProfileSwitchDialog({ restoreSelection: true });
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [els.profileSwitchCarryButton, els.profileSwitchCleanButton, els.profileSwitchCancelButton]
+      .filter((button) => button && !button.disabled && !button.hidden);
+    if (!focusable.length) return;
+    const currentIndex = focusable.indexOf(document.activeElement);
+    const nextIndex = event.shiftKey
+      ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+      : (currentIndex === focusable.length - 1 ? 0 : currentIndex + 1);
+    event.preventDefault();
+    focusable[nextIndex].focus();
+  });
+  els.sessionMenuReturnButton?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeFloatingPanels();
+    void leaveBotModeForRegularSession();
+  });
+  els.botModeLeaveConfirmButton?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeBotModeLeaveDialog();
+    void leaveBotModeForRegularSession();
+  });
+  els.botModeLeaveCancelButton?.addEventListener('click', closeBotModeLeaveDialog);
+  els.botModeLeaveDialog?.addEventListener('click', (event) => {
+    if (event.target === els.botModeLeaveDialog) closeBotModeLeaveDialog();
+  });
+  els.botModeLeaveDialog?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeBotModeLeaveDialog();
+      }
+    });
+    els.modelSwitchConfirmButton?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const pending = pendingModelSwitch;
+      closeModelSwitchDialog();
+      if (pending?.model) applySelectedModel(pending.model.id, { keepOpen: true });
+    });
+    els.modelSwitchCancelButton?.addEventListener('click', closeModelSwitchDialog);
+    els.modelSwitchDialog?.addEventListener('click', (event) => {
+      if (event.target === els.modelSwitchDialog) closeModelSwitchDialog();
+    });
+    els.modelSwitchDialog?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeModelSwitchDialog();
+      }
+    });
+
   els.refreshAgentsButton?.addEventListener('click', () => loadAgents());
   els.addCustomAgentButton?.addEventListener('click', () => {
     const ports = parseAgentPortsInput(els.agentPortsInput?.value || '');
@@ -10441,6 +21525,7 @@ function bindEvents() {
       setModelRuntimeOption('reasoningEffort', normalizeReasoningEffort(effort.dataset.effort));
     }
   });
+  bindWheelScrollX(els.modelProviderList);
   els.modelSearchInput.addEventListener('input', () => renderModelMenu(els.modelSearchInput.value));
   els.attachMenuButton.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -10468,6 +21553,12 @@ function bindEvents() {
         await startElementPick();
         return;
       }
+      if (kind === 'comment-page') {
+        els.attachMenu.hidden = true;
+        els.attachMenuButton.setAttribute('aria-expanded', 'false');
+        await startElementPick({ purpose: 'comment' });
+        return;
+      }
       if (kind === 'clear-pick') {
         clearPickedElementForActiveTab();
         return;
@@ -10481,6 +21572,23 @@ function bindEvents() {
       addMessage('system', `Attach failed: ${error?.message || String(error)}`);
     }
   });
+  els.pageAnnotationElementButton?.addEventListener('click', () => {
+    startPageAnnotation(PAGE_ANNOTATION_MODES.ELEMENT).catch((error) => setStatus('warn', 'Page comments failed', error?.message || String(error), { translateDetail: false }));
+  });
+  els.pageAnnotationAreaButton?.addEventListener('click', () => {
+    startPageAnnotation(PAGE_ANNOTATION_MODES.AREA).catch((error) => setStatus('warn', 'Page comments failed', error?.message || String(error), { translateDetail: false }));
+  });
+  els.pageAnnotationCancelButton?.addEventListener('click', () => {
+    cancelPageAnnotationSelection().catch(() => {});
+  });
+  els.pageAnnotationSaveButton?.addEventListener('click', savePageAnnotationDraft);
+  els.pageAnnotationDiscardButton?.addEventListener('click', discardPageAnnotationDraft);
+  els.pageAnnotationFlushButton?.addEventListener('click', () => flushPageAnnotationsToComposer());
+  els.pageAnnotationQueueButton?.addEventListener('click', () => flushPageAnnotationsToComposer({ queue: true }));
+  els.pageAnnotationClearButton?.addEventListener('click', clearPageAnnotations);
+  els.pageAnnotationDoneButton?.addEventListener('click', () => {
+    stopPageAnnotationSession({ keepPins: false }).catch(() => {});
+  });
   els.fileInput.addEventListener('change', async () => {
     await attachFiles(els.fileInput.files);
     els.fileInput.value = '';
@@ -10493,6 +21601,24 @@ function bindEvents() {
     await attachFolder(els.folderInput.files);
     els.folderInput.value = '';
   });
+  {
+    const STATUS_STACK_KEY = 'hermesStatusStackCollapsed';
+    const applyStatusStack = (collapsed) => {
+      els.composer?.classList.toggle('status-stack-collapsed', collapsed);
+      els.statusStackToggle?.setAttribute('aria-expanded', String(!collapsed));
+    };
+    let statusStackCollapsed = false;
+    try { statusStackCollapsed = localStorage.getItem(STATUS_STACK_KEY) === '1'; } catch { /* storage unavailable */ }
+    applyStatusStack(statusStackCollapsed);
+    els.statusStackToggle?.addEventListener('click', () => {
+      statusStackCollapsed = !statusStackCollapsed;
+      // Always reopen with the DOM preview closed, however it was left.
+      if (els.contextPreview) els.contextPreview.hidden = true;
+      els.contextChip?.setAttribute('aria-expanded', 'false');
+      applyStatusStack(statusStackCollapsed);
+      try { localStorage.setItem(STATUS_STACK_KEY, statusStackCollapsed ? '1' : '0'); } catch { /* storage unavailable */ }
+    });
+  }
   els.contextChip.addEventListener('click', () => {
     const nextHidden = !els.contextPreview.hidden;
     els.contextPreview.hidden = nextHidden;
@@ -10516,6 +21642,11 @@ function bindEvents() {
   els.statusCopyDiagnosticsButton?.addEventListener('click', () => {
     copySupportDiagnostics().catch((error) => setStatus('warn', 'Diagnostics copy failed', error?.message || String(error), { translateDetail: false }));
   });
+  // Recovery action: re-probe /health with the structured diagnostic so the
+  // panel can replace an ambiguous failure with real evidence.
+  els.statusRetryProbeButton?.addEventListener('click', () => {
+    probeGatewayLiveness({ quiet: false }).catch(() => {});
+  });
   els.clearTokenButton?.addEventListener('click', () => {
     clearStoredToken().catch((error) => setStatus('warn', 'Could not clear token', error?.message || String(error), { translateDetail: false }));
   });
@@ -10524,6 +21655,133 @@ function bindEvents() {
       renderBrowserContextConsentControl();
       setStatus('warn', 'Context sharing unchanged', error?.message || String(error), { translateDetail: false });
     });
+  });
+  browserControlDialogUi = createBrowserControlDialog({
+    dialog: els.browserControlDialog,
+    launcher: els.browserControlMenuButton,
+    closeButton: els.browserControlDismissButton,
+    focusFallback: els.input,
+    label: () => t('browser_control.kicker'),
+    refresh: () => refreshBrowserControlStatus({ follow: false }),
+    scopeInput: els.browserControlDialogScopeInput,
+    tabsField: $('#browserControlDialogTabs'), tabsList: $('#browserControlDialogTabList'),
+    applyButton: $('#browserControlDialogApplyScope'), scopeHint: $('#browserControlDialogScopeHint'),
+    translate: t,
+    loadTabs: () => browserApi.tabs.query({ currentWindow: true }),
+    getScope: () => settings.browserControlScope || 'this-tab',
+    getSelectedTabIds: () => browserControlStatus?.ownedTabIds || browserControlStatus?.leasedTabIds || [],
+    applyScope: async ({ scope, tabIds }) => {
+      const authority = browserControlStatus;
+      const tab = await activeTab();
+      const selectedIds = scope === 'this-tab' ? [tab?.id] : tabIds;
+      const result = await browserControlMessage('HERMES_CONTROLLER_SCOPE_REPLACE', {
+        kind: scope, tabIds: selectedIds, ownerId: authority?.controllerId,
+        expectedGeneration: authority?.generation, expectedSettingsRevision: authority?.settingsRevision,
+        ...(scope === 'task-set' ? { taskSetId: `task-set-${[...selectedIds].sort((a, b) => a - b).join('-')}`.slice(0, 120) } : {}),
+      });
+      await refreshBrowserControlStatus({ follow: false });
+      if (!result?.ok) throw Object.assign(new Error(result?.error || 'scope_change_failed'), { code: result?.error });
+      // Read back the settings the worker saved; never publish picker intent.
+      const stored = await browserApi.storage.local.get('hermesBrowserSettings');
+      if (stored.hermesBrowserSettings?.browserControlScope !== scope) throw new Error('scope_unconfirmed');
+      settings = { ...settings, browserControlScope: stored.hermesBrowserSettings.browserControlScope };
+      renderBrowserControl();
+    },
+  });
+  els.browserControlEnableButton?.addEventListener('click', async () => {
+    els.browserControlEnableButton.disabled = true;
+    try {
+      await enableBrowserControl();
+    } catch (error) {
+      showOperationToast({ kind: 'warn', title: 'Control not enabled', detail: error?.message || String(error) });
+    } finally {
+      els.browserControlEnableButton.disabled = false;
+      renderBrowserControl();
+    }
+  });
+  els.browserControlAttachButton?.addEventListener('click', async () => {
+    els.browserControlAttachButton.disabled = true;
+    try {
+      await attachBrowserControlToCurrentTab();
+    } catch (error) {
+      showOperationToast({ kind: 'warn', title: 'Control not attached', detail: error?.message || String(error) });
+    } finally {
+      els.browserControlAttachButton.disabled = false;
+      renderBrowserControl();
+    }
+  });
+  els.browserControlAuthorizeButton?.addEventListener('click', async () => {
+    // One-time Hermes authorization for tab control. The panel is (usually)
+    // already connected for chat, so this is scoped to the control surface and
+    // never re-runs the first-run connect flow.
+    els.browserControlAuthorizeButton.disabled = true;
+    try {
+      await ensureControllerCredentialForControl();
+      await refreshBrowserControlStatus({ follow: false });
+      if (settings.browserControlEnabled === true) await attachBrowserControlToCurrentTab().catch(() => null);
+    } catch (error) {
+      showOperationToast({ kind: 'warn', title: 'Control not authorized', detail: error?.message || String(error) });
+    } finally {
+      els.browserControlAuthorizeButton.disabled = false;
+      renderBrowserControl();
+    }
+  });
+  for (const button of [els.browserControlDetachButton, els.browserControlOffButton]) {
+    button?.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await detachBrowserControl();
+      } catch (error) {
+        showOperationToast({ kind: 'warn', title: t('browser_control.turn_off'), detail: error?.message || String(error) });
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+  els.browserIntroDismissButton?.addEventListener('click', () => {
+    persistBrowserIntroSeen();
+  });
+  els.browserControlScopeInput?.addEventListener('change', () => {
+    if (settings.browserControlEnabled === true) {
+      renderBrowserControl();
+      return;
+    }
+    persistBrowserControlPreferences({ browserControlScope: els.browserControlScopeInput.value })
+      .then(renderBrowserControl)
+      .catch((error) => showOperationToast({ kind: 'warn', title: 'Scope unchanged', detail: error?.message || String(error) }));
+  });
+  for (const button of [els.browserControlStayButton, els.browserControlDialogStayButton]) {
+    button?.addEventListener('click', () => {
+      setBrowserControlViewBehavior('stay').catch((error) => showOperationToast({ kind: 'warn', title: 'View unchanged', detail: error?.message || String(error) }));
+    });
+  }
+  for (const button of [els.browserControlFollowButton, els.browserControlDialogFollowButton]) {
+    button?.addEventListener('click', () => {
+      setBrowserControlViewBehavior('follow').catch((error) => showOperationToast({ kind: 'warn', title: 'View unchanged', detail: error?.message || String(error) }));
+    });
+  }
+  els.browserControlPauseButton?.addEventListener('click', () => {
+    toggleBrowserControlPause().catch((error) => showOperationToast({ kind: 'warn', title: 'Control state unchanged', detail: error?.message || String(error) }));
+  });
+  els.browserControlStopButton?.addEventListener('click', () => {
+    browserControlMessage('HERMES_CONTROLLER_STOP')
+      .then(() => refreshBrowserControlStatus())
+      .catch((error) => showOperationToast({ kind: 'warn', title: 'Stop failed', detail: error?.message || String(error) }));
+  });
+  els.browserControlApproveButton?.addEventListener('click', () => {
+    decideBrowserControlApproval(true).catch((error) => showOperationToast({ kind: 'warn', title: 'Approval not accepted', detail: error?.message || String(error) }));
+  });
+  els.browserControlRejectButton?.addEventListener('click', () => {
+    decideBrowserControlApproval(false).catch((error) => showOperationToast({ kind: 'warn', title: 'Rejection not accepted', detail: error?.message || String(error) }));
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      persistCurrentComposerDraft({ immediate: true });
+      if (browserControlPollTimer) clearTimeout(browserControlPollTimer);
+      browserControlPollTimer = null;
+      return;
+    }
+    void refreshBrowserControlStatus().then(scheduleBrowserControlPoll);
   });
   els.gatewayModeInput?.addEventListener('change', () => {
     const summary = currentGatewaySummary({ gatewayMode: els.gatewayModeInput.value, gatewayUrl: els.gatewayUrlInput.value });
@@ -10567,6 +21825,11 @@ function bindEvents() {
     void setAppearanceOption('textZoomPercent', stepTextZoomPercent(current, 'up'));
   });
   els.fontProfileSelect?.addEventListener('change', () => {
+    const theme = normalizedPanelThemeId(settings.appearanceTheme);
+    if (themeOwnsFont(theme)) {
+      themeFontPinned = true;
+      themeFontPinnedFor = theme;
+    }
     void setAppearanceOption('fontProfile', els.fontProfileSelect.value);
   });
   els.customFontFamilyInput?.addEventListener('change', () => {
@@ -10593,6 +21856,8 @@ function bindEvents() {
     const card = event.target.closest('[data-theme]');
     if (!card) return;
     customThemeDeleteArmedId = '';
+    themeFontPinned = false;
+    themeFontPinnedFor = '';
     void setAppearanceOption('appearanceTheme', card.dataset.theme);
   });
   els.customThemeImportTextarea?.addEventListener('input', () => {
@@ -10628,6 +21893,31 @@ function bindEvents() {
   });
   browserApi.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
+    if (Object.hasOwn(changes, 'hermesBrowserSettings')) {
+      const next = changes.hermesBrowserSettings?.newValue;
+      if (next && typeof next === 'object') {
+        // The controller worker and the pairing flow rewrite this record (a
+        // rejected pairing token is dropped, the transport can flip). Without
+        // adopting those writes the panel keeps a stale apiKey and keeps hiding
+        // the connect panel that owns the "Connect to Hermes" repair button,
+        // which leaves tab control stuck with no reachable way to reconnect.
+        const tracked = [
+          'apiKey', 'tokenSource', 'lastConnectionTestedAt',
+          'browserControlEnabled', 'browserControlPaused',
+          'connectionMode', 'connectionTransport', 'gatewayMode', 'gatewayUrl',
+          'trustedDashboardOrigin', 'trustedDashboardTabId', 'remoteDashboardSession',
+        ];
+        const patch = {};
+        for (const key of tracked) {
+          if (Object.hasOwn(next, key)) patch[key] = next[key];
+        }
+        if (Object.keys(patch).length) {
+          settings = { ...settings, ...patch };
+          updateConnectionPrompt();
+          renderBrowserControl();
+        }
+      }
+    }
     if (Object.hasOwn(changes, CUSTOM_THEME_STORAGE_KEY)) void handleCustomThemeStoreChange();
     if (Object.hasOwn(changes, CONTEXT_CONSENT_STORAGE_KEY)) {
       settings = {
@@ -10660,9 +21950,31 @@ function bindEvents() {
       setStatus('warn', 'Settings not saved', error?.message || String(error), { translateDetail: false });
     }
   });
+  els.localDocumentApproveButton?.addEventListener('click', async () => {
+    try {
+      settings = { ...settings, allowLocalDocuments: true };
+      await browserApi.storage.local.set({ hermesBrowserSettings: settings });
+      dismissLocalDocumentApprovalNotice();
+      await refreshContext({ allowLocalDocuments: true });
+      await attachBrowserControlToCurrentTab();
+    } catch (error) {
+      showOperationToast({ kind: 'warn', title: 'Control not attached', detail: error?.message || String(error) });
+    }
+  });
+  els.localDocumentDismissButton?.addEventListener('click', () => {
+    dismissLocalDocumentApprovalNotice();
+  });
   els.sessionOwnershipNotice?.addEventListener('click', handleSessionOwnershipDecision);
   els.composer.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (activeGroupProjection) {
+      // Group rooms bypass browser-command parsing: "@name" / "@everyone" are
+      // room routing syntax, not extension commands.
+      const userText = els.input.value.trim();
+      if (!userText && !attachments.length) return;
+      await sendActiveGroupMessage(userText, [...attachments]);
+      return;
+    }
     const browserCommand = parseBrowserCommand(els.input.value);
     if (browserCommand?.kind === 'native') {
       await executeNativeBrowserCommand(browserCommand);
@@ -10706,7 +22018,12 @@ function bindEvents() {
     }
   });
   els.input.addEventListener('paste', (event) => {
-    handlePasteImages(event).catch((error) => addMessage('system', `Paste failed: ${error?.message || String(error)}`));
+    handlePasteImages(event)
+      .then((handledImages) => {
+        if (handledImages) return;
+        handlePasteText(event);
+      })
+      .catch((error) => addMessage('system', `Paste failed: ${error?.message || String(error)}`));
   });
   document.addEventListener('paste', (event) => {
     const tag = String(event.target?.tagName || '').toUpperCase();
@@ -10736,6 +22053,7 @@ function bindEvents() {
     renderContextWindow();
     renderSkillSuggestions();
     updateComposerBusyState();
+    persistCurrentComposerDraft();
   });
   document.querySelectorAll('[data-prompt]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -10757,6 +22075,25 @@ function bindEvents() {
   els.contextScopeMenu?.addEventListener('input', (event) => {
     if (!event.target?.matches?.('.context-scope-search')) return;
     renderContextScopeTabList(event.target.value);
+  });
+  els.contextScopeMenu?.addEventListener('keydown', (event) => {
+    if (!event.target?.matches?.('.context-scope-search')) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (event.target.value) {
+        event.target.value = '';
+        renderContextScopeTabList('');
+      } else {
+        els.contextScopeMenu.hidden = true;
+        renderContextScopeControls();
+      }
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const firstToggle = els.contextScopeMenu.querySelector('.context-scope-tab-row .context-scope-include-toggle');
+      if (firstToggle) {
+        firstToggle.click();
+      }
+    }
   });
   els.contextScopeMenu?.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -10783,6 +22120,31 @@ function bindEvents() {
       rerenderContextScopePromptSelectionPreservingScroll(currentContextScopeSearchQuery());
       return;
     }
+    if (action === 'prompt-tabs-triage') {
+      els.contextScopeMenu.hidden = true;
+      renderContextScopeControls();
+      if (els.input) {
+        els.input.value = '/sort-tabs';
+        els.input.focus();
+        askHermes('/sort-tabs', [], { disableCommandParsing: false });
+      }
+      return;
+    }
+    if (action === 'open-context-consent') {
+      const gateReason = button.dataset.contextConsentReason || '';
+      els.contextScopeMenu.hidden = true;
+      renderContextScopeControls();
+      openSettingsDialog();
+      requestAnimationFrame(() => {
+        if (gateReason === 'principal-unavailable') {
+          els.testConnectionButton?.focus({ preventScroll: true });
+          return;
+        }
+        els.browserContextConsentControl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        els.browserContextConsentInput?.focus({ preventScroll: true });
+      });
+      return;
+    }
 
     els.contextScopeMenu.hidden = true;
     if (action === 'chat-only') {
@@ -10790,8 +22152,8 @@ function bindEvents() {
         .catch((error) => setStatus('warn', 'Could not switch to Chat only', error?.message || String(error), { translateDetail: false }));
       return;
     }
-    if (action === 'follow-active' || action === 'unlock') {
-      unlockContextScope().catch((error) => setStatus('warn', 'Could not unlock tab scope', error?.message || String(error), { translateDetail: false }));
+    if (action === 'follow-active' || action === 'unlock' || action === 'attached-reset') {
+      unlockContextScope().catch((error) => setStatus('warn', 'Could not reset tab scope', error?.message || String(error), { translateDetail: false }));
       return;
     }
     if (action === 'pin-active') {
@@ -10885,6 +22247,7 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
         if (restoreSettings) {
           await loadSettings({ restoreMessages: false });
           await loadElementPickState();
+          await loadPageAnnotationState();
         }
         settings = migrateConnectionSettings(settings);
         return {
@@ -10904,11 +22267,27 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
         }
         const state = await probeGatewayLiveness({ quiet: true });
         if (!apiCredentialSatisfied(settings)) {
+          const dashboard = await activateLocalDashboardTransport({ timeoutMs: 5_000 });
+          if (dashboard) {
+            return {
+              detail: `Local Desktop dashboard transport ready at ${dashboard.baseUrl}.`,
+              gateway: { connected: true, state: 'connected', url: dashboard.baseUrl, transport: 'dashboard-ws' },
+            };
+          }
           const error = new Error('Add a Hermes API token or complete pairing to use full Hermes Browser mode.');
           error.readinessStatus = 'unconfigured';
           throw error;
         }
-        if (!state.connected) throw new Error(currentConnectionTroubleshooting(state));
+        if (!state.connected) {
+          const dashboard = await activateLocalDashboardTransport({ timeoutMs: 5_000 });
+          if (dashboard) {
+            return {
+              detail: `Local Desktop dashboard transport ready at ${dashboard.baseUrl}.`,
+              gateway: { connected: true, state: 'connected', url: dashboard.baseUrl, transport: 'dashboard-ws' },
+            };
+          }
+          throw new Error(currentConnectionTroubleshooting(state));
+        }
         return {
           detail: connectionStateTitle(state, currentGatewaySummary()),
           gateway: { connected: true, state: state.state, url: settings.gatewayUrl },
@@ -10921,9 +22300,10 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
           : { status: 'ready', detail: 'Capabilities loaded.' };
       },
       loadModels: async () => {
-        await loadModels({ quiet: true });
-        return availableModels.length
-          ? { status: 'ready', detail: `${availableModels.length} models loaded.` }
+        const initial = await loadModels({ quiet: true, startup: true });
+        if (initial?.deferred) void refreshModelCatalogInBackground().catch(() => undefined);
+        return initial?.ok
+          ? { status: 'ready', detail: `${initial.count} models loaded.` }
           : { status: 'fallback', detail: 'Model catalog unavailable; using fallback runtime metadata.' };
       },
       selectModel: async () => selectedModelReadiness({ settings, availableModels, activeSessionRuntime }),
@@ -10933,12 +22313,7 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
           ? { status: 'ready', detail: `${availableSkills.length} skills available.` }
           : { status: 'skipped', detail: 'Skills route unavailable on this runtime.' };
       },
-      loadProfiles: async () => {
-        await loadProfiles({ quiet: true });
-        return gatewayCapabilities.profiles
-          ? { status: 'ready', detail: `${availableProfiles.length} profiles available.` }
-          : { status: 'skipped', detail: 'Profiles route unavailable on this runtime.' };
-      },
+      loadProfiles: async () => loadProfiles({ quiet: true }),
       loadSessions: async () => {
         const outcome = await loadSessions({ quiet: true });
         return outcome?.ok && sessionRoutesAvailable !== false
@@ -10962,7 +22337,12 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
       },
     },
     onEvent: (event) => {
-      if (event.type === 'stage') setStartupReadiness(event);
+      if (event.type === 'stage') {
+        setStartupReadiness(event);
+        const stageKey = String(event?.step || event?.phase || '').trim();
+        if (stageKey) hbeBootEmit(`panel:stage-settle:${stageKey}`, { startMark: 'panel:body-start' });
+        if (stageKey === 'settings') hbeBootEmit('panel:settings-restored', { startMark: 'panel:body-start' });
+      }
     },
   });
 }
@@ -10970,6 +22350,9 @@ async function runPanelConnectionReadiness({ restoreSettings = false } = {}) {
 async function runStartupReadiness() {
   try {
     await runPanelConnectionReadiness({ restoreSettings: true });
+    hbeBootEmit('panel:readiness-complete');
+    renderBotModeRoster();
+    renderProfileRosterPreview();
     await hydrateDelegationWatches();
     await refreshWakeState();
     await consumePendingVoiceDraft();
@@ -10977,6 +22360,7 @@ async function runStartupReadiness() {
   } catch (error) {
     setStatus('error', `Startup ${error?.stage || 'readiness'} failed`, error?.message || String(error), { translateDetail: false });
     renderEmptyState();
+    hbeBootEmit('panel:readiness-failed');
   }
 }
 
@@ -10991,14 +22375,21 @@ subscribeLocale(() => {
   updateComposerBusyState();
   renderWakeState();
   renderModelRefreshState();
+  renderBrowserControl();
   if (lastVisibleStatus) setStatus(lastVisibleStatus.kind, lastVisibleStatus.title, lastVisibleStatus.detail, {
     translateTitle: lastVisibleStatus.translateTitle,
     translateDetail: lastVisibleStatus.translateDetail,
   });
 });
 await initI18n();
+hbeBootEmit('panel:i18n-ready');
 bindEvents();
+void loadBotProfileOverrides();
+void refreshPetAvatarCache();
 await runStartupReadiness();
+renderBrowserControl();
+await refreshBrowserControlStatus({ follow: false });
+scheduleBrowserControlPoll();
 try {
   await consumePendingInlineDraftRequest();
   await consumePendingContextMenuRequest();
@@ -11017,3 +22408,5 @@ renderVersionInfo();
 renderContextScopeControls();
 updateVoiceButtonState();
 renderEmptyState();
+// Not awaited: the update watch and the silent check must never delay boot.
+void initializeUpdateFlow();

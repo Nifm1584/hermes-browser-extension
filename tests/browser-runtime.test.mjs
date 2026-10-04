@@ -275,9 +275,17 @@ function createBackgroundHarness({
   let actionHandler = null;
   let installedHandler = null;
   let startupHandler = null;
+  let activatedHandler = null;
   let contextMenuHandler = null;
   let runtimeMessageHandler = null;
+  let storageChangedHandler = null;
   let releaseStorageGet = null;
+  const storageGetCalls = [];
+  // Deterministic hydration gate: resolves the moment the residency read is
+  // issued. That read happens only after every top-level listener is
+  // registered, so it replaces the old wall-clock race in the cold-start test.
+  let resolveResidencyRead;
+  const residencyReadStarted = new Promise((resolve) => { resolveResidencyRead = resolve; });
   const storageGetGate = blockStorageGet
     ? new Promise((resolve) => { releaseStorageGet = resolve; })
     : Promise.resolve();
@@ -292,12 +300,14 @@ function createBackgroundHarness({
     },
     storage: {
       local: {
-        get: async () => {
+        get: async (keys) => {
+          storageGetCalls.push(keys);
+          if (Array.isArray(keys) && keys.includes('panelResidencyMode')) resolveResidencyRead();
           await storageGetGate;
           return { hermesBrowserSettings: { panelResidencyMode } };
         },
       },
-      onChanged: { addListener() {} },
+      onChanged: { addListener(handler) { storageChangedHandler = handler; } },
     },
     action: {
       setPopup: async () => {},
@@ -321,7 +331,7 @@ function createBackgroundHarness({
         updatedTabs.push({ tabId, options });
         return extensionTabs.find((tab) => tab.id === tabId) || null;
       },
-      onActivated: { addListener() {} },
+      onActivated: { addListener(handler) { activatedHandler = handler; } },
     },
     sidePanel: {
       setPanelBehavior: async () => {},
@@ -365,31 +375,64 @@ function createBackgroundHarness({
     get actionHandler() { return actionHandler; },
     get installedHandler() { return installedHandler; },
     get startupHandler() { return startupHandler; },
+    get activatedHandler() { return activatedHandler; },
     get contextMenuHandler() { return contextMenuHandler; },
     get runtimeMessageHandler() { return runtimeMessageHandler; },
+    get storageChangedHandler() { return storageChangedHandler; },
+    storageGetCalls,
+    waitForResidencyRead() { return residencyReadStarted; },
     releaseStorageGet() { releaseStorageGet?.(); },
   };
 }
 
-test('background registers MV3 listeners before locale and residency storage hydration completes', async () => {
+test('background registers MV3 listeners before locale and residency storage hydration completes', { timeout: 10000 }, async () => {
   const originalChrome = globalThis.chrome;
   const harness = createBackgroundHarness({ blockStorageGet: true });
   globalThis.chrome = harness.chromeApi;
 
   try {
-    const imported = await Promise.race([
-      import(`../extension/background.js?cold-listener-registration=${Date.now()}`),
-      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 100)),
-    ]);
-    assert.notEqual(imported, 'timed-out', 'module evaluation must not await storage hydration');
+    // Kick off module evaluation but never release the blocked hydration gate.
+    const importPromise = import(`../extension/background.js?cold-listener-registration=${Date.now()}`);
+    // The residency hydration read is issued synchronously on the last
+    // top-level line, after every listener below is registered, and the gate
+    // keeps it pending. Awaiting that deterministic checkpoint replaces the
+    // old 100ms Promise.race, which went RED under full-suite load even when
+    // the production ordering was correct.
+    await harness.waitForResidencyRead();
     assert.equal(typeof harness.installedHandler, 'function');
     assert.equal(typeof harness.startupHandler, 'function');
     assert.equal(typeof harness.actionHandler, 'function');
     assert.equal(typeof harness.contextMenuHandler, 'function');
     assert.equal(typeof harness.runtimeMessageHandler, 'function');
 
+    // Module evaluation must finish without awaiting the still-blocked
+    // hydration gate. The test timeout is only a regression hang-guard; the
+    // pass path never depends on wall-clock timing.
+    await importPromise;
+
     const result = await harness.contextMenuHandler({ menuItemId: 'invalid' }, harness.activeTab);
     assert.deepEqual(result, { ok: false, reason: 'unknown-menu-item' });
+  } finally {
+    harness.releaseStorageGet();
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('tab activation waits for global residency hydration before applying options', async () => {
+  const originalChrome = globalThis.chrome;
+  const harness = createBackgroundHarness({ panelResidencyMode: 'global', blockStorageGet: true });
+  globalThis.chrome = harness.chromeApi;
+
+  try {
+    await import(`../extension/background.js?activation-before-residency-hydration=${Date.now()}`);
+    assert.equal(typeof harness.activatedHandler, 'function');
+    const activation = harness.activatedHandler({ tabId: 42 });
+    assert.deepEqual(harness.sidePanelOptions, [], 'the default tab-attached mode must not be applied before storage hydration');
+
+    harness.releaseStorageGet();
+    await activation;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(harness.sidePanelOptions, [], 'hydrated global residency must not reconfigure the panel on activation');
   } finally {
     harness.releaseStorageGet();
     globalThis.chrome = originalChrome;
@@ -413,6 +456,80 @@ test('global residency updates only the default path and preserves existing tab 
       harness.sidePanelOptions.some((options) => Object.hasOwn(options, 'tabId')),
       false,
       'global mode must not rewrite tabs that already own attached panel documents',
+    );
+
+    assert.equal(typeof harness.activatedHandler, 'function');
+    await harness.activatedHandler({ tabId: 42 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      harness.sidePanelOptions,
+      [{ path: 'sidepanel.html?panel=global', enabled: true }],
+      'tab activation must not reconfigure the global panel document',
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('saving global residency configures the shared default without an activation reapply', async () => {
+  const originalChrome = globalThis.chrome;
+  const harness = createBackgroundHarness();
+  globalThis.chrome = harness.chromeApi;
+
+  try {
+    await import(`../extension/background.js?global-residency-setting=${Date.now()}`);
+    assert.equal(typeof harness.storageChangedHandler, 'function');
+    await harness.storageChangedHandler({
+      hermesBrowserSettings: { newValue: { panelResidencyMode: 'global' } },
+    }, 'local');
+    assert.deepEqual(harness.sidePanelOptions, [{
+      path: 'sidepanel.html?panel=global',
+      enabled: true,
+    }]);
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('saving an API key does not reconfigure an unchanged global panel', async () => {
+  const originalChrome = globalThis.chrome;
+  const harness = createBackgroundHarness({ panelResidencyMode: 'global' });
+  globalThis.chrome = harness.chromeApi;
+
+  try {
+    await import(`../extension/background.js?global-residency-api-key=${Date.now()}`);
+    await harness.installedHandler();
+    await harness.storageChangedHandler({
+      hermesBrowserSettings: {
+        oldValue: { panelResidencyMode: 'global', apiKey: 'old-token' },
+        newValue: { panelResidencyMode: 'global', apiKey: 'new-token' },
+      },
+    }, 'local');
+    assert.deepEqual(
+      harness.sidePanelOptions,
+      [{ path: 'sidepanel.html?panel=global', enabled: true }],
+      'non-residency settings changes must not recreate the global panel document',
+    );
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
+});
+
+test('global settings writes do not reconfigure when Edge omits the old storage value', async () => {
+  const originalChrome = globalThis.chrome;
+  const harness = createBackgroundHarness({ panelResidencyMode: 'global' });
+  globalThis.chrome = harness.chromeApi;
+
+  try {
+    await import(`../extension/background.js?global-residency-missing-old-value=${Date.now()}`);
+    await harness.installedHandler();
+    await harness.storageChangedHandler({
+      hermesBrowserSettings: { newValue: { panelResidencyMode: 'global', apiKey: 'new-token' } },
+    }, 'local');
+    assert.deepEqual(
+      harness.sidePanelOptions,
+      [{ path: 'sidepanel.html?panel=global', enabled: true }],
+      'missing oldValue must not recreate an already-configured global panel',
     );
   } finally {
     globalThis.chrome = originalChrome;
@@ -554,7 +671,7 @@ test('background action does not open a full tab when side-panel visibility conf
   }
 });
 
-test('background action does not re-open the side panel after a failed tab-scoped gesture attempt', async () => {
+test('background action never falls back to a full tab after a failed native gesture attempt', async () => {
   const originalChrome = globalThis.chrome;
   const harness = createBackgroundHarness({
     sidePanelOpen: async (options) => {
@@ -572,7 +689,7 @@ test('background action does not re-open the side panel after a failed tab-scope
       [{ tabId: 7 }],
       'a failed gesture attempt must not trigger a second side-panel open',
     );
-    assert.equal(harness.createdTabs.length, 1, 'the gesture-free fallback must open exactly one extension tab');
+    assert.equal(harness.createdTabs.length, 0, 'a native side-panel browser must not replace the panel with a full extension tab');
   } finally {
     globalThis.chrome = originalChrome;
   }

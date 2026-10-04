@@ -17,12 +17,15 @@ test('both manifests load the browser API facade before extractor, bridge, i18n,
 test('inline helper uses approved Hermes branding, routes sessions, and supports safe apply and undo', async () => {
   const source = await read('extension/content-inline-helper.js');
   assert.match(source, /const policy = globalThis\.HermesInlineDraft/);
+  assert.match(source, /__HERMES_INLINE_HELPER_GENERATION__/);
+  assert.match(source, /__HERMES_INLINE_HELPER_GENERATION__ !== generation/);
   assert.match(source, /hermes-browser-extension-icon-ink\.png/);
   assert.doesNotMatch(source, /logoUrl[\s\S]{0,180}hermes-browser-extension-icon-box-white\.png/);
   assert.doesNotMatch(source, /nous-girl-solo-logo\.png/);
   assert.match(source, /maskImage|webkitMaskImage/);
-  assert.doesNotMatch(source, /box-shadow\s*:/);
-  assert.match(source, /width:32px; height:32px/);
+  assert.match(source, /\.launcher \{[^}]*box-shadow:0 2px 10px rgba\(0,0,0,\.18\)/);
+  assert.match(source, /\.panel \{[^}]*box-shadow:0 18px 50px rgba\(0,0,0,\.32\)/);
+  assert.match(source, /width:36px; height:36px/);
   assert.match(source, /\.launcher \{[^}]*padding:0;/s);
   assert.match(source, /\.launcher-logo \{ width:30px; height:30px; \}/);
   assert.match(source, /\.brand-logo \{ width:42px; height:42px; \}/);
@@ -75,7 +78,8 @@ test('inline helper uses approved Hermes branding, routes sessions, and supports
   assert.match(source, /Automatic replacement/);
   const sidepanelHtml = await read('extension/sidepanel.html');
   const appHtml = await read('extension/app.html');
-  for (const html of [sidepanelHtml, appHtml]) {
+  // Assist controls live only in the side panel Settings; Hermes Web no longer hosts them.
+  for (const html of [sidepanelHtml]) {
     assert.match(html, /inlineAssistEnabled/);
     assert.match(html, /inlineAssistDefaultRoute/);
     assert.match(html, /id="inlineAssistModelButton"[^>]*\sdisabled(?:\s|>)/);
@@ -88,6 +92,11 @@ test('inline helper uses approved Hermes branding, routes sessions, and supports
     assert.match(html, /Ask every time/);
     assert.match(html, /Run in background/);
   }
+  assert.doesNotMatch(appHtml, /inlineAssistEnabled/);
+  assert.doesNotMatch(appHtml, /inlineAssistDefaultRoute/);
+  assert.doesNotMatch(appHtml, /id="inlineAssistModelButton"/);
+  assert.doesNotMatch(appHtml, /assistModelCapabilityHint/);
+  assert.doesNotMatch(appHtml, /inlineAssistSessionRetention/);
   assert.match(source, /current\.text\s*!==\s*pending\.draftText/);
   assert.match(source, /host\.dataset\.inlineAssistDefaultRoute/);
   assert.match(source, /host\.dataset\.inlineAssistSessionRetention/);
@@ -116,7 +125,7 @@ test('Sidecar intro is panel-open-only and new session cannot reveal it again', 
   assert.match(html, /id="browserIntroHero"[^>]*aria-label="Hermes Browser intro"/);
   assert.match(source, /function renderBrowserIntroVisibility\(/);
   assert.match(source, /browserIntroHero/);
-  assert.match(source, /newSessionButton\.addEventListener[\s\S]{0,500}await persistBrowserIntroSeen\(\);[\s\S]{0,300}await beginHermesBrowserDraft\(\);/);
+  assert.match(source, /newSessionButton\.addEventListener[\s\S]{0,1200}await persistBrowserIntroSeen\(\);[\s\S]{0,900}await beginHermesBrowserDraft\(\);/);
   assert.match(source, /createSessionButton\.addEventListener[\s\S]{0,400}await persistBrowserIntroSeen\(\);[\s\S]{0,300}await beginHermesBrowserDraft\(\);/);
 });
 

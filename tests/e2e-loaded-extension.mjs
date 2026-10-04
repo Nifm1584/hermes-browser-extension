@@ -34,6 +34,7 @@ const INLINE_DELETE_ALL_SCREENSHOT = path.join(QA_DIR, `x-rich-delete-all${ASSIS
 const ASSIST_SETTINGS_SCREENSHOT = path.join(QA_DIR, `assist-settings${ASSIST_SCREENSHOT_SUFFIX}.png`);
 const ASSIST_RELEASED_GATEWAY_SCREENSHOT = path.join(QA_DIR, `assist-settings-released-gateway${ASSIST_SCREENSHOT_SUFFIX}.png`);
 const MAIN_MODEL_PICKER_SCREENSHOT = path.join(QA_DIR, `main-model-picker${ASSIST_SCREENSHOT_SUFFIX}.png`);
+const PROVIDER_REJECTION_PANEL_SCREENSHOT = path.join(QA_DIR, `provider-rejection-panel${ASSIST_SCREENSHOT_SUFFIX}.png`);
 const GPT56_CONTEXT_PICKER_SCREENSHOT = path.join(QA_DIR, `gpt56-context-picker${ASSIST_SCREENSHOT_SUFFIX}.png`);
 const READABILITY_PANEL_SCREENSHOT = path.join(QA_DIR, `readability-panel-320${ASSIST_SCREENSHOT_SUFFIX}.png`);
 const READABILITY_WEB_SCREENSHOT = path.join(QA_DIR, `readability-web-1024${ASSIST_SCREENSHOT_SUFFIX}.png`);
@@ -239,6 +240,8 @@ async function startMockHermes() {
   let fullTabDelegationSessionId = '';
   let fullTabDelegationCompletionAvailableAt = 0;
   let fullTabDelegationHistoryPolls = 0;
+  let nextChatStreamRejection = null;
+  let nextChatFallbackRejection = null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     const body = await requestBody(req);
@@ -304,6 +307,10 @@ async function startMockHermes() {
       });
       return;
     }
+    if (url.pathname === '/api/desktop/dashboard-candidates' && req.method === 'GET') {
+      json(res, 200, { candidates: [] });
+      return;
+    }
     if (url.pathname === '/api/model/options') {
       json(res, 200, {
         providers: [{
@@ -332,11 +339,12 @@ async function startMockHermes() {
           slug: 'openai-codex',
           name: 'OpenAI Codex',
           authenticated: true,
-          models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+          models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-luna-900k'],
           capabilities: {
             'gpt-5.6-sol': { reasoning: true, fast: true },
             'gpt-5.6-terra': { reasoning: true, fast: true },
             'gpt-5.6-luna': { reasoning: true, fast: true },
+            'gpt-5.6-luna-900k': { reasoning: true, fast: true },
           },
         }, {
           slug: 'portal',
@@ -495,6 +503,12 @@ async function startMockHermes() {
     }
     if (/^\/api\/sessions\/[^/]+\/chat\/stream$/.test(url.pathname) && req.method === 'POST') {
       chatRequest = body;
+      if (nextChatStreamRejection) {
+        const rejection = nextChatStreamRejection;
+        nextChatStreamRejection = null;
+        json(res, rejection.status, { error: { message: rejection.message } });
+        return;
+      }
       const sessionId = decodeURIComponent(url.pathname.split('/')[3] || '');
       const message = String(body?.message || '');
       const delegated = message.includes(DELEGATION_PROMPT);
@@ -545,6 +559,12 @@ async function startMockHermes() {
     }
     if (/^\/api\/sessions\/[^/]+\/chat$/.test(url.pathname) && req.method === 'POST') {
       chatRequest = body;
+      if (nextChatFallbackRejection) {
+        const rejection = nextChatFallbackRejection;
+        nextChatFallbackRejection = null;
+        json(res, rejection.status, { error: { message: rejection.message } });
+        return;
+      }
       const payload = {
         content: INLINE_REPLY,
         message: { role: 'assistant', content: INLINE_REPLY },
@@ -586,6 +606,12 @@ async function startMockHermes() {
     setAssistChatAcknowledgement: (mode = 'direct') => { assistChatAcknowledgement = mode; },
     setAssistCleanupStatus: (status = 204) => { assistCleanupStatus = Number(status); },
     setAssistSessionModelRouting: (enabled = true) => { assistSessionModelRouting = Boolean(enabled); },
+    rejectNextChatStream: ({ status = 400, message = 'Invalid request.' } = {}) => {
+      nextChatStreamRejection = { status: Number(status), message: String(message) };
+    },
+    rejectNextChatFallback: ({ status = 400, message = 'Invalid request.' } = {}) => {
+      nextChatFallbackRejection = { status: Number(status), message: String(message) };
+    },
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
@@ -1124,7 +1150,67 @@ async function main() {
     assert.ok(envelope.attachment_context);
     assert.ok(envelope.source_receipt);
     assert.ok(mock.requests.some((request) => request.path === `/api/sessions/${storedAfterSend.hermesBrowserSettings.sessionId}/chat/stream` && request.method === 'POST'));
-    assert.ok(mock.requests.filter((request) => request.path !== '/health' && request.path !== '/v1/health').every((request) => request.authorization === `Bearer ${TEST_TOKEN}`));
+    assert.ok(mock.requests.filter((request) => !['/health', '/v1/health', '/api/ws'].includes(request.path)).every((request) => request.authorization === `Bearer ${TEST_TOKEN}`));
+
+    const rejectionPrompt = 'Verify unsupported reasoning option handling.';
+    const rejectionDetail = 'Invalid parameter: reasoning_effort must be one of low, medium, high.';
+    const rejectionStreamsBefore = mock.requests.filter((request) => /\/chat\/stream$/.test(request.path) && request.method === 'POST').length;
+    const fallbackChatsBefore = mock.requests.filter((request) => /\/chat$/.test(request.path) && request.method === 'POST').length;
+    mock.rejectNextChatStream({ status: 400, message: rejectionDetail });
+    await panel.evaluate(`(() => {
+      const input = document.querySelector('#promptInput');
+      input.value = ${JSON.stringify(rejectionPrompt)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#composer').requestSubmit();
+      return true;
+    })()`);
+    const rejectionState = await waitFor(() => panel.evaluate(`(() => {
+      const messages = Array.from(document.querySelectorAll('.message-content')).map((node) => node.textContent).join('\\n');
+      const input = document.querySelector('#promptInput');
+      const title = document.querySelector('#activeTitle')?.textContent || '';
+      const detail = document.querySelector('#activeUrl')?.textContent || '';
+      const connection = document.querySelector('#connectionPill')?.getAttribute('aria-label') || '';
+      if (input?.value !== ${JSON.stringify(rejectionPrompt)} || title !== 'Model option rejected' || !messages.includes(${JSON.stringify(rejectionDetail)})) return null;
+      return { messages, detail, connection };
+    })()`));
+    assert.match(rejectionState.detail, /Gateway remains connected\./);
+    assert.equal(rejectionState.connection, 'Hermes connected');
+    assert.doesNotMatch(rejectionState.messages, /Hermes API unavailable/);
+    const rejectionStreamsAfter = mock.requests.filter((request) => /\/chat\/stream$/.test(request.path) && request.method === 'POST').length;
+    const fallbackChatsAfter = mock.requests.filter((request) => /\/chat$/.test(request.path) && request.method === 'POST').length;
+    assert.equal(rejectionStreamsAfter, rejectionStreamsBefore + 1, 'Provider rejection must not replay the stream.');
+    assert.equal(fallbackChatsAfter, fallbackChatsBefore, 'Provider rejection must not fall back to non-streaming replay.');
+    await saveScreenshot(panel, PROVIDER_REJECTION_PANEL_SCREENSHOT);
+
+    const fallbackRejectionPrompt = 'Verify fallback provider rejection handling.';
+    const fallbackRejectionDetail = 'Unsupported parameter: reasoning_effort must be one of low, medium, high.';
+    const fallbackRejectionStreamsBefore = mock.requests.filter((request) => /\/chat\/stream$/.test(request.path) && request.method === 'POST').length;
+    const fallbackRejectionChatsBefore = mock.requests.filter((request) => /\/chat$/.test(request.path) && request.method === 'POST').length;
+    mock.rejectNextChatStream({ status: 404, message: 'Streaming route unavailable.' });
+    mock.rejectNextChatFallback({ status: 400, message: fallbackRejectionDetail });
+    await panel.evaluate(`(() => {
+      const input = document.querySelector('#promptInput');
+      input.value = ${JSON.stringify(fallbackRejectionPrompt)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#composer').requestSubmit();
+      return true;
+    })()`);
+    const fallbackRejectionState = await waitFor(() => panel.evaluate(`(() => {
+      const messages = Array.from(document.querySelectorAll('.message-content')).map((node) => node.textContent).join('\\n');
+      const input = document.querySelector('#promptInput');
+      const title = document.querySelector('#activeTitle')?.textContent || '';
+      const detail = document.querySelector('#activeUrl')?.textContent || '';
+      const connection = document.querySelector('#connectionPill')?.getAttribute('aria-label') || '';
+      if (input?.value !== ${JSON.stringify(fallbackRejectionPrompt)} || title !== 'Model option rejected' || !messages.includes(${JSON.stringify(fallbackRejectionDetail)})) return null;
+      return { messages, detail, connection };
+    })()`));
+    assert.match(fallbackRejectionState.detail, /Gateway remains connected\./);
+    assert.equal(fallbackRejectionState.connection, 'Hermes connected');
+    assert.doesNotMatch(fallbackRejectionState.messages, /Hermes API unavailable/);
+    const fallbackRejectionStreamsAfter = mock.requests.filter((request) => /\/chat\/stream$/.test(request.path) && request.method === 'POST').length;
+    const fallbackRejectionChatsAfter = mock.requests.filter((request) => /\/chat$/.test(request.path) && request.method === 'POST').length;
+    assert.equal(fallbackRejectionStreamsAfter, fallbackRejectionStreamsBefore + 1, 'Fallback rejection must not replay the stream.');
+    assert.equal(fallbackRejectionChatsAfter, fallbackRejectionChatsBefore + 1, 'Fallback rejection must make exactly one bounded non-streaming request.');
 
     const delegationStreamsBefore = mock.requests.filter((request) => /\/chat\/stream$/.test(request.path) && request.method === 'POST').length;
     await panel.evaluate(`(() => {
@@ -1459,7 +1545,7 @@ async function main() {
       const ids = [...document.querySelectorAll('[id]')].map((node) => node.id).filter(Boolean);
       const duplicateIds = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))];
       const last = document.querySelector('#fontProfileSelect');
-      last.scrollIntoView({ block: 'nearest' });
+      last.scrollIntoView({ block: 'center' });
       const rect = last.getBoundingClientRect();
       return {
         zoom: root.dataset.hermesTextZoom,
@@ -2243,18 +2329,18 @@ async function main() {
     assert.equal(logoState.background, 'rgb(255, 255, 255)');
     assert.match(logoState.mask, /hermes-browser-extension-icon-ink\.png/);
     assert.doesNotMatch(logoState.mask, /icon-box-white/);
-    assert.deepEqual(logoState.launcher, [32, 32]);
+    assert.deepEqual(logoState.launcher, [36, 36]);
     assert.deepEqual(logoState.logo, [30, 30]);
 
     const launcherPlacementBeforeShift = await fixture.evaluate(`(() => {
       const field = document.querySelector('#draft').getBoundingClientRect();
       const launcher = document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.launcher').getBoundingClientRect();
       const element = document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.launcher');
-      return { rightGap: field.right - launcher.right, bottomGap: field.bottom - launcher.bottom, top: launcher.top, strategy: element.dataset.placement };
+      const overlapsDraft = launcher.left < field.right && launcher.right > field.left && launcher.top < field.bottom && launcher.bottom > field.top;
+      return { rightGap: field.right - launcher.right, bottomGap: field.bottom - launcher.bottom, top: launcher.top, strategy: element.dataset.placement, overlapsDraft };
     })()`);
-    assert.equal(launcherPlacementBeforeShift.strategy, 'inside-end');
-    assert.ok(Math.abs(launcherPlacementBeforeShift.rightGap - 6) <= 1, `Launcher right gap was ${launcherPlacementBeforeShift.rightGap}px.`);
-    assert.ok(Math.abs(launcherPlacementBeforeShift.bottomGap - 6) <= 1, `Launcher bottom gap was ${launcherPlacementBeforeShift.bottomGap}px.`);
+    assert.equal(launcherPlacementBeforeShift.strategy, 'outside-end');
+    assert.equal(launcherPlacementBeforeShift.overlapsDraft, false, 'The launcher must not cover the draft in a full-width composer.');
     await fixture.evaluate(`(() => {
       const field = document.querySelector('#draft');
       field.style.minHeight = '240px';
@@ -2268,9 +2354,11 @@ async function main() {
       const field = document.querySelector('#draft').getBoundingClientRect();
       const launcher = document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.launcher').getBoundingClientRect();
       const element = document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.launcher');
-      const state = { rightGap: field.right - launcher.right, bottomGap: field.bottom - launcher.bottom, top: launcher.top, strategy: element.dataset.placement };
-      return Math.abs(state.rightGap - 6) <= 1 && Math.abs(state.bottomGap - 6) <= 1 ? state : null;
+      const overlapsDraft = launcher.left < field.right && launcher.right > field.left && launcher.top < field.bottom && launcher.bottom > field.top;
+      const state = { rightGap: field.right - launcher.right, bottomGap: field.bottom - launcher.bottom, top: launcher.top, strategy: element.dataset.placement, overlapsDraft };
+      return state.top > ${launcherPlacementBeforeShift.top} + 80 ? state : null;
     })()`));
+    assert.equal(launcherPlacementAfterShift.overlapsDraft, false, 'The launcher must not cover the draft after the editor resizes.');
     assert.ok(launcherPlacementAfterShift.top > launcherPlacementBeforeShift.top + 80, 'Launcher did not follow the shifted/resized editor.');
     await saveScreenshot(fixture, INLINE_LAUNCHER_SCREENSHOT, { captureBeyondViewport: false });
     await fixture.evaluate(`(() => {
@@ -2280,7 +2368,8 @@ async function main() {
     await waitFor(() => fixture.evaluate(`(() => {
       const field = document.querySelector('#draft').getBoundingClientRect();
       const launcher = document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.launcher').getBoundingClientRect();
-      return Math.abs((field.bottom - launcher.bottom) - 6) <= 1;
+      const overlapsDraft = launcher.left < field.right && launcher.right > field.left && launcher.top < field.bottom && launcher.bottom > field.top;
+      return overlapsDraft ? null : { ok: true };
     })()`));
 
     const chatgptUrl = `${mock.baseUrl}/qa-chatgpt`;
@@ -2682,7 +2771,7 @@ async function main() {
     const afterBackground = await setup.evaluate(`chrome.storage.local.get('hermesBrowserSettings')`);
     assert.equal(afterBackground.hermesBrowserSettings.sessionId, panelSessionIdAfterReadability);
     await saveScreenshot(fixture, INLINE_RESULT_SCREENSHOT, { captureBeyondViewport: false });
-    const retainedAssistCreate = mock.requests.filter((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_assist').at(-1);
+    const retainedAssistCreate = mock.requests.filter((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_browser').at(-1);
     const retainedAssistSessionId = retainedAssistCreate?.body?.id || retainedAssistCreate?.body?.session_id || '';
     assert.match(retainedAssistSessionId, /^hermes-assist-/);
     await fixture.evaluate(`document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.result-actions button:last-child').click()`);
@@ -2696,16 +2785,17 @@ async function main() {
     assert.ok(openDestinationState.labels.some((label) => label.includes('Hermes Web')));
     await saveScreenshot(fixture, INLINE_OPEN_SESSION_SCREENSHOT, { captureBeyondViewport: false });
     await fixture.evaluate(`document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('[data-session-surface="web"]').click()`);
-    const openedWebSession = await waitFor(() => setup.evaluate(`(async () => {
-      const tabs = await chrome.tabs.query({});
-      const tab = tabs.find((item) => String(item.url || '').includes('sourceSurfaceId=inline-assist'));
-      if (!tab) return null;
-      const parsed = new URL(tab.url);
-      return { sessionId: parsed.searchParams.get('sessionId'), path: parsed.pathname };
+    const webNotice = await waitFor(() => fixture.evaluate(`(() => {
+      const root = document.querySelector('#hermes-inline-draft-host')?.shadowRoot;
+      const title = root?.querySelector('.route-title')?.textContent || '';
+      return title.includes('new surface') ? title : null;
     })()`));
-    assert.equal(openedWebSession.sessionId, retainedAssistSessionId);
-    assert.match(openedWebSession.path, /\/app\.html$/);
-    await waitFor(() => fixture.evaluate(`document.querySelector('#hermes-inline-draft-host')?.shadowRoot?.querySelector('.panel')?.hidden === true`));
+    assert.match(webNotice, /new surface/i);
+    const openedWebSession = await setup.evaluate(`(async () => {
+      const tabs = await chrome.tabs.query({});
+      return tabs.some((item) => String(item.url || '').includes('sourceSurfaceId=inline-assist'));
+    })()`);
+    assert.equal(openedWebSession, false, 'the Hermes Web choice must show the deprecation notice instead of opening a tab');
 
     await fixture.evaluate(`document.querySelector('#hermes-inline-draft-host').shadowRoot.querySelector('.close').click()`);
     await setup.evaluate(`(async () => {
@@ -2785,7 +2875,7 @@ async function main() {
     const smartRequest = mock.getChatRequest();
     assert.match(String(smartRequest?.message || ''), /Draft the text that belongs in the focused field/);
     assert.match(String(smartRequest?.message || ''), /"page_context":"[^"]+/);
-    const assistCreates = mock.requests.filter((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_assist');
+    const assistCreates = mock.requests.filter((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_browser');
     assert.ok(assistCreates.length >= 2);
     assert.equal(new Set(assistCreates.map((request) => request.body.title)).size, assistCreates.length);
     for (const request of assistCreates) {
@@ -2793,7 +2883,12 @@ async function main() {
       assert.equal(request.body.model, 'e2e/test-model');
       assert.equal(request.body.provider, 'e2e');
     }
-    const assistChats = mock.requests.filter((request) => request.method === 'POST' && /^\/api\/sessions\/[^/]+\/chat$/.test(request.path) && request.body?.model === 'e2e/test-model');
+    const assistChats = mock.requests.filter((request) => (
+      request.method === 'POST'
+      && /^\/api\/sessions\/[^/]+\/chat$/.test(request.path)
+      && request.body?.model === 'e2e/test-model'
+      && Object.hasOwn(request.body || {}, 'reasoning_effort')
+    ));
     assert.ok(assistChats.length >= 2);
     assert.ok(assistChats.every((request) => request.body.fast === false && request.body.model_options?.fast === false && request.body.reasoning_effort === 'low'));
     assert.equal(mock.requests.filter((request) => request.method === 'DELETE' && /^\/api\/sessions\//.test(request.path)).length, 1);
@@ -3006,7 +3101,7 @@ async function main() {
     })()`);
     const switchedAssistRequests = await waitFor(() => {
       const recent = mock.requests.slice(switchedAssistRequestStart);
-      const create = recent.find((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_assist');
+      const create = recent.find((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_browser');
       const chat = recent.find((request) => request.method === 'POST' && /^\/api\/sessions\/[^/]+\/chat$/.test(request.path));
       return create && chat ? { create, chat } : null;
     });
@@ -3126,7 +3221,7 @@ async function main() {
     })()`);
     const releasedGatewayState = await waitFor(async () => {
       const recent = mock.requests.slice(releasedGatewayRequestStart);
-      const create = recent.find((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_assist');
+      const create = recent.find((request) => request.method === 'POST' && request.path === '/api/sessions' && request.body?.source === 'hermes_browser');
       const chat = recent.find((request) => request.method === 'POST' && /\/chat$/.test(request.path));
       const state = await fixture.evaluate(`document.querySelector('#hermes-inline-draft-host')?.shadowRoot?.querySelector('.context span:last-child')?.textContent || ''`);
       return create && chat && state === 'COMPLETE' ? { create, chat } : null;
@@ -3139,7 +3234,7 @@ async function main() {
       assert.equal(Object.hasOwn(request, 'reasoning_effort'), false);
       assert.equal(Object.hasOwn(request, 'fast'), false);
     }
-    assert.equal(releasedGatewayState.create.body.source, 'hermes_assist');
+    assert.equal(releasedGatewayState.create.body.source, 'hermes_browser');
     assert.match(releasedGatewayState.chat.body.message, /Draft through an unmodified released Hermes gateway/);
 
     await panel.call('Page.reload', { ignoreCache: true });
@@ -3241,16 +3336,20 @@ async function main() {
     await panel.evaluate(`[...document.querySelectorAll('#modelProviderList .model-provider-option')].find((button) => button.textContent.includes('OpenAI Codex'))?.click()`);
     const gpt56ContextState = await waitFor(() => panel.evaluate(`(() => {
       const selected = document.querySelector('#modelProviderList .model-provider-option.selected')?.textContent?.trim() || '';
-      const models = [...document.querySelectorAll('#modelMenuList .model-option')].map((button) => button.textContent.trim());
-      return selected.includes('OpenAI Codex') && models.length === 3 ? { selected, models } : null;
+      const models = [...document.querySelectorAll('#modelMenuList .model-option')].map((button) => ({ id: button.dataset.modelId || '', label: button.textContent.trim() }));
+      return selected.includes('OpenAI Codex') && models.length === 4 ? { selected, models } : null;
     })()`));
-    assert.deepEqual(gpt56ContextState.models.map((label) => label.match(/gpt-5\.6-(?:sol|terra|luna)/)?.[0]), [
-      'gpt-5.6-sol',
-      'gpt-5.6-terra',
-      'gpt-5.6-luna',
+    assert.deepEqual(gpt56ContextState.models.map(({ id }) => id), [
+      'openai-codex::gpt-5.6-sol',
+      'openai-codex::gpt-5.6-terra',
+      'openai-codex::gpt-5.6-luna',
+      'openai-codex::gpt-5.6-luna-900k',
     ]);
-    assert.ok(gpt56ContextState.models.every((label) => label.includes('272k')), JSON.stringify(gpt56ContextState));
-    assert.ok(gpt56ContextState.models.every((label) => !label.includes('400k')), JSON.stringify(gpt56ContextState));
+    const baseGpt56Labels = gpt56ContextState.models.slice(0, 3).map(({ label }) => label);
+    const extendedGpt56Label = gpt56ContextState.models[3].label;
+    assert.ok(baseGpt56Labels.every((label) => label.includes('272k')), JSON.stringify(gpt56ContextState));
+    assert.ok(extendedGpt56Label.includes('900k'), JSON.stringify(gpt56ContextState));
+    assert.ok(gpt56ContextState.models.every(({ label }) => !label.includes('400k')), JSON.stringify(gpt56ContextState));
     await saveScreenshot(panel, GPT56_CONTEXT_PICKER_SCREENSHOT, { captureBeyondViewport: false });
     await panel.evaluate(`[...document.querySelectorAll('#modelProviderList .model-provider-option')].find((button) => button.textContent.includes('Alternate Provider'))?.click()`);
     const switchedProviderState = await waitFor(() => panel.evaluate(`(() => {

@@ -75,7 +75,7 @@ function detectBrowserProduct({
   if (/\bFirefox\b/i.test(ua)) {
     return browserProduct(BROWSER_IDS.FIREFOX, 'Firefox', 'gecko', 'high', 'user-agent');
   }
-  if (/\bSafari\b/i.test(ua) && !/\b(?:Chrome|Chromium|CriOS)\b/i.test(ua)) {
+  if (/\bSafari\b/i.test(ua) && !/\b(?:HeadlessChrome|Chrome|Chromium|CriOS)\b/i.test(ua)) {
     return browserProduct(BROWSER_IDS.SAFARI, 'Safari', 'webkit', 'high', 'user-agent');
   }
   if (brandNames.some((brand) => brand === 'google chrome')) {
@@ -85,6 +85,14 @@ function detectBrowserProduct({
     return browserProduct(BROWSER_IDS.CHROMIUM, 'Chromium browser', 'chromium', 'masked', 'engine-only');
   }
   return browserProduct(BROWSER_IDS.UNKNOWN, 'Supported browser', 'unknown', 'unknown', 'unavailable');
+}
+
+function browserSpeechCloudFallbackAllowed({ product = detectBrowserProduct() } = {}) {
+  // `webkitSpeechRecognition` is exposed by many Chromium forks, but the
+  // Google-backed service used by Chrome is not available in those browsers.
+  // Treat local/on-device recognition separately; this gate only decides
+  // whether the network-backed browser fallback is safe to start.
+  return product?.id === BROWSER_IDS.CHROME;
 }
 
 function browserMicrophoneSettingsUrl({ product = detectBrowserProduct(), extensionUrl = '' } = {}) {
@@ -408,6 +416,7 @@ export {
   BROWSER_IDS,
   actionIconPathsForBrowser,
   browserMicrophoneSettingsUrl,
+  browserSpeechCloudFallbackAllowed,
   detectBrowserId,
   detectBrowserProduct,
   getSidebarAction,

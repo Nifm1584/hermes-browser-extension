@@ -53,10 +53,14 @@ test('Hermes Assist model selectors remain available and explain gateway-default
     read('extension/app.js'),
     read('extension/content-inline-helper.js'),
   ]);
-  for (const html of [sidepanelHtml, appHtml]) {
-    assert.match(html, /id="inlineAssistModelButton"[^>]*\sdisabled(?:\s|>)/);
-    assert.match(html, /id="assistModelCapabilityHint"/);
-  }
+  // The Hermes Web settings surface no longer hosts Assist or right-click controls;
+  // those live in the side panel Settings only.
+  assert.match(sidepanelHtml, /id="inlineAssistModelButton"[^>]*\sdisabled(?:\s|>)/);
+  assert.match(sidepanelHtml, /id="assistModelCapabilityHint"/);
+  assert.doesNotMatch(appHtml, /inline-assist-settings/);
+  assert.doesNotMatch(appHtml, /context-menu-settings/);
+  assert.doesNotMatch(appHtml, /id="inlineAssistModelButton"/);
+  assert.doesNotMatch(appHtml, /id="contextMenuDefaultRoute"/);
   for (const source of [sidepanelSource, appSource]) {
     assert.doesNotMatch(source, /inlineAssistModelButton\.disabled\s*=\s*true/);
     assert.match(source, /gateway default/i);
@@ -89,9 +93,9 @@ test('Nous Light cards are solid white above the global texture layer on both su
     read('extension/sidepanel-themes.css'),
     read('extension/fulltab-themes.css'),
   ]);
-  assert.match(sidepanelCss, /data-hermes-theme="nous"\]\[data-hermes-mode="light"\][\s\S]*\.message\.user[\s\S]*background:\s*#ffffff\s*!important/);
-  assert.match(sidepanelCss, /data-hermes-theme="nous"\]\[data-hermes-mode="light"\]\s*\{[^}]*--hermes-user-fg:\s*#0505e8/s);
-  assert.match(sidepanelCss, /data-hermes-theme="nous"\]\[data-hermes-mode="light"\][\s\S]*\.message\.user \.context-receipt summary\s*\{[^}]*color:\s*rgba\(var\(--hermes-ink-rgb\),\s*0\.84\)/s);
+  assert.match(sidepanelCss, /data-hermes-mode="light"\]\s+\.message\.user\s*\{[^}]*background:\s*var\(--_user-tint\)\s*!important/s);
+  assert.match(sidepanelCss, /data-hermes-theme="nous"\]\[data-hermes-mode="light"\]\s*\{[^}]*--hermes-user-fg:\s*#0000f2/s);
+  assert.match(sidepanelCss, /data-hermes-mode="light"\]\s+\.message\.user \.context-receipt summary\s*\{[^}]*color:\s*var\(--hermes-ink\)/s);
   assert.match(sidepanelCss, /data-hermes-theme="nous"\]\[data-hermes-mode="light"\][\s\S]*::selection\s*\{[^}]*background:\s*#EDFF45/i);
   assert.match(fulltabCss, /html\[data-hermes-theme="nous"\]\[data-hermes-mode="light"\]\s+\.web-message\s*\{[^}]*z-index:\s*61;/s);
   assert.match(fulltabCss, /html\[data-hermes-theme="nous"\]\[data-hermes-mode="light"\]\s+\.fulltab-composer\s*\{[^}]*z-index:\s*61;/s);

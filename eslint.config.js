@@ -1,4 +1,5 @@
 import js from '@eslint/js';
+import security from 'eslint-plugin-security';
 
 export default [
   js.configs.recommended,
@@ -16,6 +17,7 @@ export default [
         globalThis: 'readonly',
         location: 'readonly',
         navigator: 'readonly',
+        localStorage: 'readonly',
         fetch: 'readonly',
         Headers: 'readonly',
         Request: 'readonly',
@@ -30,6 +32,8 @@ export default [
         URLSearchParams: 'readonly',
         DOMParser: 'readonly',
         MutationObserver: 'readonly',
+        IntersectionObserver: 'readonly',
+        IntersectionObserverEntry: 'readonly',
         AbortController: 'readonly',
         AbortSignal: 'readonly',
         TextEncoder: 'readonly',
@@ -50,6 +54,9 @@ export default [
         btoa: 'readonly',
         structuredClone: 'readonly',
         crypto: 'readonly',
+        queueMicrotask: 'readonly',
+        createImageBitmap: 'readonly',
+        Node: 'readonly',
       },
     },
     rules: {
@@ -92,6 +99,21 @@ export default [
     },
   },
 
+  // Security regression rules: flag dangerous patterns (eval, non-literal
+  // regexp, ReDoS-susceptible regexes, object injection, trojan-source
+  // bidi characters) on new code. Recommended set runs at warn so existing
+  // noise does not block development; eval is hard-banned because the
+  // extension must never execute dynamically constructed code.
+  {
+    files: ['extension/**/*.js', 'extension/**/*.mjs', 'scripts/**/*.mjs', 'tests/**/*.mjs'],
+    ...security.configs.recommended,
+    rules: {
+      ...security.configs.recommended.rules,
+      'security/detect-eval-with-expression': 'error',
+      'no-new-func': 'error',
+    },
+  },
+
   {
     ignores: [
       'dist/',
@@ -102,6 +124,7 @@ export default [
       'backups/',
       'tmp/',
       'docs/',
+      'extension/lib/vendor/', // third-party, byte-for-byte pinned copies (see vendor README)
     ],
   },
 ];

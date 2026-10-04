@@ -62,6 +62,9 @@ import {
   runtimeValueMatches,
   reasoningEffortShortLabel,
   skillCommandForName,
+  isNamedHermesProfileName,
+  restSkillsFallbackAllowed,
+  shouldRecoverSkillsFromDashboard,
   skillSuggestionsForInput,
   shouldStopSessionPaging,
   shouldFallbackToWebSpeechForTranscription,
@@ -198,9 +201,10 @@ test('sidepanel replays stored history without emptying canonical messages betwe
   const renderer = source.match(/function renderMessagesFromStorage\(\) \{[\s\S]*?\n\}/)?.[0] || '';
 
   assert.match(renderer, /els\.messages\.innerHTML = '';/);
-  assert.match(renderer, /for \(const message of messages\) \{/);
+  assert.match(renderer, /for \(const message of browserDisplayMessages\((?:visibleMessages|messages)\)\) \{/);
   assert.match(renderer, /if \(isDelegationCompletionMarkerMessage\(message\)\) continue;/);
-  assert.match(renderer, /addMessage\(message\.role, message\.content, \{ persist: false \}\);/);
+  // Replay keeps roleLabel pass-through (group projection author labels).
+  assert.match(renderer, /addMessage\(message\.role, message\.content, \{[\s\S]*?persist: false[\s\S]*?attachments: message\.attachments \|\| null[\s\S]*?\}\);/);
   assert.doesNotMatch(renderer, /messages\s*=\s*\[\]/);
 });
 
@@ -243,15 +247,24 @@ test('messageDisplayText reveals only the human request from canonical Browser p
   assert.equal(common.messageDisplayText('user', wrapped), 'Summarize this page\nand keep it short.');
   assert.equal(common.messageDisplayText('user', 'Plain request'), 'Plain request');
   assert.equal(common.messageDisplayText('assistant', wrapped), wrapped);
+  assert.equal(
+    common.messageDisplayText(
+      'user',
+      '<<<HERMES_PAGE_COMMENTS session=x>>>\nComment 1\nNote: hi\n<<<END_HERMES_PAGE_COMMENTS>>>',
+    ),
+    '1 page comment',
+  );
 });
 
-test('messageDisplayText fails closed for malformed or ambiguous request boundaries', () => {
+test('messageDisplayText recovers the human prompt from malformed or ambiguous request boundaries', () => {
   const malformed = 'USER_REQUEST_START\nKeep this unchanged';
   const duplicated = 'USER_REQUEST_START\nOne\nUSER_REQUEST_END\nUSER_REQUEST_START\nTwo\nUSER_REQUEST_END';
 
   assert.equal(typeof common.messageDisplayText, 'function');
-  assert.equal(common.messageDisplayText('user', malformed), malformed);
-  assert.equal(common.messageDisplayText('user', duplicated), duplicated);
+  // A stray or duplicated marker must never hide the message: the human text is
+  // recovered and the protocol marker itself is dropped.
+  assert.equal(common.messageDisplayText('user', malformed), 'Keep this unchanged');
+  assert.equal(common.messageDisplayText('user', duplicated), 'One\n\nTwo');
 });
 
 test('messageDisplayText renders only typed BCP v2 human_input and rejects lookalikes', () => {
@@ -269,9 +282,17 @@ test('messageDisplayText renders only typed BCP v2 human_input and rejects looka
     attachment_context: {},
     source_receipt: {},
   });
+  const lookalike = JSON.stringify({
+    protocol: 'something.else',
+    human_input: { source: 'composer', text: 'nope' },
+  });
 
   assert.equal(common.messageDisplayText('user', v2), 'Only this composer text is history-visible.');
-  assert.equal(common.messageDisplayText('user', ambiguous), ambiguous);
+  // An envelope that carries extra keys still shows the human prompt instead of
+  // dumping raw JSON into the transcript.
+  assert.equal(common.messageDisplayText('user', ambiguous), 'one');
+  // Text without a Browser-turn marker is never treated as an envelope.
+  assert.equal(common.messageDisplayText('user', lookalike), lookalike);
 });
 
 test('sidepanel and Hermes Web share the display-only Browser request formatter', () => {
@@ -313,6 +334,19 @@ test('normalizeHermesSessions preserves the server-reported profile for profile-
   assert.equal(sessions.find((s) => s.id === 's1').profile, 'sebastian');
   assert.equal(sessions.find((s) => s.id === 's2').profile, 'work');
   assert.equal(sessions.find((s) => s.id === 's3').profile, '');
+});
+
+test('normalizeHermesSessions preserves transport and hidden metadata for profile-aware session reopening', () => {
+  const [session] = normalizeHermesSessions({ data: [{
+    id: 'profile-session',
+    title: 'Naminé work',
+    profile: 'namine',
+    transport: 'dashboard-ws',
+    hidden: true,
+  }] });
+  assert.equal(session.transport, 'dashboard-ws');
+  assert.equal(session.hidden, true);
+  assert.equal(session.profile, 'namine');
 });
 
 test('stored runtime acknowledgements fill missing Cloud session model metadata without overriding canonical rows', () => {
@@ -361,8 +395,8 @@ test('startup exposes one-click connection testing and Cloud reconnect uses the 
 
   assert.match(html, /id="settingsButton"[\s\S]*id="startupTestConnectionButton"/);
   assert.match(html, /id="startupTestConnectionButton"[^>]*>\s*TEST CONNECTION\s*</);
-  assert.match(css, /body\.startup-active \.topbar #startupTestConnectionButton/);
-  assert.match(css, /top:\s*min\(var\(--startup-settings-top[^;]*calc\(100vh - 84px\)\)/);
+  assert.match(css, /body\.startup-active \.startup-actions #startupTestConnectionButton/);
+  assert.doesNotMatch(css, /--startup-settings-top/);
   assert.match(source, /startupTestConnectionButton:\s*\$\('#startupTestConnectionButton'\)/);
   assert.match(source, /els\.startupTestConnectionButton\?\.addEventListener\('click', testConnection\)/);
   assert.match(source, /function connectionTestButtons\(\)/);
@@ -411,7 +445,7 @@ test('Hermes Web Cloud handoff uses the same signed-in dashboard ticket transpor
   assert.ok(select.indexOf('buildSessionModelSwitchRequest') < select.indexOf('WS_METHODS.sessionStatus'));
   assert.match(select, /cloudSwitchAccepted = true/);
   assert.match(select, /if \(cloudSwitchAccepted\)[\s\S]*Cloud model rollback/);
-  assert.match(source, /const forThisSession = \(event\) => event\.sessionId === sessionId;/);
+  assert.match(source, /const forThisSession = \(event\) => matchesDashboardSessionEvent\(event, sessionIds\);/);
   assert.match(source, /WS_EVENTS\.error, \(event\) => \{\s*if \(!forThisSession\(event\)\) return;/);
   assert.match(source, /let dashboardTurnSessionId = '';/);
   assert.match(source, /sessionHistory, \{ session_id: dashboardTurnSessionId \}/);
@@ -469,8 +503,8 @@ test('sidepanel wires Browser-scoped models and compact session copy/rename acti
   assert.match(source, /copyTextToClipboard/);
   assert.match(source, /navigator\.clipboard\.writeText/);
   assert.match(source, /Copy session ID/);
-  assert.match(source, /promptRenameSession/);
-  assert.match(source, /renameHermesSessionTitle\(session\.id/);
+  assert.match(source, /openSessionRenameEditor/);
+  assert.match(source, /renameHermesSessionTitle\(sessionId, nextTitle\)/);
   assert.match(source, /Rename session/);
   assert.doesNotMatch(source, /hermes config set/);
   assert.doesNotMatch(source, /model\.default/);
@@ -485,8 +519,8 @@ test('bottom dock keeps baseline composer geometry while floating popovers remai
   const composerRule = css.match(/\.composer\s*\{[\s\S]*?\}/)?.[0] || '';
   const textareaRule = css.match(/textarea\s*\{\s*resize:\s*vertical;[\s\S]*?\}/)?.[0] || '';
   const commandMenuRule = css.match(/\.quick-more-menu\s*\{[\s\S]*?\}/)?.[0] || '';
-  const scrollbarRule = css.match(/\.app-scroll::-webkit-scrollbar,[\s\S]*?\{\s*width:\s*8px;\s*\}/)?.[0] || '';
-  const scrollbarThumbRule = css.match(/\.app-scroll::-webkit-scrollbar-thumb,[\s\S]*?\{[\s\S]*?border:\s*1px solid var\(--hermes-line-strong\);\s*\}/)?.[0] || '';
+  const scrollbarRule = css.match(/\.app-scroll::-webkit-scrollbar,[^}]*?\{[^}]*?width:\s*8px;[^}]*?\}/)?.[0] || '';
+  const scrollbarThumbRule = css.match(/\.app-scroll::-webkit-scrollbar-thumb,[^}]*?\{[^}]*?border:\s*1px solid var\(--hermes-line-strong\);[^}]*?\}/)?.[0] || '';
   const floatingRule = css.match(/\.model-menu,\s*\n\.context-popover\s*\{[\s\S]*?\}/)?.[0] || '';
 
   assert.match(dockRule, /grid-template-rows:\s*auto auto/);
@@ -665,14 +699,16 @@ test('pairingFailureMessage explains a missing pairing route instead of a bare 4
   assert.equal(pairingFailureMessage(503, {}), 'Pairing failed (503)');
 });
 
-test('gateway diagnostics classify upstream runtime, auth, CORS, and missing route failures', () => {
+test('gateway diagnostics classify server runtime, auth, CORS, and missing route failures', () => {
   const upstream = classifyGatewayError(new Error("int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"));
-  assert.equal(upstream.kind, 'upstream-runtime');
+  assert.equal(upstream.kind, 'server-runtime');
   assert.equal(upstream.probeStatus, 'degraded');
-  assert.match(upstream.title, /runtime exception/i);
-  assert.match(upstream.detail, /upstream Hermes Agent/i);
-  assert.match(upstream.detail, /computer_use/i);
-  assert.match(upstream.userMessage, /gateway traceback/i);
+  assert.equal(upstream.serverReachable, true);
+  assert.match(upstream.title, /runtime failure/i);
+  assert.match(upstream.detail, /gateway is running/i);
+  assert.match(upstream.detail, /gateway log/i);
+  assert.doesNotMatch(upstream.detail, /computer_use|cua-driver/i);
+  assert.doesNotMatch(upstream.userMessage, /traceback|NoneType/i);
   assert.doesNotMatch(upstream.userMessage, /api\/model\/options/i);
 
   const auth = classifyGatewayError('401: Unauthorized');
@@ -731,8 +767,17 @@ test('connection diagnostics can represent connected-but-degraded optional failu
     state: 'degraded',
     probeDetail: "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
   });
-  assert.match(copy, /Hermes API server is reachable/i);
-  assert.match(copy, /upstream Hermes Agent/i);
+  assert.match(copy, /gateway is running/i);
+  assert.match(copy, /gateway log/i);
+  assert.doesNotMatch(copy, /NoneType|Traceback|aiohttp/i);
+
+  const genericCopy = gatewayConnectionTroubleshooting({
+    gatewayMode: 'local-api',
+    gatewayUrl: 'http://127.0.0.1:8642',
+    state: 'degraded',
+    probeDetail: 'provider validation failure',
+  });
+  assert.match(genericCopy, /Hermes API server is reachable/i);
 });
 
 test('clampText preserves short text and clearly marks truncation', () => {
@@ -773,6 +818,10 @@ test('isRestrictedUrl blocks browser internals and sensitive account categories'
   assert.equal(isRestrictedUrl('https://example.com/docs?x-api-key=browser-secret-value'), true);
   assert.equal(isRestrictedUrl('https://bucket.s3.amazonaws.com/file?X-Amz-Credential=browser-secret-value&X-Amz-Signature=browser-secret-value'), true);
   assert.equal(isRestrictedUrl('https://example.com/docs?next=public'), false);
+  assert.equal(isRestrictedUrl('file:///D:/Hermes/bangkok-hermes-events-deck.html'), true);
+  assert.equal(isRestrictedUrl('file:///D:/Hermes/bangkok-hermes-events-deck.html', { allowLocalDocuments: true }), false);
+  assert.equal(isRestrictedUrl('http://localhost:3000/presentation'), false);
+  assert.equal(isRestrictedUrl('http://127.0.0.1:8080/deck.html'), false);
 });
 
 test('privacySafeTabForPrompt redacts sensitive tab titles and URLs before prompt assembly', () => {
@@ -1172,11 +1221,11 @@ test('shouldSubmitComposerKey sends on Enter while preserving Shift+Enter for ne
   assert.equal(shouldSubmitComposerKey({ key: 'Enter', shiftKey: false, isComposing: true }), false);
 });
 
-test('composer renders the readable context scope control across from Ask Hermes', () => {
+test('composer status row puts the DOM chip left of the scope control, behind a collapse toggle', () => {
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
   const headerIndex = html.indexOf('class="composer-header"');
-  const labelIndex = html.indexOf('class="composer-label"');
+  const labelIndex = html.indexOf('class="composer-label sr-only"');
   const scopeIndex = html.indexOf('id="contextScopeButton"');
   const chipIndex = html.indexOf('id="contextChip"');
   assert.notEqual(headerIndex, -1);
@@ -1184,8 +1233,9 @@ test('composer renders the readable context scope control across from Ask Hermes
   assert.notEqual(scopeIndex, -1);
   assert.notEqual(chipIndex, -1);
   assert.ok(labelIndex > headerIndex, 'Ask Hermes label should be inside the composer header');
-  assert.ok(scopeIndex > labelIndex, 'context scope control should sit across from the Ask Hermes label');
-  assert.ok(scopeIndex < chipIndex, 'context scope control should render above the DOM chip, not below it');
+  assert.ok(chipIndex > labelIndex && chipIndex < scopeIndex, 'DOM chip sits left of the scope control');
+  assert.ok(html.indexOf('id="statusStackToggle"') < headerIndex, 'collapse toggle sits above the status row');
+  assert.match(css, /\.composer\.status-stack-collapsed #composerStatusStack/);
   assert.match(css, /\.context-scope-button\s*\{[^}]*background:\s*rgba\(var\(--hermes-ink-rgb\),0\.12\);[^}]*color:\s*var\(--hermes-ink\);/s);
 });
 
@@ -1481,7 +1531,12 @@ test('voice dictation prefers on-device speech and installs a language pack when
 test('voice dictation detects blocked microphone permissions with actionable guidance', () => {
   assert.equal(isMicrophonePermissionError({ name: 'NotAllowedError', message: 'Permission denied' }), true);
   assert.equal(isMicrophonePermissionError({ error: 'not-allowed' }), true);
+  assert.equal(isMicrophonePermissionError({ name: 'NotReadableError', message: 'Permissions Policy blocked microphone' }), true);
+  assert.equal(isMicrophonePermissionError({ name: 'SecurityError', message: 'microphone is not available' }), true);
   assert.equal(isMicrophonePermissionError(new Error('network failed')), false);
+  assert.equal(common.shouldOpenVoiceDictationPageForSpeechError({ error: 'network' }), true);
+  assert.equal(common.shouldOpenVoiceDictationPageForSpeechError({ error: 'service-not-allowed' }), true);
+  assert.equal(common.shouldOpenVoiceDictationPageForSpeechError(new Error('server error')), false);
   assert.match(microphonePermissionHelp(), /Hermes Voice Dictation tab/);
   assert.match(microphonePermissionHelp(), /visible extension page/i);
   assert.match(microphonePermissionHelp(), /Microphone to Allow/i);
@@ -1520,7 +1575,8 @@ test('manifests omit unsupported audioCapture permission and use the web microph
   assert.match(voiceJs, /HERMES_VOICE_TRANSCRIPT/);
   assert.match(voiceJs, /getUserMedia\(\{ audio: \{ echoCancellation: true, noiseSuppression: true \} \}\)/);
   assert.doesNotMatch(voiceJs, /browserApi\.permissions|audioCapture/);
-  assert.doesNotMatch(sidepanelJs, /browserApi\.permissions|audioCapture/);
+  assert.doesNotMatch(sidepanelJs, /permissions\?*\.?request\(\{[^}]*permissions:\s*\[['"]microphone['"]\]/s);
+  assert.doesNotMatch(sidepanelJs, /audioCapture/);
   assert.doesNotMatch(sidepanelJs, /chrome:\/\/settings\/content\/siteDetails/);
   assert.doesNotMatch(sidepanelJs, /function (?:microphoneSettingsUrl|openMicrophoneSettingsPage)\b/);
   assert.match(voiceJs, /browserMicrophoneSettingsUrl/);
@@ -1531,18 +1587,50 @@ test('manifests omit unsupported audioCapture permission and use the web microph
 
 test('sidepanel falls back to visible voice dictation tab when sidepanel microphone capture is blocked', () => {
   const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  const voiceSource = readFileSync(new URL('../extension/voice-dictation.js', import.meta.url), 'utf8');
   assert.match(source, /const VOICE_DICTATION_PAGE = 'voice-dictation\.html'/);
   assert.match(source, /async function openVoiceDictationPage/);
   assert.match(source, /HERMES_VOICE_TRANSCRIPT/);
   assert.match(source, /consumePendingVoiceDraft/);
   assert.match(source, /error\.voiceDictationPageFallback = true/);
+  assert.match(source, /if \(!canRecordVoiceAudio\(\)\)/);
+  assert.match(source, /openVoiceDictationPage\('This side panel cannot capture microphone audio/);
+  assert.match(source, /browserSpeechCloudFallbackAllowed/);
+  assert.match(source, /shouldOpenVoiceDictationPageForSpeechError/);
+  assert.match(source, /toggleVoiceDictation\(\)\.catch/);
+  assert.match(voiceSource, /browserSpeechCloudFallbackAllowed/);
+  assert.match(voiceSource, /preparation\.mode !== 'local'/);
+  assert.match(voiceSource, /await browserApi\?\.storage\?\.local\?\.set\?\./);
   assert.match(source, /The current browser blocked microphone capture inside the side panel/);
+});
+
+test('speech silent-start watchdog treats started-but-mute recognition as a failure', () => {
+  assert.equal(common.SPEECH_SILENT_START_TIMEOUT_MS, 6000);
+  assert.equal(common.speechRecognitionSilentlyFailed({ elapsedMs: 5999 }), false);
+  assert.equal(common.speechRecognitionSilentlyFailed({ elapsedMs: 6000 }), true);
+  assert.equal(common.speechRecognitionSilentlyFailed({ elapsedMs: 6000, sawStart: true }), true);
+  assert.equal(common.speechRecognitionSilentlyFailed({ elapsedMs: 12000, sawResult: true }), false);
+  assert.equal(common.speechRecognitionSilentlyFailed({ elapsedMs: 12000, sawError: true }), false);
+  assert.equal(common.speechRecognitionSilentlyFailed({ elapsedMs: 12000, sawEnd: true }), false);
+
+  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
+  assert.match(source, /dictating = true;\r?\n\s+updateVoiceButtonState\(\);\r?\n\s+armSpeechWatchdog\(\)/, 'sidepanel must arm the silent-start watchdog after starting web speech');
+  assert.match(source, /function armSpeechWatchdog\(\)/, 'sidepanel must define armSpeechWatchdog');
+  assert.match(source, /function clearSpeechWatchdog\(\)/, 'sidepanel must define clearSpeechWatchdog');
+  assert.doesNotMatch(source, /recognition\.onstart = \(\) => \{ clearSpeechWatchdog\(\); \};/, 'onstart must not cancel the watchdog — Comet fires start with no audio');
+  assert.match(source, /recognition\.onresult = \(event\) => \{/, 'sidepanel onresult must exist');
+  assert.match(source, /speechRecognitionSilentlyFailed/, 'sidepanel must use the silent-failure contract from common.mjs');
+  assert.match(source, /never delivered audio/, 'the watchdog must surface a real error instead of a fake ON state');
+  assert.match(source, /void openVoiceDictationPage\('Browser speech started but never delivered audio/, 'the watchdog must route to the granted-tab voice page that posts hermesVoiceDraft');
+  assert.match(source, /clearSpeechWatchdog\(\);\r?\n\s+dictating = false;/, 'the watchdog must clear the fake ON state before falling back');
 });
 
 test('connect and startup sync Hermes models, sessions, skills, and profiles from the gateway', () => {
   const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   assert.match(source, /await loadModels\(\{ quiet: true \}\);\s*await loadSkills\(\{ quiet: true \}\);\s*await loadProfiles\(\{ quiet: true \}\);\s*await loadSessions\(\{ quiet: true \}\);\s*await initializeSessionForPanelOpen\(\{ focus: false \}\);/s);
-  assert.match(source, /apiFetch\('\/v1\/models'/);
+  // Models no longer load from /v1/models REST: the recovered source uses
+  // WS model discovery (discoverModelsFromRegistry / discoverModelsFromDashboard).
+  assert.match(source, /WS_METHODS\.modelsList|discoverModelsFromRegistry\(|discoverModelsFromDashboard\(/);
   assert.ok(
     source.indexOf('discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh })') > -1
       && source.indexOf('discoverModelsFromRegistry({ apiFetch, readJsonResponse, refresh })') < source.indexOf('discoverModelsFromDashboard({'),
@@ -1551,12 +1639,19 @@ test('connect and startup sync Hermes models, sessions, skills, and profiles fro
   assert.match(source, /discoverModelsFromDashboard\(\{/);
   assert.match(source, /profile: safeActiveProfile\(\)/);
   assert.match(source, /safeActiveProfile\(\)/);
-  assert.match(source, /discoverProfilesViaTab\(\{/);
+  // Profile discovery lives in the Bot Mode roster path: authenticated
+  // dashboard WebSocket profiles.list is the rich source. REST /api/profiles
+  // remains a dashboard-discovery helper, never a substitute roster.
+  const roster = readFileSync(new URL('../extension/lib/desktop-roster.mjs', import.meta.url), 'utf8');
+  assert.match(roster, /\/api\/profiles/, 'desktop roster helper still knows the dashboard /api/profiles endpoint');
+  assert.match(source, /discoverLocalDashboardBaseUrl\(\{/);
+  assert.match(source, /WS_METHODS\.profilesList/);
   assert.match(source, /dashboardModelDiscoveryBaseUrl\(\{/);
   assert.doesNotMatch(source, /loadModels\(\{ quiet: true, payload: modelsPayload \}\)/);
   assert.match(source, /shouldTrySessionModelFallback\(\{\s*registryModels,\s*registrySource,\s*defaultModelId: DEFAULT_SETTINGS\.model,\s*\}\)/s);
   assert.match(source, /apiFetch\('\/v1\/skills'/);
-  assert.match(source, /apiFetch\('\/v1\/profiles'/);
+  assert.match(source, /request\(WS_METHODS\.profilesList, \{ include_sessions: true \}\)/);
+  assert.doesNotMatch(source, /fetchRosterFromDashboard\(\{/);
   assert.match(source, /apiFetch\(`\/api\/sessions\?limit=\$\{limit\}&offset=\$\{offset\}&include_children=true&order=recent`/);
   assert.match(source, /els\.refreshModelsButton\.addEventListener\('click', refreshModelsFromMenu\)/);
 });
@@ -1622,7 +1717,8 @@ test('assistant thinking placeholder renders animated indicator markup and reduc
   assert.match(source, /<span class="thinking-word">\$\{escapeHtml\(word\)\}<\/span>/);
   assert.match(source, /<span class="thinking-dots" aria-hidden="true"><i><\/i><i><\/i><i><\/i><\/span>/);
   assert.match(source, /<span class="thinking-words" aria-hidden="true">\$\{phrases\}<\/span>/);
-  assert.match(source, /streamView\.updateText\(liveText \|\| THINKING_PLACEHOLDER\)/);
+  assert.match(source, /streamPacer\.push\(liveText\.slice\(pushedLive\)\);/);
+  assert.match(source, /streamView\.updateText\(text \|\| \(meta\.done \? '' : THINKING_PLACEHOLDER\)\);/);
   assert.match(css, /\.thinking-indicator[\s\S]*overflow: hidden/);
   assert.match(css, /\.thinking-words[\s\S]*overflow: hidden/);
   assert.match(css, /\.thinking-words[\s\S]*height: 1\.46em/);
@@ -1644,7 +1740,8 @@ test('tool activity strip is wired as runtime UI instead of raw tool markdown', 
   assert.match(source, /function setToolActivity/);
   assert.match(source, /updateTool\(tool/);
   assert.match(source, /normalizeBrowserRuntimeEvent/);
-  assert.match(source, /streamView\.updateTool\(normalizeToolActivity\(tool\)\)/);
+  assert.match(source, /streamView\.updateTool\(activity\)/);
+  assert.match(source, /rawGeneratedImageCandidatesFromResult\(activity\.result\)/);
   assert.doesNotMatch(source, /\\n\\n\[tool\]/);
   assert.match(css, /\.tool-activity\b/);
   for (const category of ['file', 'edit', 'terminal', 'browser', 'web', 'media', 'meta']) {
@@ -1660,6 +1757,16 @@ test('tool activity strip is wired as runtime UI instead of raw tool markdown', 
   assert.match(css, /\.tool-activity-glyph[\s\S]*overflow: hidden/);
   assert.doesNotMatch(css, /\.tool-kind-web \.tool-activity-meter i \{ animation-name: toolOrbit; \}/);
   assert.match(css, /\.tool-activity \*/);
+});
+
+test('renderMarkdown turns bare session URLs into new-tab links', () => {
+  const html = renderMarkdown('- https://openrouter.ai/provider/stealth\n- See https://example.com/docs.');
+  assert.match(html, /<a href="https:\/\/openrouter\.ai\/provider\/stealth" target="_blank" rel="noopener noreferrer">https:\/\/openrouter\.ai\/provider\/stealth<\/a>/);
+  assert.match(html, /<a href="https:\/\/example\.com\/docs" target="_blank" rel="noopener noreferrer">https:\/\/example\.com\/docs<\/a>\./);
+  assert.doesNotMatch(html, /href="https:\/\/example\.com\/docs\."/);
+  const linked = renderMarkdown('[Docs](https://hermes-agent.nousresearch.com/docs)');
+  assert.equal((linked.match(/<a /g) || []).length, 1);
+  assert.doesNotMatch(renderMarkdown('`https://example.com/secret`'), /<a /);
 });
 
 test('renderMarkdown produces safe rich text for headings, lists, tables, and links', () => {
@@ -1701,6 +1808,15 @@ test('normalizeHermesModels converts OpenAI-style /v1/models payload and keeps s
   assert.equal(models[1].contextTokens, 131072);
 });
 
+test('normalizeHermesModels canonicalizes provider-qualified UI IDs while preserving raw runtime IDs', () => {
+  const models = normalizeHermesModels({
+    data: [{ id: 'e2e/test-model', provider: 'e2e', context_length: 32000 }],
+  }, 'e2e/test-model');
+  assert.equal(models[0].id, 'e2e::e2e/test-model');
+  assert.equal(models[0].rawModelId, 'e2e/test-model');
+  assert.equal(models[0].provider, 'e2e');
+});
+
 test('normalizeHermesModels does not keep default hermes-agent fallback when real models exist', () => {
   const models = normalizeHermesModels({ data: [{ id: 'openai-codex:gpt-5.5' }] }, 'hermes-agent');
   assert.deepEqual(models.map((model) => model.id), ['openai-codex:gpt-5.5']);
@@ -1711,20 +1827,53 @@ test('normalizeHermesModels applies curated context fallback when provider rows 
   assert.equal(models[0].contextTokens, 1000000);
 });
 
+test('normalizeHermesModels pairs Claude, Grok, and Nous rows with Hermes windows instead of requestable', () => {
+  const rows = [
+    { id: 'anthropic::claude-opus-5.5', rawModelId: 'claude-opus-5.5', label: 'Opus 5.5', provider: 'anthropic', context_length: 0 },
+    { id: 'anthropic::claude-sonnet-5', rawModelId: 'claude-sonnet-5', label: 'Sonnet 5', provider: 'anthropic', context_length: 0 },
+    { id: 'xai::grok-4.7', rawModelId: 'grok-4.7', label: 'Grok 4.7', provider: 'xai', context_length: 0 },
+    { id: 'xai::grok-4.6', rawModelId: 'grok-4.6', label: 'Grok 4.6', provider: 'xai', context_length: 256_000 },
+    { id: 'nous::mimo-v2.6-pro', rawModelId: 'mimo-v2.6-pro', label: 'MiMo V2.6 Pro', provider: 'nous', context_length: 0 },
+    { id: 'nous::mimo-v2.6-flash', rawModelId: 'mimo-v2.6-flash', label: 'MiMo V2.6 Flash', provider: 'nous', context_length: 0 },
+    { id: 'openai-codex::gpt-6-sol', rawModelId: 'gpt-6-sol', label: 'GPT-6 Sol', provider: 'openai-codex', context_length: 0 },
+    { id: 'openai-codex::gpt-6-sol-900k', rawModelId: 'gpt-6-sol-900k', label: 'GPT-6 Sol', provider: 'openai-codex', context_length: 900_000 },
+  ];
+  const models = normalizeHermesModels({ data: rows }, rows[0].id);
+  assert.equal(models.find((model) => model.rawModelId === 'claude-opus-5.5')?.contextTokens, 1_000_000);
+  assert.equal(models.find((model) => model.rawModelId === 'claude-sonnet-5')?.contextTokens, 1_000_000);
+  assert.equal(models.find((model) => model.rawModelId === 'grok-4.7')?.contextTokens, 500_000);
+  assert.equal(models.find((model) => model.rawModelId === 'grok-4.6')?.contextTokens, 256_000);
+  assert.equal(models.find((model) => model.rawModelId === 'mimo-v2.6-pro')?.contextTokens, 1_048_576);
+  assert.equal(models.find((model) => model.rawModelId === 'mimo-v2.6-flash')?.contextTokens, 1_048_576);
+  assert.equal(models.find((model) => model.rawModelId === 'gpt-6-sol')?.contextTokens, 272_000);
+  assert.equal(models.find((model) => model.rawModelId === 'gpt-6-sol-900k')?.contextTokens, 900_000);
+});
+
+test('normalizeHermesModels gives Grok 4.6 a 500k window instead of the grok-4 256k catch-all', () => {
+  const omitted = normalizeHermesModels({ data: [{ id: 'x-ai/grok-4.6', rawModelId: 'grok-4.6', provider: 'x-ai', context_length: 0 }] }, 'x-ai/grok-4.6');
+  assert.equal(omitted[0].contextTokens, 500_000);
+
+  const stale = normalizeHermesModels({ data: [{ id: 'grok-4.6', rawModelId: 'grok-4.6', provider: 'xai', context_length: 256_000 }] }, 'grok-4.6');
+  assert.equal(stale[0].contextTokens, 256_000, 'an explicit provider limit wins over a Browser fallback');
+
+  const older = normalizeHermesModels({ data: [{ id: 'grok-4', rawModelId: 'grok-4', provider: 'xai', context_length: 0 }] }, 'grok-4');
+  assert.equal(older[0].contextTokens, 256_000);
+});
+
 test('normalizeHermesModels applies 1M context fallback for Qwen Token Plan models', () => {
   for (const model of ['qwen3.8-max-preview', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash']) {
     const qwenModels = normalizeHermesModels({ data: [{ id: model, rawModelId: model, provider: 'qwen-token-plan', context_length: 0 }] }, model);
-    assert.equal(qwenModels[0].contextTokens, 1_000_000, `${model} should fall back to 1M context`);
+    assert.equal(qwenModels[0].contextTokens, model === 'qwen3.7-plus' ? 1_048_576 : 1_000_000, `${model} should follow the Agent table, retaining display aliases only for missing keys`);
   }
 
   const unknownQwen = normalizeHermesModels({ data: [{ id: 'qwen-unknown-model', context_length: 0 }] }, 'qwen-unknown-model');
   assert.equal(unknownQwen[0].contextTokens, 131_072, 'unrecognized qwen models should keep the generic 131072 catch-all');
 });
 
-test('normalizeHermesModels overrides a stale 131072 runtime with curated 1M for Qwen Token Plan models', () => {
+test('normalizeHermesModels trusts explicit Qwen limits instead of overriding them with Browser guesses', () => {
   for (const model of ['qwen3.8-max-preview', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash']) {
     const stale = normalizeHermesModels({ data: [{ id: model, rawModelId: model, provider: 'qwen-token-plan', context_length: 131072 }] }, model);
-    assert.equal(stale[0].contextTokens, 1_000_000, `${model} should prefer curated 1M over a stale 131072 runtime`);
+    assert.equal(stale[0].contextTokens, 131_072, `${model} must keep the explicit provider limit`);
   }
 
   const customRuntime = normalizeHermesModels({ data: [{ id: 'qwen3.8-max-preview', rawModelId: 'qwen3.8-max-preview', provider: 'qwen-token-plan', context_length: 262144 }] }, 'qwen3.8-max-preview');
@@ -1742,39 +1891,149 @@ test('normalizeHermesModels uses provider-aware GPT-5.5 context fallbacks', () =
   assert.equal(openRouterModels[0].contextTokens, 1050000);
 });
 
-test('normalizeHermesModels mirrors Hermes provider-aware GPT-5.6 context metadata', () => {
-  for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+test('normalizeHermesModels maps tiered Codex GPT-5.6 context variants by explicit 900k suffix', () => {
+  for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-sol-2026-08-16']) {
     const codexModels = normalizeHermesModels({ data: [{ id: `openai-codex::${model}`, rawModelId: model, provider: 'openai-codex', context_length: 0 }] }, `openai-codex::${model}`);
-    assert.equal(codexModels[0].contextTokens, 272_000, `${model} should use the Codex OAuth limit`);
+    assert.equal(codexModels[0].contextTokens, 272_000, `${model} should use the base Codex OAuth limit`);
+
+    const largeVariant = `${model}-900k`;
+    const largeCodexModels = normalizeHermesModels({ data: [{ id: `openai-codex::${largeVariant}`, rawModelId: largeVariant, provider: 'openai-codex', context_length: 0 }] }, `openai-codex::${largeVariant}`);
+    assert.equal(largeCodexModels[0].contextTokens, 900_000, `${largeVariant} follows Agent fallback without inventing a live cap`);
 
     const directModels = normalizeHermesModels({ data: [{ id: `openai::${model}`, rawModelId: model, provider: 'openai', context_length: 0 }] }, `openai::${model}`);
     assert.equal(directModels[0].contextTokens, 1_050_000, `${model} should use the direct OpenAI limit`);
   }
+
+  const labeledVariant = normalizeHermesModels({ data: [{
+    id: 'openai-codex::gpt-5.6-luna',
+    rawModelId: 'gpt-5.6-luna',
+    label: 'GPT-5.6 Luna 900K',
+    provider: 'openai-codex',
+    context_length: 0,
+  }] }, 'openai-codex::gpt-5.6-luna');
+  assert.equal(labeledVariant[0].contextTokens, 272_000, 'a display label cannot opt a base model into another runtime window');
+
+  const codexGpt54 = normalizeHermesModels({ data: [{ id: 'openai-codex::gpt-5.4', rawModelId: 'gpt-5.4', provider: 'openai-codex', context_length: 0 }] }, 'openai-codex::gpt-5.4');
+  assert.equal(codexGpt54[0].contextTokens, 272_000, 'the base model follows the Agent base limit');
 });
 
-test('normalizeHermesModels never invents a GPT-5.6 limit without a provider and trusts explicit runtime metadata', () => {
+test('normalizeHermesModels maps Codex ChatGPT 6 Astra context to 272k and 900k', () => {
+  for (const model of ['gpt-6-astra', 'chatgpt-6-astra']) {
+    const base = normalizeHermesModels({ data: [{ id: `openai-codex::${model}`, rawModelId: model, provider: 'openai-codex', context_length: 0 }] }, `openai-codex::${model}`);
+    assert.equal(base[0].contextTokens, 272_000, `${model} should use the base Codex OAuth limit`);
+
+    const largeVariant = `${model}-900k`;
+    const large = normalizeHermesModels({ data: [{ id: `openai-codex::${largeVariant}`, rawModelId: largeVariant, provider: 'openai-codex', context_length: 0 }] }, `openai-codex::${largeVariant}`);
+    assert.equal(large[0].contextTokens, 900_000, `${largeVariant} follows the Agent opt-in fallback`);
+  }
+
+  const labeled = normalizeHermesModels({ data: [{
+    id: 'openai-codex::gpt-6-astra',
+    rawModelId: 'gpt-6-astra',
+    name: 'ChatGPT 6 Astra',
+    provider: 'openai-codex',
+    context_length: 0,
+  }] }, 'openai-codex::gpt-6-astra');
+  assert.equal(labeled[0].contextTokens, 272_000, 'ChatGPT 6 Astra should register as 272k');
+
+  const labeled900k = normalizeHermesModels({ data: [{
+    id: 'openai-codex::gpt-6-astra',
+    rawModelId: 'gpt-6-astra',
+    label: 'ChatGPT 6 Astra 900K',
+    provider: 'openai-codex',
+    context_length: 272_000,
+  }] }, 'openai-codex::gpt-6-astra');
+  assert.equal(labeled900k[0].contextTokens, 272_000, 'a label cannot override reported metadata');
+
+  const alias = normalizeHermesModels({ data: [{
+    id: 'codex::gpt-6-astra',
+    rawModelId: 'gpt-6-astra',
+    provider: 'codex',
+    context_length: 0,
+  }] }, 'codex::gpt-6-astra');
+  assert.equal(alias[0].contextTokens, 272_000);
+
+  const unknownProvider = normalizeHermesModels({ data: [{ id: 'gpt-6-astra', context_length: 0 }] }, 'gpt-6-astra');
+  assert.equal(unknownProvider[0].contextTokens, 1_050_000, 'Astra without a provider uses the Hermes direct-API window');
+});
+
+test('normalizeHermesModels keeps Codex OAuth exclusions at 272k', () => {
+  for (const model of ['gpt-5.5', 'gpt-5.4-mini']) {
+    const codexModels = normalizeHermesModels({ data: [{ id: `openai-codex::${model}`, rawModelId: model, provider: 'openai-codex', context_length: 0 }] }, `openai-codex::${model}`);
+    assert.equal(codexModels[0].contextTokens, 272_000, `${model} must keep its enforced Codex OAuth limit`);
+  }
+});
+
+test('normalizeHermesModels keeps provider identity scoped and consistent for Codex OAuth aliases', () => {
+  const falsePositive = normalizeHermesModels({ data: [{
+    id: 'xai::gpt-5.6-sol',
+    rawModelId: 'gpt-5.6-sol',
+    provider: 'xai',
+    owned_by: 'codex',
+    context_length: 0,
+  }] }, 'xai::gpt-5.6-sol');
+  assert.equal(falsePositive[0].contextTokens, 1_050_000, 'a non-Codex provider keeps the Hermes model window instead of the Codex cap');
+
+  const labelOnly = normalizeHermesModels({ data: [{
+    id: 'gpt-5.6-terra',
+    rawModelId: 'gpt-5.6-terra',
+    providerLabel: 'OpenAI Codex',
+    context_length: 0,
+  }] }, 'gpt-5.6-terra');
+  assert.equal(labelOnly[0].contextTokens, 272_000, 'a provider label should preserve the base Codex OAuth limit');
+
+  const alias = normalizeHermesModels({ data: [{
+    id: 'codex::gpt-5.6-sol',
+    rawModelId: 'gpt-5.6-sol',
+    provider: 'codex',
+    context_length: 0,
+  }] }, 'codex::gpt-5.6-sol');
+  assert.equal(alias[0].contextTokens, 272_000, 'the bare codex provider alias should match the base accounting behavior');
+});
+
+test('normalizeHermesModels never invents a GPT-5.6 limit without a provider and trusts non-stale runtime metadata', () => {
   const unknownProvider = normalizeHermesModels({ data: [{ id: 'gpt-5.6-sol', context_length: 0 }] }, 'gpt-5.6-sol');
-  assert.equal(unknownProvider[0].contextTokens, 0);
+  assert.equal(unknownProvider[0].contextTokens, 1_050_000);
 
   const authoritativeRuntime = normalizeHermesModels({ data: [{ id: 'openai-codex::gpt-5.6-sol', rawModelId: 'gpt-5.6-sol', provider: 'openai-codex', context_length: 300_000 }] }, 'openai-codex::gpt-5.6-sol');
   assert.equal(authoritativeRuntime[0].contextTokens, 300_000);
 });
 
-test('normalizeHermesModels repairs the legacy generic 400k limit for Codex GPT-5.6 only', () => {
-  const staleCodex = normalizeHermesModels({
+test('normalizeHermesModels preserves reported Codex context instead of forcing a fixed catalog cap', () => {
+  const baseCodex = normalizeHermesModels({
     data: [{
       id: 'openai-codex::gpt-5.6-luna',
       rawModelId: 'gpt-5.6-luna',
       provider: 'openai-codex',
-      context_length: 400_000,
+      context_length: 272_000,
     }],
   }, 'openai-codex::gpt-5.6-luna');
-  assert.equal(staleCodex[0].contextTokens, 272_000);
+  assert.equal(baseCodex[0].contextTokens, 272_000, 'the base Luna row must stay at 272K');
+
+  const largeCodex = normalizeHermesModels({
+    data: [{
+      id: 'openai-codex::gpt-5.6-luna-900k',
+      rawModelId: 'gpt-5.6-luna-900k',
+      provider: 'openai-codex',
+      context_length: 272_000,
+    }],
+  }, 'openai-codex::gpt-5.6-luna-900k');
+  assert.equal(largeCodex[0].contextTokens, 272_000, 'the reported effective limit is authoritative');
+
+  const codexGpt54 = normalizeHermesModels({
+    data: [{
+      id: 'openai-codex::gpt-5.4',
+      rawModelId: 'gpt-5.4',
+      provider: 'openai-codex',
+      context_length: 272_000,
+    }],
+  }, 'openai-codex::gpt-5.4');
+  assert.equal(codexGpt54[0].contextTokens, 272_000, 'the reported effective limit is authoritative');
 
   const unrelated = normalizeHermesModels({
-    data: [{ id: 'custom::gpt-5', rawModelId: 'gpt-5', provider: 'custom', context_length: 400_000 }],
+    data: [{ id: 'custom::gpt-5', rawModelId: 'gpt-5', provider: 'custom', context_length: 272_000 }],
   }, 'custom::gpt-5');
-  assert.equal(unrelated[0].contextTokens, 400_000);
+  assert.equal(unrelated[0].contextTokens, 272_000);
 });
 
 test('buildHermesModelOptions maps Browser thinking, effort, and fast controls to Hermes runtime options', () => {
@@ -2343,6 +2602,37 @@ test('skill helpers normalize slash commands and suggest matches from / or @ inp
   assert.deepEqual(skillSuggestionsForInput('normal message', skills), []);
 });
 
+test('named profiles never inherit the default REST skills catalog', () => {
+  assert.equal(isNamedHermesProfileName('default'), false);
+  assert.equal(isNamedHermesProfileName(''), false);
+  assert.equal(isNamedHermesProfileName('research'), true);
+  assert.equal(restSkillsFallbackAllowed({ profileName: 'default', dashboardReady: false }), true);
+  assert.equal(restSkillsFallbackAllowed({ profileName: 'research', dashboardReady: false }), false);
+  assert.equal(restSkillsFallbackAllowed({ profileName: 'default', dashboardReady: true }), false);
+});
+
+test('empty or failed REST skill catalogs recover from the dashboard profile snapshot', () => {
+  assert.equal(shouldRecoverSkillsFromDashboard({ restOutcome: 'ok' }), false);
+  assert.equal(shouldRecoverSkillsFromDashboard({ restOutcome: 'error' }), true);
+  assert.equal(shouldRecoverSkillsFromDashboard({ restOutcome: 'empty' }), true);
+  assert.equal(shouldRecoverSkillsFromDashboard({ restOutcome: 'skipped' }), true);
+  assert.equal(shouldRecoverSkillsFromDashboard({}), true);
+});
+
+test('normalizeHermesSkills reads profiles.describe rows without descriptions', () => {
+  const skills = normalizeHermesSkills({
+    name: 'default',
+    skills: [
+      { name: 'hermes-browser-development', enabled: true },
+      { name: 'systematic-debugging', enabled: true },
+    ],
+  });
+  assert.deepEqual(skills.map((skill) => skill.command), [
+    '/hermes-browser-development',
+    '/systematic-debugging',
+  ]);
+});
+
 test('normalizeHermesProfiles marks active profile and keeps useful metadata', () => {
   const profiles = normalizeHermesProfiles({ active: 'research', data: [
     { name: 'default', model: 'gpt-5.5', skill_count: 40, gateway_running: true },
@@ -2564,19 +2854,28 @@ test('connectionStateForGateway uses live reachability instead of config presenc
   );
 });
 
-test('gatewayConnectionTroubleshooting explains local v0.18 API server dependency failures', () => {
+test('gatewayConnectionTroubleshooting never invents a cause for an ambiguous local probe', () => {
   const message = gatewayConnectionTroubleshooting({
     gatewayMode: 'local-api',
     gatewayUrl: 'http://127.0.0.1:8642',
     state: 'unreachable',
     probeDetail: 'http://127.0.0.1:8642 · Failed to fetch',
   });
-  assert.match(message, /API server is not listening/i);
   assert.match(message, /127\.0\.0\.1:8642/);
-  assert.match(message, /Hermes Agent v0\.18/i);
-  assert.match(message, /aiohttp/i);
-  assert.match(message, /restart Hermes Gateway/i);
+  assert.match(message, /cannot tell/i);
+  assert.match(message, /check connection/i);
+  assert.doesNotMatch(message, /API server is not listening/i);
+  assert.doesNotMatch(message, /aiohttp|Hermes Agent v0\.18/i);
   assert.doesNotMatch(message, /API_SERVER_KEY|Bearer|token/i);
+
+  const refused = gatewayConnectionTroubleshooting({
+    gatewayMode: 'local-api',
+    gatewayUrl: 'http://127.0.0.1:8642',
+    state: 'unreachable',
+    probeDetail: 'net::ERR_CONNECTION_REFUSED',
+  });
+  assert.match(refused, /refused/i);
+  assert.doesNotMatch(refused, /aiohttp/i);
 
   const remote = gatewayConnectionTroubleshooting({
     gatewayMode: 'remote-api',
@@ -2584,7 +2883,7 @@ test('gatewayConnectionTroubleshooting explains local v0.18 API server dependenc
     state: 'unreachable',
     probeDetail: 'timeout',
   });
-  assert.match(remote, /Remote Hermes API is not reachable/i);
+  assert.match(remote, /timed out/i);
   assert.doesNotMatch(remote, /aiohttp|v0\.18/i);
 });
 
@@ -2680,7 +2979,7 @@ test('refresh page context button animates while refreshContext is running', () 
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
-  assert.match(html, /id="refreshButton"[\s\S]*?<span class="refresh-glyph" aria-hidden="true">↻<\/span>/);
+  assert.match(html, /id="refreshButton"[\s\S]*?<svg class="refresh-glyph"[^>]*viewBox="0 0 24 24"/);
   assert.match(css, /@keyframes hermesRefreshSpin/);
   assert.match(css, /\.icon-refresh\.is-refreshing/);
   assert.match(css, /\.icon-refresh\.is-refreshing\s+\.refresh-glyph\s*\{[^}]*animation:\s*hermesRefreshSpin/s);
@@ -2751,20 +3050,34 @@ test('context accounting falls back to local prompt estimate when runtime prompt
   assert.equal(result.source, 'local-estimate');
 });
 
-test('context accounting reconciles stale runtime 400k with the canonical Codex GPT-5.6 limit', () => {
-  const result = contextAccountingSnapshot({
-    localPromptTokens: 800,
-    runtime: {
-      provider: 'openai-codex',
-      model: 'gpt-5.6-luna',
-      context_length: 400_000,
-      last_prompt_tokens: 7_000,
-    },
+test('context accounting respects live Codex limits even when catalog estimates disagree', () => {
+  for (const model of ['gpt-5.6-luna-900k', 'gpt-5.4']) {
+    const result = contextAccountingSnapshot({
+      localPromptTokens: 800,
+      runtime: {
+        provider: 'openai-codex',
+        model,
+        context_length: 272_000,
+        last_prompt_tokens: 7_000,
+      },
+      modelContextTokens: 272_000,
+    });
+
+    assert.equal(result.liveContextTokens, 7_000);
+    assert.equal(result.contextLimitTokens, 272_000);
+  }
+
+  const alias = contextAccountingSnapshot({
+    runtime: { provider: 'codex', model: 'gpt-5.6-sol-900k', context_length: 272_000 },
     modelContextTokens: 272_000,
   });
+  assert.equal(alias.contextLimitTokens, 272_000);
 
-  assert.equal(result.liveContextTokens, 7_000);
-  assert.equal(result.contextLimitTokens, 272_000);
+  const authoritative = contextAccountingSnapshot({
+    runtime: { provider: 'openai-codex', model: 'gpt-5.6-sol', context_length: 300_000 },
+    modelContextTokens: 900_000,
+  });
+  assert.equal(authoritative.contextLimitTokens, 300_000);
 });
 
 test('local context fallback includes the loaded transcript instead of showing zero for active chats', () => {
@@ -3043,7 +3356,7 @@ test('discoverModelsFromRegistry flattens /api/model/options provider inventory'
         slug: 'openai-codex',
         name: 'OpenAI Codex',
         authenticated: true,
-        models: ['gpt-5.5', 'gpt-5.4', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+        models: ['gpt-5.5', 'gpt-5.4', 'gpt-5.6-sol', 'gpt-5.6-sol-900k', 'gpt-5.6-terra', 'gpt-5.6-luna'],
         capabilities: { 'gpt-5.5': { reasoning: true, fast: true } },
       },
       {
@@ -3065,6 +3378,7 @@ test('discoverModelsFromRegistry flattens /api/model/options provider inventory'
     'openai-codex::gpt-5.5',
     'openai-codex::gpt-5.4',
     'openai-codex::gpt-5.6-sol',
+    'openai-codex::gpt-5.6-sol-900k',
     'openai-codex::gpt-5.6-terra',
     'openai-codex::gpt-5.6-luna',
     'minimax::MiniMax-M3',
@@ -3073,6 +3387,7 @@ test('discoverModelsFromRegistry flattens /api/model/options provider inventory'
     'gpt-5.5',
     'gpt-5.4',
     'gpt-5.6-sol',
+    'gpt-5.6-sol-900k',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
     'MiniMax-M3',
@@ -3084,9 +3399,10 @@ test('discoverModelsFromRegistry flattens /api/model/options provider inventory'
   assert.equal(result.models[0].runtimeSelectable, true);
   const normalized = normalizeHermesModels(result.models, 'openai-codex::gpt-5.6-sol');
   assert.equal(normalized.find((model) => model.rawModelId === 'gpt-5.5')?.contextTokens, 272_000);
-  for (const model of normalized.filter((item) => item.rawModelId?.startsWith('gpt-5.6-'))) {
-    assert.equal(model.contextTokens, 272_000);
-  }
+  assert.equal(normalized.find((model) => model.rawModelId === 'gpt-5.6-sol')?.contextTokens, 272_000);
+  assert.equal(normalized.find((model) => model.rawModelId === 'gpt-5.6-sol-900k')?.contextTokens, 900_000);
+  assert.equal(normalized.find((model) => model.rawModelId === 'gpt-5.6-terra')?.contextTokens, 272_000);
+  assert.equal(normalized.find((model) => model.rawModelId === 'gpt-5.6-luna')?.contextTokens, 272_000);
   assert.equal(result.models.at(-1).contextTokens, 1_000_000);
 });
 
@@ -3131,7 +3447,7 @@ test('Cloud Preview applies model picks to the live session and refreshes contex
   assert.match(sidepanel, /WS_METHODS\.sessionStatus/);
   assert.match(sidepanel, /runtimeModelFromSessionStatus\(statusPayload\)/);
   assert.match(sidepanel, /source:\s*'Cloud model switch'/);
-  assert.match(sidepanel, /runtime\.context_length\s*=\s*selected\?\.contextTokens/);
+  assert.match(sidepanel, /runtime\.context_length\s*=\s*runtimeContextTokens\(statusPayload\.runtime \|\| statusPayload\) \|\| selected\?\.contextTokens/);
   assert.match(sidepanel, /Cloud model switch failed/);
 });
 
@@ -3596,7 +3912,30 @@ test('settings appearance defaults pin the zoom/font schema and keep textSize on
   assert.equal(ZOOM_MIN_PERCENT, 75);
   assert.equal(ZOOM_MAX_PERCENT, 200);
   assert.equal(ZOOM_STEP_PERCENT, 5);
-  assert.deepEqual(FONT_PROFILES, ['signature', 'system-sans', 'high-legibility', 'mono', 'custom-local']);
+  assert.deepEqual(FONT_PROFILES, [
+    'signature',
+    'collapse',
+    'system-sans',
+    'times-new-roman',
+    'georgia',
+    'palatino',
+    'garamond',
+    'cambria',
+    'calibri',
+    'trebuchet',
+    'high-legibility',
+    'montserrat',
+    'source-sans-3',
+    'ibm-plex-sans',
+    'outfit',
+    'space-grotesk',
+    'playfair-display',
+    'libre-baskerville',
+    'fraunces',
+    'cinzel',
+    'mono',
+    'custom-local',
+  ]);
 });
 
 test('settings text-zoom markup pins preset grid, numeric input, stepper, font select, and status IDs', () => {
@@ -3798,7 +4137,7 @@ test('side-panel Marketplace browser is localized, revision guarded, debounced, 
   assert.match(css, /\.settings-dialog \.marketplace-theme-search\s*\{[^}]*gap:\s*12px/s, 'search input and action need professional separation');
   assert.match(css, /\.settings-dialog \.marketplace-theme-search input,[\s\S]*?margin-top:\s*0/s, 'search input and action must share one visual baseline');
   assert.match(css, /\.marketplace-theme-search button\s*\{[^}]*background:\s*#f4f2eb[^}]*color:\s*#111/s, 'Search Themes must use the approved white action treatment');
-  assert.match(css, /\.marketplace-theme-head div > strong\s*\{[^}]*font:[^;}]*13px\/1\.15/s, 'Marketplace heading must retain the readable example scale');
+  assert.match(css, /\.marketplace-theme-head div > strong\s*\{[^}]*font:[^;}]*calc\(13px \* var\(--hermes-text-zoom, 1\)\)\/1\.15/s, 'Marketplace heading must retain the readable example scale');
   assert.match(css, /\.marketplace-theme-loading\s*\{[^}]*grid-template-columns:\s*repeat\(5/s, 'loading state must retain the example progress bars');
   assert.match(source, /marketplace-theme-loading/);
   assert.doesNotMatch(source, /marketplaceThemeResults\.innerHTML/);
@@ -3811,7 +4150,11 @@ test('composer plus, command pill, and topbar new-session icons are SVG-centered
   assert.match(newSession, /<svg[\s\S]*?class="new-session-icon"[\s\S]*?viewBox="0 0 24 24"/, 'topbar new-session must use a real SVG plus, not a baseline-riding text glyph');
   assert.doesNotMatch(newSession, />\+</, 'new-session must not render a bare + text glyph');
   assert.match(css, /\.icon-button \.new-session-icon\s*\{\s*width:\s*18px;[\s\S]*?height:\s*18px;/, 'new-session icon must be visibly larger than the 16px utility icons');
-  assert.match(css, /#newSessionButton:hover,[\s\S]*?#newSessionButton:focus-visible\s*\{\s*border-color:\s*var\(--hermes-accent\);\s*color:\s*var\(--hermes-accent\);\s*\}/, 'new-session hover must read as the primary action');
+  assert.match(
+    css,
+    /#newSessionButton:hover,\s*#newSessionButton:focus-visible\s*\{\s*background:\s*var\(--hermes-primary-bg,\s*var\(--hermes-ink\)\);\s*color:\s*var\(--hermes-primary-fg,\s*var\(--hermes-paper\)\);\s*border-color:\s*var\(--hermes-primary-fg,\s*var\(--hermes-paper\)\);\s*\}/,
+    'new-session hover must invert into the outlined primary action so it stays visible on light palettes',
+  );
   const attach = html.match(/<button[^>]*id="attachMenuButton"[\s\S]*?<\/button>/)?.[0] || '';
   assert.match(attach, /<svg[\s\S]*?viewBox="0 0 24 24"/, 'composer attach plus must be a real SVG, not a text glyph');
   assert.doesNotMatch(attach, />\+</, 'composer attach must not render a bare + text glyph');
@@ -3837,8 +4180,8 @@ test('side-panel Agent Theme Studio uses the validated theme pipeline and polish
   assert.match(css, /#customThemePreviewButton\s*\{[^}]*display:\s*grid[^}]*place-items:\s*center/s);
   assert.match(css, /#agentThemeCreateButton\s*\{[^}]*background:\s*#0505e8[^}]*color:\s*#fff/s, 'Ask Hermes must stay cobalt in Mono instead of becoming black');
   assert.match(css, /#agentThemeDescription,[\s\S]*?#agentThemeCreateButton\s*\{[^}]*height:\s*42px[^}]*margin-top:\s*0/s, 'Ask Hermes and its prompt must be exactly the same height');
-  assert.match(css, /\.agent-theme-studio > p\s*\{[^}]*font:[^;}]*9px\/1\.45/s, 'Agent Theme Studio helper copy must match the readable example');
-  assert.match(css, /\.custom-theme-json-field > strong\s*\{[^}]*font:[^;}]*10px\/1\.25/s, 'Paste Theme JSON heading must remain clearly separated and readable');
+  assert.match(css, /\.agent-theme-studio > p\s*\{[^}]*font:[^;}]*calc\(9px \* var\(--hermes-text-zoom, 1\)\)\/1\.45/s, 'Agent Theme Studio helper copy must match the readable example');
+  assert.match(css, /\.custom-theme-json-field > strong\s*\{[^}]*font:[^;}]*calc\(10px \* var\(--hermes-text-zoom, 1\)\)\/1\.25/s, 'Paste Theme JSON heading must remain clearly separated and readable');
   assert.match(css, /html\[data-hermes-theme="mono"\]\[data-hermes-mode="dark"\][\s\S]*?\.agent-theme-studio > p,[\s\S]*?\.agent-theme-status\s*\{\s*color:\s*#36ff7a/s, 'Mono dark must restore the green Agent Theme Studio copy');
 });
 

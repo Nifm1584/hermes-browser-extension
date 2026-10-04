@@ -27,6 +27,14 @@
     "message": "Hermes Browser Extension ヘッダー",
     "description": "Runtime interface message a11y.extension_header"
   },
+  "runtime_a11y_live_subagents": {
+    "message": "実行中のサブエージェント",
+    "description": "Runtime interface message a11y.live_subagents"
+  },
+  "runtime_a11y_subagent_status": {
+    "message": "Hermes サブエージェントの状態",
+    "description": "Runtime interface message a11y.subagent_status"
+  },
   "runtime_agent_theme_applied": {
     "message": "Theme created, validated, and applied",
     "description": "Runtime interface message agent_theme.applied"
@@ -95,29 +103,105 @@
     "message": "テキストを縮小",
     "description": "Runtime interface message appearance.decrease_text_zoom"
   },
+  "runtime_appearance_font_calibri": {
+    "message": "Calibri",
+    "description": "Runtime interface message appearance.font_calibri"
+  },
+  "runtime_appearance_font_cambria": {
+    "message": "Cambria",
+    "description": "Runtime interface message appearance.font_cambria"
+  },
+  "runtime_appearance_font_cinzel": {
+    "message": "Cinzel",
+    "description": "Runtime interface message appearance.font_cinzel"
+  },
+  "runtime_appearance_font_collapse": {
+    "message": "Hermes Legacy",
+    "description": "Runtime interface message appearance.font_collapse"
+  },
+  "runtime_appearance_font_fallback_note": {
+    "message": "ライセンス版の署名フォントがインストールされていないため、同梱の代替フォントを表示しています。",
+    "description": "Runtime interface message appearance.font_fallback_note"
+  },
   "runtime_appearance_font_family": {
     "message": "フォント ファミリー",
     "description": "Runtime interface message appearance.font_family"
+  },
+  "runtime_appearance_font_fraunces": {
+    "message": "Fraunces",
+    "description": "Runtime interface message appearance.font_fraunces"
+  },
+  "runtime_appearance_font_garamond": {
+    "message": "Garamond",
+    "description": "Runtime interface message appearance.font_garamond"
+  },
+  "runtime_appearance_font_georgia": {
+    "message": "Georgia",
+    "description": "Runtime interface message appearance.font_georgia"
   },
   "runtime_appearance_font_high_legibility": {
     "message": "高可読性",
     "description": "Runtime interface message appearance.font_high_legibility"
   },
+  "runtime_appearance_font_ibm_plex": {
+    "message": "IBM Plex Sans",
+    "description": "Runtime interface message appearance.font_ibm_plex"
+  },
   "runtime_appearance_font_installed_local": {
     "message": "インストール済みのローカルフォント",
     "description": "Runtime interface message appearance.font_installed_local"
+  },
+  "runtime_appearance_font_libre_baskerville": {
+    "message": "Libre Baskerville",
+    "description": "Runtime interface message appearance.font_libre_baskerville"
   },
   "runtime_appearance_font_monospace": {
     "message": "等幅",
     "description": "Runtime interface message appearance.font_monospace"
   },
+  "runtime_appearance_font_montserrat": {
+    "message": "Montserrat",
+    "description": "Runtime interface message appearance.font_montserrat"
+  },
+  "runtime_appearance_font_outfit": {
+    "message": "Outfit",
+    "description": "Runtime interface message appearance.font_outfit"
+  },
+  "runtime_appearance_font_palatino": {
+    "message": "Palatino",
+    "description": "Runtime interface message appearance.font_palatino"
+  },
+  "runtime_appearance_font_playfair": {
+    "message": "Playfair Display",
+    "description": "Runtime interface message appearance.font_playfair"
+  },
   "runtime_appearance_font_signature": {
     "message": "Hermes シグネチャ",
     "description": "Runtime interface message appearance.font_signature"
   },
+  "runtime_appearance_font_smokum": {
+    "message": "Smokum",
+    "description": "Runtime interface message appearance.font_smokum"
+  },
+  "runtime_appearance_font_source_sans": {
+    "message": "Source Sans 3",
+    "description": "Runtime interface message appearance.font_source_sans"
+  },
+  "runtime_appearance_font_space_grotesk": {
+    "message": "Space Grotesk",
+    "description": "Runtime interface message appearance.font_space_grotesk"
+  },
   "runtime_appearance_font_system_sans": {
     "message": "システム サンセリフ",
     "description": "Runtime interface message appearance.font_system_sans"
+  },
+  "runtime_appearance_font_times": {
+    "message": "Times New Roman",
+    "description": "Runtime interface message appearance.font_times"
+  },
+  "runtime_appearance_font_trebuchet": {
+    "message": "Trebuchet MS",
+    "description": "Runtime interface message appearance.font_trebuchet"
   },
   "runtime_appearance_increase_text_zoom": {
     "message": "テキストを拡大",
@@ -151,6 +235,10 @@
     "message": "テキストのズーム",
     "description": "Runtime interface message appearance.text_zoom"
   },
+  "runtime_appearance_theme_font_overlay": {
+    "message": "This theme is using its own font. Your saved font comes back when you leave it.",
+    "description": "Runtime interface message appearance.theme_font_overlay"
+  },
   "runtime_assist_options_heading": {
     "message": "Hermes Assist オプション",
     "description": "Runtime interface message assist.options_heading"
@@ -170,6 +258,766 @@
   "runtime_assist_routing_fallback_short": {
     "message": "正確なルーティングが利用できない場合は、ゲートウェイのデフォルトにフォールバックします",
     "description": "Runtime interface message assist.routing.fallback_short"
+  },
+  "runtime_attachments_attachment_too_large": {
+    "message": "25 MiBまでのファイルを添付できます。",
+    "description": "Runtime interface message attachments.attachment_too_large"
+  },
+  "runtime_attachments_download_to_open": {
+    "message": "対応するアプリで開くには、このファイルをダウンロードしてください。",
+    "description": "Runtime interface message attachments.download_to_open"
+  },
+  "runtime_attachments_file_unavailable": {
+    "message": "元のファイルを利用できません。もう一度添付してください。",
+    "description": "Runtime interface message attachments.file_unavailable"
+  },
+  "runtime_attachments_preview_limited": {
+    "message": "プレビューは一部のみです。完全なファイルをダウンロードしてください。",
+    "description": "Runtime interface message attachments.preview_limited"
+  },
+  "runtime_attachments_upload_unavailable": {
+    "message": "ファイル全体のアップロードを確認できませんでした。接続を確認するか、ダッシュボードのWebSocket接続を使用して再試行してください。",
+    "description": "Runtime interface message attachments.upload_unavailable"
+  },
+  "runtime_bot_mode_active_now": {
+    "message": "Active now",
+    "description": "Runtime interface message bot_mode.active_now"
+  },
+  "runtime_bot_mode_advanced": {
+    "message": "詳細設定",
+    "description": "Runtime interface message bot_mode.advanced"
+  },
+  "runtime_bot_mode_advanced_sections": {
+    "message": "詳細設定のセクション",
+    "description": "Runtime interface message bot_mode.advanced_sections"
+  },
+  "runtime_bot_mode_agents": {
+    "message": "エージェント",
+    "description": "Runtime interface message bot_mode.agents"
+  },
+  "runtime_bot_mode_animate_avatars": {
+    "message": "アバターをアニメーション",
+    "description": "Runtime interface message bot_mode.animate_avatars"
+  },
+  "runtime_bot_mode_avatar_preview": {
+    "message": "Avatar preview",
+    "description": "Runtime interface message bot_mode.avatar_preview"
+  },
+  "runtime_bot_mode_blobatar_title": {
+    "message": "Official blobatar face",
+    "description": "Runtime interface message bot_mode.blobatar_title"
+  },
+  "runtime_bot_mode_caps_gate_hint": {
+    "message": "先にボットに名前を付けます。機能はボットと一緒に保存されます。",
+    "description": "Runtime interface message bot_mode.caps_gate_hint"
+  },
+  "runtime_bot_mode_chat_empty": {
+    "message": "Say something to get started.",
+    "description": "Runtime interface message bot_mode.chat_empty"
+  },
+  "runtime_bot_mode_clear_avatar": {
+    "message": "Clear avatar",
+    "description": "Runtime interface message bot_mode.clear_avatar"
+  },
+  "runtime_bot_mode_clone_from_profile": {
+    "message": "プロフィールから複製",
+    "description": "Runtime interface message bot_mode.clone_from_profile"
+  },
+  "runtime_bot_mode_clone_hint": {
+    "message": "複製したプロフィールを使うには両方とも「継承」のままにします。このボットを固定するにはプロバイダーとモデルを選びます。",
+    "description": "Runtime interface message bot_mode.clone_hint"
+  },
+  "runtime_bot_mode_close": {
+    "message": "ボットモードを閉じる",
+    "description": "Runtime interface message bot_mode.close"
+  },
+  "runtime_bot_mode_color_picker_label": {
+    "message": "シェイプの色",
+    "description": "Runtime interface message bot_mode.color_picker_label"
+  },
+  "runtime_bot_mode_connected_instance": {
+    "message": "現在接続中の Hermes インスタンス",
+    "description": "Runtime interface message bot_mode.connected_instance"
+  },
+  "runtime_bot_mode_create_empty": {
+    "message": "空で作成（同梱スキルをスキップ）",
+    "description": "Runtime interface message bot_mode.create_empty"
+  },
+  "runtime_bot_mode_create_empty_hint": {
+    "message": "同梱スキルを一切コピーしない新しいボット。",
+    "description": "Runtime interface message bot_mode.create_empty_hint"
+  },
+  "runtime_bot_mode_cron_copy": {
+    "message": "このエージェントのプロファイルで実行される予定タスク(review-watch、scouts、digests)。",
+    "description": "Runtime interface message bot_mode.cron_copy"
+  },
+  "runtime_bot_mode_cron_refresh": {
+    "message": "Hermes から cron スケジュールを再読み込み",
+    "description": "Runtime interface message bot_mode.cron_refresh"
+  },
+  "runtime_bot_mode_cron_title": {
+    "message": "アクティブなCronジョブ",
+    "description": "Runtime interface message bot_mode.cron_title"
+  },
+  "runtime_bot_mode_custom_image": {
+    "message": "Custom image",
+    "description": "Runtime interface message bot_mode.custom_image"
+  },
+  "runtime_bot_mode_density": {
+    "message": "リストの密度",
+    "description": "Runtime interface message bot_mode.density"
+  },
+  "runtime_bot_mode_density_comfortable": {
+    "message": "コンフォート",
+    "description": "Runtime interface message bot_mode.density_comfortable"
+  },
+  "runtime_bot_mode_density_compact": {
+    "message": "コンパクト",
+    "description": "Runtime interface message bot_mode.density_compact"
+  },
+  "runtime_bot_mode_dialog_label": {
+    "message": "Hermes Browser ボットモード",
+    "description": "Runtime interface message bot_mode.dialog_label"
+  },
+  "runtime_bot_mode_edit_profile": {
+    "message": "Edit Profile",
+    "description": "Runtime interface message bot_mode.edit_profile"
+  },
+  "runtime_bot_mode_enable_label": {
+    "message": "Hermes Browser ボットモードを有効化",
+    "description": "Runtime interface message bot_mode.enable_label"
+  },
+  "runtime_bot_mode_face_blobatar": {
+    "message": "ブロブ顔",
+    "description": "Runtime interface message bot_mode.face_blobatar"
+  },
+  "runtime_bot_mode_face_classic_follows_name": {
+    "message": "クラシックシェイプ。色は名前につられて変わります。",
+    "description": "Runtime interface message bot_mode.face_classic_follows_name"
+  },
+  "runtime_bot_mode_face_classic_label": {
+    "message": "クラシックシェイプ",
+    "description": "Runtime interface message bot_mode.face_classic_label"
+  },
+  "runtime_bot_mode_face_classic_picked_color": {
+    "message": "クラシックシェイプ（選択した色）。",
+    "description": "Runtime interface message bot_mode.face_classic_picked_color"
+  },
+  "runtime_bot_mode_face_classic_shapes": {
+    "message": "クラシックシェイプ",
+    "description": "Runtime interface message bot_mode.face_classic_shapes"
+  },
+  "runtime_bot_mode_face_follows_name": {
+    "message": "顔は名前につられて変わります。",
+    "description": "Runtime interface message bot_mode.face_follows_name"
+  },
+  "runtime_bot_mode_face_style": {
+    "message": "顔のスタイル",
+    "description": "Runtime interface message bot_mode.face_style"
+  },
+  "runtime_bot_mode_field_description": {
+    "message": "Description",
+    "description": "Runtime interface message bot_mode.field_description"
+  },
+  "runtime_bot_mode_field_name": {
+    "message": "Profile name",
+    "description": "Runtime interface message bot_mode.field_name"
+  },
+  "runtime_bot_mode_field_title": {
+    "message": "Display title",
+    "description": "Runtime interface message bot_mode.field_title"
+  },
+  "runtime_bot_mode_group_cancel": {
+    "message": "グループチャットを作成",
+    "description": "Runtime interface message bot_mode.group_cancel"
+  },
+  "runtime_bot_mode_group_create": {
+    "message": "このグループチャットには少なくとも1人のエージェントを選択してください。",
+    "description": "Runtime interface message bot_mode.group_create"
+  },
+  "runtime_bot_mode_group_field_members": {
+    "message": "このグループチャットに参加するエージェントを選択してください。",
+    "description": "Runtime interface message bot_mode.group_field_members"
+  },
+  "runtime_bot_mode_group_field_name": {
+    "message": "ブラウザ・ローンチルーム",
+    "description": "Runtime interface message bot_mode.group_field_name"
+  },
+  "runtime_bot_mode_group_generate": {
+    "message": "生成",
+    "description": "Runtime interface message bot_mode.group_generate"
+  },
+  "runtime_bot_mode_group_members_hint": {
+    "message": "キャンセル",
+    "description": "Runtime interface message bot_mode.group_members_hint"
+  },
+  "runtime_bot_mode_group_members_label": {
+    "message": "メンバー",
+    "description": "Runtime interface message bot_mode.group_members_label"
+  },
+  "runtime_bot_mode_group_members_required": {
+    "message": "このグループチャットに名前を付けてください。",
+    "description": "Runtime interface message bot_mode.group_members_required"
+  },
+  "runtime_bot_mode_group_name_placeholder": {
+    "message": "グループチャットのメンバー",
+    "description": "Runtime interface message bot_mode.group_name_placeholder"
+  },
+  "runtime_bot_mode_group_roster_label": {
+    "message": "Hermes グループチャット",
+    "description": "Runtime interface message bot_mode.group_roster_label"
+  },
+  "runtime_bot_mode_group_sheet_label": {
+    "message": "新規グループチャット",
+    "description": "Runtime interface message bot_mode.group_sheet_label"
+  },
+  "runtime_bot_mode_group_sheet_meta": {
+    "message": "グループチャット名",
+    "description": "Runtime interface message bot_mode.group_sheet_meta"
+  },
+  "runtime_bot_mode_group_sheet_title": {
+    "message": "このデバイスにボットのグループチャットを作成します",
+    "description": "Runtime interface message bot_mode.group_sheet_title"
+  },
+  "runtime_bot_mode_group_threads": {
+    "message": "Group Chat Threads",
+    "description": "Runtime interface message bot_mode.group_threads"
+  },
+  "runtime_bot_mode_group_title_required": {
+    "message": "プロフィールを更新",
+    "description": "Runtime interface message bot_mode.group_title_required"
+  },
+  "runtime_bot_mode_installed_skills": {
+    "message": "Installed skills",
+    "description": "Runtime interface message bot_mode.installed_skills"
+  },
+  "runtime_bot_mode_installed_skills_hint": {
+    "message": "Active skills configured on this agent profile.",
+    "description": "Runtime interface message bot_mode.installed_skills_hint"
+  },
+  "runtime_bot_mode_leave_confirm": {
+    "message": "通常のセッションに戻る",
+    "description": "Runtime interface message bot_mode.leave_confirm"
+  },
+  "runtime_bot_mode_leave_detail": {
+    "message": "新しい拡張機能セッションを開始すると、通常のHermes Browserワークスペースに戻ります。",
+    "description": "Runtime interface message bot_mode.leave_detail"
+  },
+  "runtime_bot_mode_leave_kicker": {
+    "message": "通常のセッション",
+    "description": "Runtime interface message bot_mode.leave_kicker"
+  },
+  "runtime_bot_mode_leave_title": {
+    "message": "ボットモードを終了しますか？",
+    "description": "Runtime interface message bot_mode.leave_title"
+  },
+  "runtime_bot_mode_main_thread": {
+    "message": "Main room",
+    "description": "Runtime interface message bot_mode.main_thread"
+  },
+  "runtime_bot_mode_match_the_name": {
+    "message": "名前に合わせる",
+    "description": "Runtime interface message bot_mode.match_the_name"
+  },
+  "runtime_bot_mode_mcp_servers": {
+    "message": "MCP servers",
+    "description": "Runtime interface message bot_mode.mcp_servers"
+  },
+  "runtime_bot_mode_mcp_servers_hint": {
+    "message": "Capability-gated MCP integrations for this connected runtime.",
+    "description": "Runtime interface message bot_mode.mcp_servers_hint"
+  },
+  "runtime_bot_mode_model_switch_confirm": {
+    "message": "それでも切り替える",
+    "description": "Runtime interface message bot_mode.model_switch_confirm"
+  },
+  "runtime_bot_mode_model_switch_detail": {
+    "message": "このセッションには約 {tokens} トークンのコンテキストがあります。今切り替えると、次の Hermes の返信はキャッシュなしで全文を読み直します。追加の入力トークンが一度だけおおよそその分かかります。",
+    "description": "Runtime interface message bot_mode.model_switch_detail"
+  },
+  "runtime_bot_mode_model_switch_kicker": {
+    "message": "モデル切り替え",
+    "description": "Runtime interface message bot_mode.model_switch_kicker"
+  },
+  "runtime_bot_mode_model_switch_title": {
+    "message": "{model} に切り替えますか？",
+    "description": "Runtime interface message bot_mode.model_switch_title"
+  },
+  "runtime_bot_mode_new_agent": {
+    "message": "New Agent",
+    "description": "Runtime interface message bot_mode.new_agent"
+  },
+  "runtime_bot_mode_new_group": {
+    "message": "＋ 新規グループチャット",
+    "description": "Runtime interface message bot_mode.new_group"
+  },
+  "runtime_bot_mode_off_hint_sidepanel": {
+    "message": "既定ではオフです。現在接続中の Hermes インスタンスを使用します。",
+    "description": "Runtime interface message bot_mode.off_hint_sidepanel"
+  },
+  "runtime_bot_mode_off_hint_web": {
+    "message": "既定ではオフです。現在接続中の Hermes インスタンスにスコープされます。",
+    "description": "Runtime interface message bot_mode.off_hint_web"
+  },
+  "runtime_bot_mode_open_chat": {
+    "message": "Bot Chatを開く",
+    "description": "Runtime interface message bot_mode.open_chat"
+  },
+  "runtime_bot_mode_open_title": {
+    "message": "ボットモードを開く",
+    "description": "Runtime interface message bot_mode.open_title"
+  },
+  "runtime_bot_mode_pet_apply": {
+    "message": "選択したエージェントに適用",
+    "description": "Runtime interface message bot_mode.pet_apply"
+  },
+  "runtime_bot_mode_pet_clear": {
+    "message": "クリア",
+    "description": "Runtime interface message bot_mode.pet_clear"
+  },
+  "runtime_bot_mode_pet_gallery_empty": {
+    "message": "petdex ギャラリーにはまだペットがいません。",
+    "description": "Runtime interface message bot_mode.pet_gallery_empty"
+  },
+  "runtime_bot_mode_pet_gallery_failed": {
+    "message": "Hermes はペットギャラリーを読み込めませんでした。接続を保ち、もう一度開いてください。",
+    "description": "Runtime interface message bot_mode.pet_gallery_failed"
+  },
+  "runtime_bot_mode_pet_grid_label": {
+    "message": "petdex のペット",
+    "description": "Runtime interface message bot_mode.pet_grid_label"
+  },
+  "runtime_bot_mode_pet_loading_installed": {
+    "message": "インストール済みのペットを読み込み中…",
+    "description": "Runtime interface message bot_mode.pet_loading_installed"
+  },
+  "runtime_bot_mode_pet_loading_rest": {
+    "message": "petdex の残りを読み込み中…",
+    "description": "Runtime interface message bot_mode.pet_loading_rest"
+  },
+  "runtime_bot_mode_pet_no_match": {
+    "message": "この検索に一致するペットはありません。",
+    "description": "Runtime interface message bot_mode.pet_no_match"
+  },
+  "runtime_bot_mode_pet_none": {
+    "message": "なし",
+    "description": "Runtime interface message bot_mode.pet_none"
+  },
+  "runtime_bot_mode_pet_picker_moved": {
+    "message": "Profile pictures (petdex pets, custom images) are edited per agent in Bot Mode via Edit Profile.",
+    "description": "Runtime interface message bot_mode.pet_picker_moved"
+  },
+  "runtime_bot_mode_pet_search": {
+    "message": "ペットを検索",
+    "description": "Runtime interface message bot_mode.pet_search"
+  },
+  "runtime_bot_mode_pet_title": {
+    "message": "ペットアバター",
+    "description": "Runtime interface message bot_mode.pet_title"
+  },
+  "runtime_bot_mode_profiles_title": {
+    "message": "Profiles",
+    "description": "Runtime interface message bot_mode.profiles_title"
+  },
+  "runtime_bot_mode_refresh_agents": {
+    "message": "エージェントをリフレッシュ",
+    "description": "Runtime interface message bot_mode.refresh_agents"
+  },
+  "runtime_bot_mode_return_to_sessions": {
+    "message": "Regular Sessions",
+    "description": "Runtime interface message bot_mode.return_to_sessions"
+  },
+  "runtime_bot_mode_return_to_sessions_title": {
+    "message": "Return to regular Hermes Browser sessions",
+    "description": "Runtime interface message bot_mode.return_to_sessions_title"
+  },
+  "runtime_bot_mode_roster_label": {
+    "message": "Hermes のエージェント",
+    "description": "Runtime interface message bot_mode.roster_label"
+  },
+  "runtime_bot_mode_roster_label_web": {
+    "message": "Hermes Web のエージェント",
+    "description": "Runtime interface message bot_mode.roster_label_web"
+  },
+  "runtime_bot_mode_save_profile": {
+    "message": "Save changes",
+    "description": "Runtime interface message bot_mode.save_profile"
+  },
+  "runtime_bot_mode_search": {
+    "message": "エージェントを検索",
+    "description": "Runtime interface message bot_mode.search"
+  },
+  "runtime_bot_mode_search_mcp": {
+    "message": "MCP サーバーを検索",
+    "description": "Runtime interface message bot_mode.search_mcp"
+  },
+  "runtime_bot_mode_search_skills": {
+    "message": "Search skills",
+    "description": "Runtime interface message bot_mode.search_skills"
+  },
+  "runtime_bot_mode_search_tools": {
+    "message": "ツールを検索",
+    "description": "Runtime interface message bot_mode.search_tools"
+  },
+  "runtime_bot_mode_settings_copy_sidepanel": {
+    "message": "このブラウザーで、オプションのプロファイルリストと正規の Bot Chat ナビゲーションを有効にします。",
+    "description": "Runtime interface message bot_mode.settings_copy_sidepanel"
+  },
+  "runtime_bot_mode_settings_copy_web": {
+    "message": "このブラウザーで、オプションのエージェントレールと正規の Bot Chat ナビゲーションを有効にします。",
+    "description": "Runtime interface message bot_mode.settings_copy_web"
+  },
+  "runtime_bot_mode_settings_title": {
+    "message": "エージェントとボットモード",
+    "description": "Runtime interface message bot_mode.settings_title"
+  },
+  "runtime_bot_mode_share_keys": {
+    "message": "キーとアカウントをメインプロフィールと共有",
+    "description": "Runtime interface message bot_mode.share_keys"
+  },
+  "runtime_bot_mode_share_keys_hint": {
+    "message": "サブスクリプション、OAuth ログイン、API キーはコピーされず共有されます。独立したコピーにするにはチェックを外します。",
+    "description": "Runtime interface message bot_mode.share_keys_hint"
+  },
+  "runtime_bot_mode_sheet_create_failed": {
+    "message": "Hermes could not create the agent: {reason}",
+    "description": "Runtime interface message bot_mode.sheet_create_failed"
+  },
+  "runtime_bot_mode_sheet_create_offline": {
+    "message": "No Hermes desktop dashboard connection. Open Hermes Desktop, then try again.",
+    "description": "Runtime interface message bot_mode.sheet_create_offline"
+  },
+  "runtime_bot_mode_sheet_create_title": {
+    "message": "New Agent",
+    "description": "Runtime interface message bot_mode.sheet_create_title"
+  },
+  "runtime_bot_mode_sheet_edit_title": {
+    "message": "Edit profile",
+    "description": "Runtime interface message bot_mode.sheet_edit_title"
+  },
+  "runtime_bot_mode_sheet_label": {
+    "message": "Edit agent profile",
+    "description": "Runtime interface message bot_mode.sheet_label"
+  },
+  "runtime_bot_mode_sheet_meta_create": {
+    "message": "Creates a verified Hermes agent profile",
+    "description": "Runtime interface message bot_mode.sheet_meta_create"
+  },
+  "runtime_bot_mode_sheet_meta_profile": {
+    "message": "Profile {name}",
+    "description": "Runtime interface message bot_mode.sheet_meta_profile"
+  },
+  "runtime_bot_mode_sheet_missing_profile": {
+    "message": "Select an agent in Bot Mode first, then edit its profile.",
+    "description": "Runtime interface message bot_mode.sheet_missing_profile"
+  },
+  "runtime_bot_mode_sheet_name_required": {
+    "message": "Give the new agent a profile name.",
+    "description": "Runtime interface message bot_mode.sheet_name_required"
+  },
+  "runtime_bot_mode_sheet_remote_conflict": {
+    "message": "Another client updated this profile · your changes were saved on this device · reopen the sheet to load the latest revision",
+    "description": "Runtime interface message bot_mode.sheet_remote_conflict"
+  },
+  "runtime_bot_mode_sheet_remote_failed": {
+    "message": "Saved on this device · Hermes sync failed: {reason}",
+    "description": "Runtime interface message bot_mode.sheet_remote_failed"
+  },
+  "runtime_bot_mode_sheet_saved_local": {
+    "message": "Saved on this device",
+    "description": "Runtime interface message bot_mode.sheet_saved_local"
+  },
+  "runtime_bot_mode_sheet_saved_remote": {
+    "message": "Saved on this device · synced to Hermes",
+    "description": "Runtime interface message bot_mode.sheet_saved_remote"
+  },
+  "runtime_bot_mode_sheet_tabs_label": {
+    "message": "Profile editor sections",
+    "description": "Runtime interface message bot_mode.sheet_tabs_label"
+  },
+  "runtime_bot_mode_soul_auto_placeholder": {
+    "message": "名前・タイトル・説明から自動生成する場合は空欄のままにします。",
+    "description": "Runtime interface message bot_mode.soul_auto_placeholder"
+  },
+  "runtime_bot_mode_soul_hint": {
+    "message": "The core personality and architectural directive for this agent.",
+    "description": "Runtime interface message bot_mode.soul_hint"
+  },
+  "runtime_bot_mode_soul_instruction": {
+    "message": "SOUL.md instruction",
+    "description": "Runtime interface message bot_mode.soul_instruction"
+  },
+  "runtime_bot_mode_soul_md": {
+    "message": "SOUL.md",
+    "description": "Runtime interface message bot_mode.soul_md"
+  },
+  "runtime_bot_mode_soul_optional_hint": {
+    "message": "任意。生成されたペルソナを置き換えます。名前・タイトル・説明から作成する場合は空欄のままにします。",
+    "description": "Runtime interface message bot_mode.soul_optional_hint"
+  },
+  "runtime_bot_mode_soul_placeholder": {
+    "message": "Enter custom SOUL prompt...",
+    "description": "Runtime interface message bot_mode.soul_placeholder"
+  },
+  "runtime_bot_mode_switch_profile": {
+    "message": "プロフィールを切り替え",
+    "description": "Runtime interface message bot_mode.switch_profile"
+  },
+  "runtime_bot_mode_syncing": {
+    "message": "SYNCING BOT",
+    "description": "Runtime interface message bot_mode.syncing"
+  },
+  "runtime_bot_mode_syncing_detail": {
+    "message": "Loading profile, model, and Bot Chat session…",
+    "description": "Runtime interface message bot_mode.syncing_detail"
+  },
+  "runtime_bot_mode_tab_avatar": {
+    "message": "Avatar",
+    "description": "Runtime interface message bot_mode.tab_avatar"
+  },
+  "runtime_bot_mode_tab_bot": {
+    "message": "ボット",
+    "description": "Runtime interface message bot_mode.tab_bot"
+  },
+  "runtime_bot_mode_tab_general": {
+    "message": "General",
+    "description": "Runtime interface message bot_mode.tab_general"
+  },
+  "runtime_bot_mode_tab_groups": {
+    "message": "グループチャット",
+    "description": "Runtime interface message bot_mode.tab_groups"
+  },
+  "runtime_bot_mode_tab_mcp": {
+    "message": "MCP",
+    "description": "Runtime interface message bot_mode.tab_mcp"
+  },
+  "runtime_bot_mode_tab_skills": {
+    "message": "スキル",
+    "description": "Runtime interface message bot_mode.tab_skills"
+  },
+  "runtime_bot_mode_tab_soul": {
+    "message": "SOUL",
+    "description": "Runtime interface message bot_mode.tab_soul"
+  },
+  "runtime_bot_mode_tab_tools": {
+    "message": "ツール",
+    "description": "Runtime interface message bot_mode.tab_tools"
+  },
+  "runtime_bot_mode_thread_replies": {
+    "message": "{count} replies",
+    "description": "Runtime interface message bot_mode.thread_replies"
+  },
+  "runtime_bot_mode_thread_reply": {
+    "message": "{count} reply",
+    "description": "Runtime interface message bot_mode.thread_reply"
+  },
+  "runtime_bot_mode_threads": {
+    "message": "Threads",
+    "description": "Runtime interface message bot_mode.threads"
+  },
+  "runtime_bot_mode_threads_title": {
+    "message": "Open group chat threads",
+    "description": "Runtime interface message bot_mode.threads_title"
+  },
+  "runtime_bot_mode_title": {
+    "message": "ボットモード",
+    "description": "Runtime interface message bot_mode.title"
+  },
+  "runtime_bot_mode_toolsets": {
+    "message": "Toolsets",
+    "description": "Runtime interface message bot_mode.toolsets"
+  },
+  "runtime_bot_mode_toolsets_hint": {
+    "message": "Enabled tool capabilities for this agent profile.",
+    "description": "Runtime interface message bot_mode.toolsets_hint"
+  },
+  "runtime_bot_mode_view_toggle_label": {
+    "message": "リスト表示",
+    "description": "Runtime interface message bot_mode.view_toggle_label"
+  },
+  "runtime_browser_control_approve_once": {
+    "message": "1回だけ許可",
+    "description": "Runtime interface message browser_control.approve_once"
+  },
+  "runtime_browser_control_authorize": {
+    "message": "操作を許可",
+    "description": "Runtime interface message browser_control.authorize"
+  },
+  "runtime_browser_control_control_ready": {
+    "message": "操作の準備完了",
+    "description": "Runtime interface message browser_control.control_ready"
+  },
+  "runtime_browser_control_detach": {
+    "message": "切り離す",
+    "description": "Runtime interface message browser_control.detach"
+  },
+  "runtime_browser_control_detached_detail": {
+    "message": "ブラウザー操作を停止し、すべての制御タブの貸出を解放しました。",
+    "description": "Runtime interface message browser_control.detached_detail"
+  },
+  "runtime_browser_control_detached_toast": {
+    "message": "Hermes の制御はオフです",
+    "description": "Runtime interface message browser_control.detached_toast"
+  },
+  "runtime_browser_control_enable": {
+    "message": "操作を有効化",
+    "description": "Runtime interface message browser_control.enable"
+  },
+  "runtime_browser_control_enabled_detail": {
+    "message": "選択した貸出タブのみがブラウザー操作を受け取れます。",
+    "description": "Runtime interface message browser_control.enabled_detail"
+  },
+  "runtime_browser_control_enabled_toast": {
+    "message": "Hermes コントロールを有効化しました",
+    "description": "Runtime interface message browser_control.enabled_toast"
+  },
+  "runtime_browser_control_follow": {
+    "message": "Hermes に追従",
+    "description": "Runtime interface message browser_control.follow"
+  },
+  "runtime_browser_control_help_attach": {
+    "message": "以前のタブの接続を置き換えて、Hermes がこのタブを操作できるようにします。",
+    "description": "Runtime interface message browser_control.help_attach"
+  },
+  "runtime_browser_control_help_close": {
+    "message": "制御を一時停止したりオフにしたりせず、このパネルを閉じます。",
+    "description": "Runtime interface message browser_control.help_close"
+  },
+  "runtime_browser_control_help_follow": {
+    "message": "ブラウザーウィンドウを前面に出さず、Hermes が使用している接続済みタブを表示します。",
+    "description": "Runtime interface message browser_control.help_follow"
+  },
+  "runtime_browser_control_help_off": {
+    "message": "ブラウザー制御をオフにして、このパネルを閉じます。設定で再度オンにできます。",
+    "description": "Runtime interface message browser_control.help_off"
+  },
+  "runtime_browser_control_help_pause": {
+    "message": "ブラウザー制御をオフにせず一時停止します。タブの接続は維持されます。",
+    "description": "Runtime interface message browser_control.help_pause"
+  },
+  "runtime_browser_control_help_resume": {
+    "message": "接続が維持されているタブでブラウザー制御を再開します。",
+    "description": "Runtime interface message browser_control.help_resume"
+  },
+  "runtime_browser_control_help_scope_selected_tabs": {
+    "message": "下で選んだタブだけを操作します。タブは個別に選択し、それ以外のタブは対象外です。",
+    "description": "Runtime interface message browser_control.help_scope_selected_tabs"
+  },
+  "runtime_browser_control_help_scope_task_set": {
+    "message": "下で選んだタブだけを、共通のブラウザータスクとして操作します。「選択したタブ」と異なり、タブ間でタスクの識別情報を共有します。開いているすべてのタブが対象になるわけではありません。",
+    "description": "Runtime interface message browser_control.help_scope_task_set"
+  },
+  "runtime_browser_control_help_scope_this_tab": {
+    "message": "現在のタブだけを操作します。他のタブは対象に含まれません。",
+    "description": "Runtime interface message browser_control.help_scope_this_tab"
+  },
+  "runtime_browser_control_help_stay": {
+    "message": "Hermes が接続済みタブでバックグラウンド作業を行う間、現在のタブを表示し続けます。",
+    "description": "Runtime interface message browser_control.help_stay"
+  },
+  "runtime_browser_control_help_stop": {
+    "message": "制御をオフにせず、実行中と待機中のブラウザー操作を停止します。",
+    "description": "Runtime interface message browser_control.help_stop"
+  },
+  "runtime_browser_control_kicker": {
+    "message": "HERMES コントロール",
+    "description": "Runtime interface message browser_control.kicker"
+  },
+  "runtime_browser_control_note": {
+    "message": "この拡張機能またはアップデートのインストール時に、Chromium コントローラーのアクセスが許可されました。Hermes は承認された貸出アクション中のみ接続し、ブラウザーウィンドウを前面に出すことはなく、認証情報・MFA・支払い欄・機密テキストをブロックします。",
+    "description": "Runtime interface message browser_control.note"
+  },
+  "runtime_browser_control_pause": {
+    "message": "一時停止",
+    "description": "Runtime interface message browser_control.pause"
+  },
+  "runtime_browser_control_reject": {
+    "message": "拒否",
+    "description": "Runtime interface message browser_control.reject"
+  },
+  "runtime_browser_control_resume": {
+    "message": "再開",
+    "description": "Runtime interface message browser_control.resume"
+  },
+  "runtime_browser_control_scope": {
+    "message": "操作範囲",
+    "description": "Runtime interface message browser_control.scope"
+  },
+  "runtime_browser_control_scope_busy": {
+    "message": "操作機能の接続と、実行中の操作や承認の完了をお待ちください。",
+    "description": "Runtime interface message browser_control.scope_busy"
+  },
+  "runtime_browser_control_scope_failed": {
+    "message": "この操作範囲を確認できませんでした。タブを確認して再試行してください。",
+    "description": "Runtime interface message browser_control.scope_failed"
+  },
+  "runtime_browser_control_scope_locked": {
+    "message": "ここで操作範囲を選び、適用してください。複数のタブは明示的に選択する必要があります。",
+    "description": "Runtime interface message browser_control.scope_locked"
+  },
+  "runtime_browser_control_scope_selection_required": {
+    "message": "下から少なくとも1つのタブを選んでください。最大32個まで接続できます。",
+    "description": "Runtime interface message browser_control.scope_selection_required"
+  },
+  "runtime_browser_control_scope_tabs": {
+    "message": "この範囲のタブ",
+    "description": "Runtime interface message browser_control.scope_tabs"
+  },
+  "runtime_browser_control_scope_updated": {
+    "message": "操作範囲を更新しました。",
+    "description": "Runtime interface message browser_control.scope_updated"
+  },
+  "runtime_browser_control_selected_tabs": {
+    "message": "選択したタブ",
+    "description": "Runtime interface message browser_control.selected_tabs"
+  },
+  "runtime_browser_control_state_active": {
+    "message": "アクティブ",
+    "description": "Runtime interface message browser_control.state_active"
+  },
+  "runtime_browser_control_state_off": {
+    "message": "オフ",
+    "description": "Runtime interface message browser_control.state_off"
+  },
+  "runtime_browser_control_state_paused": {
+    "message": "一時停止中",
+    "description": "Runtime interface message browser_control.state_paused"
+  },
+  "runtime_browser_control_state_ready": {
+    "message": "準備完了",
+    "description": "Runtime interface message browser_control.state_ready"
+  },
+  "runtime_browser_control_stay": {
+    "message": "自分のタブに留まる",
+    "description": "Runtime interface message browser_control.stay"
+  },
+  "runtime_browser_control_stop": {
+    "message": "停止",
+    "description": "Runtime interface message browser_control.stop"
+  },
+  "runtime_browser_control_task_set": {
+    "message": "タスクセット",
+    "description": "Runtime interface message browser_control.task_set"
+  },
+  "runtime_browser_control_this_tab": {
+    "message": "このタブ",
+    "description": "Runtime interface message browser_control.this_tab"
+  },
+  "runtime_browser_control_title": {
+    "message": "貸出中タブを操作",
+    "description": "Runtime interface message browser_control.title"
+  },
+  "runtime_browser_control_turn_off": {
+    "message": "オフにする",
+    "description": "Runtime interface message browser_control.turn_off"
+  },
+  "runtime_browser_control_waiting": {
+    "message": "Hermes を待機中です。",
+    "description": "Runtime interface message browser_control.waiting"
+  },
+  "runtime_browser_control_while_working": {
+    "message": "Hermes の作業中",
+    "description": "Runtime interface message browser_control.while_working"
   },
   "runtime_commands_click_or_enter": {
     "message": "クリックまたは Enter キーを押して実行します。",
@@ -326,6 +1174,10 @@
   "runtime_context_remove_prompt_tab": {
     "message": "このタブをプロンプトタブリストから削除",
     "description": "Runtime interface message context.remove_prompt_tab"
+  },
+  "runtime_context_return_attached_tab": {
+    "message": "接続中のタブに戻る",
+    "description": "Runtime interface message context.return_attached_tab"
   },
   "runtime_context_tokens": {
     "message": "トークン",
@@ -707,6 +1559,30 @@
     "message": "◈ 要素を選択中...",
     "description": "Runtime interface message picker.picking_element"
   },
+  "runtime_profile_switch_cancel": {
+    "message": "Cancel",
+    "description": "Runtime interface message profile_switch.cancel"
+  },
+  "runtime_profile_switch_carry": {
+    "message": "Continue with prior context",
+    "description": "Runtime interface message profile_switch.carry"
+  },
+  "runtime_profile_switch_clean": {
+    "message": "Start clean session",
+    "description": "Runtime interface message profile_switch.clean"
+  },
+  "runtime_profile_switch_detail": {
+    "message": "Switching to {profile} requires a new session. Carry context from {previous} or start clean?",
+    "description": "Runtime interface message profile_switch.detail"
+  },
+  "runtime_profile_switch_kicker": {
+    "message": "PROFILE CHANGE",
+    "description": "Runtime interface message profile_switch.kicker"
+  },
+  "runtime_profile_switch_title": {
+    "message": "Start a new Hermes session?",
+    "description": "Runtime interface message profile_switch.title"
+  },
   "runtime_profile_available": {
     "message": "{count} 件のプロファイルが利用可能",
     "description": "Runtime interface message profile.available"
@@ -722,6 +1598,10 @@
   "runtime_profile_refresh": {
     "message": "↻ プロファイル",
     "description": "Runtime interface message profile.refresh"
+  },
+  "runtime_profile_refresh_title": {
+    "message": "プロフィールを更新",
+    "description": "Runtime interface message profile.refresh_title"
   },
   "runtime_profile_using": {
     "message": "使用中: {name}{model}{skills}",
@@ -887,6 +1767,10 @@
     "message": "追加",
     "description": "Runtime interface message ui.add"
   },
+  "runtime_ui_add_comments_to_message": {
+    "message": "Add comments to message",
+    "description": "Runtime interface message ui.add.comments.to.message"
+  },
   "runtime_ui_add_instructions_after_the_slash_command_before_sending": {
     "message": "送信する前に、スラッシュコマンドの後ろに指示を追加してください。",
     "description": "Runtime interface message ui.add.instructions.after.the.slash.command.before.sending"
@@ -894,6 +1778,10 @@
   "runtime_ui_adjust": {
     "message": "調整",
     "description": "Runtime interface message ui.adjust"
+  },
+  "runtime_ui_adjust_extension_text_without_changing_browser_zoom": {
+    "message": "Adjust text across Hermes Browser surfaces without changing browser zoom.",
+    "description": "Runtime interface message ui.adjust.extension.text.without.changing.browser.zoom"
   },
   "runtime_ui_adjust_the_side_panel_for_readability_without_changing_browser_zoom": {
     "message": "ブラウザーのズームを変更せずに、サイドパネルを読みやすく調整します。",
@@ -1030,6 +1918,10 @@
   "runtime_ui_approve": {
     "message": "承認",
     "description": "Runtime interface message ui.approve"
+  },
+  "runtime_ui_approve_document_access": {
+    "message": "Approve document access",
+    "description": "Runtime interface message ui.approve_document_access"
   },
   "runtime_ui_artifacts": {
     "message": "アーティファクト",
@@ -1235,6 +2127,10 @@
     "message": "キャンセル",
     "description": "Runtime interface message ui.cancel"
   },
+  "runtime_ui_cancel_selection": {
+    "message": "Cancel selection",
+    "description": "Runtime interface message ui.cancel.selection"
+  },
   "runtime_ui_canonical_hermes_history_model_selection_tools_and_generated_me_c7aacd25": {
     "message": "Canonical Hermes の履歴、モデル選択、ツール、生成されたメディアは、このセッションに接続されたままになります。",
     "description": "Runtime interface message ui.canonical.hermes.history.model.selection.tools.and.generated.me.c7aacd25"
@@ -1391,6 +2287,10 @@
     "message": "クリア",
     "description": "Runtime interface message ui.clear"
   },
+  "runtime_ui_clear_comments": {
+    "message": "Clear comments",
+    "description": "Runtime interface message ui.clear.comments"
+  },
   "runtime_ui_clear_picked_element": {
     "message": "✕ ピックした要素をクリア",
     "description": "Runtime interface message ui.clear.picked.element"
@@ -1494,6 +2394,38 @@
   "runtime_ui_commands_760ac2f0": {
     "message": "/ コマンド",
     "description": "Runtime interface message ui.commands.760ac2f0"
+  },
+  "runtime_ui_comment_capture_unavailable": {
+    "message": "Screenshot unavailable",
+    "description": "Runtime interface message ui.comment.capture.unavailable"
+  },
+  "runtime_ui_comment_count": {
+    "message": "{count} comments",
+    "description": "Runtime interface message ui.comment.count"
+  },
+  "runtime_ui_comment_iframe_unsupported": {
+    "message": "Comments inside cross-origin iframes are not supported",
+    "description": "Runtime interface message ui.comment.iframe.unsupported"
+  },
+  "runtime_ui_comment_note_placeholder": {
+    "message": "Write a comment about this target",
+    "description": "Runtime interface message ui.comment.note.placeholder"
+  },
+  "runtime_ui_comment_on_page": {
+    "message": "Comment on page",
+    "description": "Runtime interface message ui.comment.on.page"
+  },
+  "runtime_ui_comment_page_changed": {
+    "message": "Page changed - comments need review",
+    "description": "Runtime interface message ui.comment.page.changed"
+  },
+  "runtime_ui_comment_persistence_unavailable": {
+    "message": "Could not save comments locally",
+    "description": "Runtime interface message ui.comment.persistence.unavailable"
+  },
+  "runtime_ui_comment_target_changed": {
+    "message": "Target changed",
+    "description": "Runtime interface message ui.comment.target.changed"
   },
   "runtime_ui_commit": {
     "message": "コミット",
@@ -1827,6 +2759,10 @@
     "message": "コピーに失敗しました",
     "description": "Runtime interface message ui.copy.failed"
   },
+  "runtime_ui_copy_message": {
+    "message": "メッセージをコピー",
+    "description": "Runtime interface message ui.copy.message"
+  },
   "runtime_ui_copy_redacted_diagnostics": {
     "message": "マスキング済み診断情報をコピー",
     "description": "Runtime interface message ui.copy.redacted.diagnostics"
@@ -2035,6 +2971,10 @@
     "message": "ダイアログ",
     "description": "Runtime interface message ui.dialog"
   },
+  "runtime_ui_discard_comment": {
+    "message": "Discard",
+    "description": "Runtime interface message ui.discard.comment"
+  },
   "runtime_ui_discovered_hermes_agents": {
     "message": "検出された Hermes エージェント",
     "description": "Runtime interface message ui.discovered.hermes.agents"
@@ -2050,6 +2990,10 @@
   "runtime_ui_dist": {
     "message": "dist/",
     "description": "Runtime interface message ui.dist"
+  },
+  "runtime_ui_done": {
+    "message": "Done",
+    "description": "Runtime interface message ui.done"
   },
   "runtime_ui_download": {
     "message": "ダウンロード",
@@ -2090,6 +3034,14 @@
   "runtime_ui_edit": {
     "message": "編集",
     "description": "Runtime interface message ui.edit"
+  },
+  "runtime_ui_edit_failed": {
+    "message": "編集に失敗しました。会話は変更されていません。",
+    "description": "Runtime interface message ui.edit.failed"
+  },
+  "runtime_ui_edit_message": {
+    "message": "メッセージを編集",
+    "description": "Runtime interface message ui.edit.message"
   },
   "runtime_ui_edit_models": {
     "message": "⚙ モデルを編集...",
@@ -2334,6 +3286,38 @@
   "runtime_ui_group": {
     "message": "グループ",
     "description": "Runtime interface message ui.group"
+  },
+  "runtime_ui_group_presence_all_replied": {
+    "message": "全員が返信しました",
+    "description": "Runtime interface message ui.group.presence.all.replied"
+  },
+  "runtime_ui_group_presence_done_failed": {
+    "message": "完了 · {count} 件が返信できませんでした",
+    "description": "Runtime interface message ui.group.presence.done.failed"
+  },
+  "runtime_ui_group_presence_done_passed": {
+    "message": "完了 · {count} 件がパス",
+    "description": "Runtime interface message ui.group.presence.done.passed"
+  },
+  "runtime_ui_group_presence_reply_fail": {
+    "message": "{replied} 件が返信、{failed} 件が返信できませんでした",
+    "description": "Runtime interface message ui.group.presence.reply.fail"
+  },
+  "runtime_ui_group_presence_replying": {
+    "message": "{name} が返信中",
+    "description": "Runtime interface message ui.group.presence.replying"
+  },
+  "runtime_ui_group_presence_typing": {
+    "message": "{name} が入力中",
+    "description": "Runtime interface message ui.group.presence.typing"
+  },
+  "runtime_ui_group_presence_using": {
+    "message": "{name} が {tool} を使用中",
+    "description": "Runtime interface message ui.group.presence.using"
+  },
+  "runtime_ui_group_presence_waiting": {
+    "message": "{count} 件待機中",
+    "description": "Runtime interface message ui.group.presence.waiting"
   },
   "runtime_ui_handing_update_to_hermes": {
     "message": "Hermes にアップデートを渡します",
@@ -2743,6 +3727,10 @@
     "message": "項目",
     "description": "Runtime interface message ui.item"
   },
+  "runtime_ui_keep_restricted": {
+    "message": "Keep restricted",
+    "description": "Runtime interface message ui.keep_restricted"
+  },
   "runtime_ui_keep_assist_sessions": {
     "message": "Assist セッションを保持",
     "description": "Runtime interface message ui.keep.assist.sessions"
@@ -2835,6 +3823,10 @@
     "message": "ローカル",
     "description": "Runtime interface message ui.local"
   },
+  "runtime_ui_local_document_access": {
+    "message": "LOCAL DOCUMENT ACCESS",
+    "description": "Runtime interface message ui.local_document_access"
+  },
   "runtime_ui_local_api_server": {
     "message": "ローカル API サーバー",
     "description": "Runtime interface message ui.local.api.server"
@@ -2902,6 +3894,10 @@
   "runtime_ui_message_queued": {
     "message": "メッセージがキューに入れられました",
     "description": "Runtime interface message ui.message.queued"
+  },
+  "runtime_ui_message_unmatched": {
+    "message": "このメッセージは保存された会話に一致しなかったため、新しいメッセージとして送信されました。",
+    "description": "Runtime interface message ui.message.unmatched"
   },
   "runtime_ui_messages": {
     "message": "メッセージ",
@@ -3343,6 +4339,10 @@
     "message": "ページ",
     "description": "Runtime interface message ui.page"
   },
+  "runtime_ui_page_comments": {
+    "message": "Page comments",
+    "description": "Runtime interface message ui.page.comments"
+  },
   "runtime_ui_page_context": {
     "message": "ページのコンテキスト",
     "description": "Runtime interface message ui.page.context"
@@ -3563,6 +4563,10 @@
     "message": "列",
     "description": "Runtime interface message ui.queue"
   },
+  "runtime_ui_queue_comments": {
+    "message": "Queue comments",
+    "description": "Runtime interface message ui.queue.comments"
+  },
   "runtime_ui_queued": {
     "message": "キューに入れられました",
     "description": "Runtime interface message ui.queued"
@@ -3707,6 +4711,10 @@
     "message": "返事",
     "description": "Runtime interface message ui.reply"
   },
+  "runtime_ui_reply_to_member": {
+    "message": "@{name} に返信",
+    "description": "Runtime interface message ui.reply.to.member"
+  },
   "runtime_ui_request": {
     "message": "リクエスト",
     "description": "Runtime interface message ui.request"
@@ -3719,6 +4727,14 @@
     "message": "Cloud Preview および古い Hermes ビルドに必要です。クラウド音声認識を拒否します。",
     "description": "Runtime interface message ui.required.for.cloud.preview.and.older.hermes.builds.it.refuses.c.f0bdad5b"
   },
+  "runtime_ui_rerun": {
+    "message": "再実行",
+    "description": "Runtime interface message ui.rerun"
+  },
+  "runtime_ui_rerun_from_here": {
+    "message": "ここから再実行しますか？以降のメッセージは削除されます。",
+    "description": "Runtime interface message ui.rerun.from.here"
+  },
   "runtime_ui_reset": {
     "message": "リセット",
     "description": "Runtime interface message ui.reset"
@@ -3730,6 +4746,10 @@
   "runtime_ui_response": {
     "message": "応答",
     "description": "Runtime interface message ui.response"
+  },
+  "runtime_ui_restore_checkpoint": {
+    "message": "チェックポイントを復元: このメッセージから再実行",
+    "description": "Runtime interface message ui.restore.checkpoint"
   },
   "runtime_ui_restricted_page": {
     "message": "制限されたページ",
@@ -3771,6 +4791,82 @@
     "message": "右クリックタスクが失敗しました",
     "description": "Runtime interface message ui.right.click.task.failed"
   },
+  "runtime_ui_room_bots_title": {
+    "message": "このルームのボット",
+    "description": "Runtime interface message ui.room.bots.title"
+  },
+  "runtime_ui_room_busy": {
+    "message": "返信でビジー",
+    "description": "Runtime interface message ui.room.busy"
+  },
+  "runtime_ui_room_checking": {
+    "message": "確認中…",
+    "description": "Runtime interface message ui.room.checking"
+  },
+  "runtime_ui_room_fail_reason_generic": {
+    "message": "問題が発生しました",
+    "description": "Runtime interface message ui.room.fail.reason.generic"
+  },
+  "runtime_ui_room_fail_reason_usage": {
+    "message": "使用量の上限に達しました。後でもう一度お試しください",
+    "description": "Runtime interface message ui.room.fail.reason.usage"
+  },
+  "runtime_ui_room_failed": {
+    "message": "失敗",
+    "description": "Runtime interface message ui.room.failed"
+  },
+  "runtime_ui_room_member_default_restored": {
+    "message": "{name} はプロファイルの既定に戻りました",
+    "description": "Runtime interface message ui.room.member.default.restored"
+  },
+  "runtime_ui_room_member_failed": {
+    "message": "{name} は返信できませんでした: {reason}",
+    "description": "Runtime interface message ui.room.member.failed"
+  },
+  "runtime_ui_room_member_failed_short": {
+    "message": "{name} は返信できませんでした",
+    "description": "Runtime interface message ui.room.member.failed.short"
+  },
+  "runtime_ui_room_member_now_uses": {
+    "message": "{name} はこのルームで {model} を使用するようになりました",
+    "description": "Runtime interface message ui.room.member.now.uses"
+  },
+  "runtime_ui_room_member_passed": {
+    "message": "{name} がパスしました",
+    "description": "Runtime interface message ui.room.member.passed"
+  },
+  "runtime_ui_room_member_retry": {
+    "message": "再試行",
+    "description": "Runtime interface message ui.room.member.retry"
+  },
+  "runtime_ui_room_member_retry_aria": {
+    "message": "{name} を再試行",
+    "description": "Runtime interface message ui.room.member.retry.aria"
+  },
+  "runtime_ui_room_model_note": {
+    "message": "モデルの変更はこのルームにのみ適用されます。",
+    "description": "Runtime interface message ui.room.model.note"
+  },
+  "runtime_ui_room_next": {
+    "message": "次",
+    "description": "Runtime interface message ui.room.next"
+  },
+  "runtime_ui_room_passed": {
+    "message": "パス",
+    "description": "Runtime interface message ui.room.passed"
+  },
+  "runtime_ui_room_profile_default": {
+    "message": "プロファイルの既定",
+    "description": "Runtime interface message ui.room.profile.default"
+  },
+  "runtime_ui_room_reset_default": {
+    "message": "プロファイルの既定に戻す",
+    "description": "Runtime interface message ui.room.reset.default"
+  },
+  "runtime_ui_room_unknown": {
+    "message": "不明",
+    "description": "Runtime interface message ui.room.unknown"
+  },
   "runtime_ui_row": {
     "message": "行",
     "description": "Runtime interface message ui.row"
@@ -3810,6 +4906,10 @@
   "runtime_ui_save": {
     "message": "保存",
     "description": "Runtime interface message ui.save"
+  },
+  "runtime_ui_save_comment": {
+    "message": "Save comment",
+    "description": "Runtime interface message ui.save.comment"
   },
   "runtime_ui_save_settings": {
     "message": "設定を保存する",
@@ -3871,6 +4971,14 @@
     "message": "選択",
     "description": "Runtime interface message ui.select"
   },
+  "runtime_ui_select_area": {
+    "message": "Area",
+    "description": "Runtime interface message ui.select.area"
+  },
+  "runtime_ui_select_element": {
+    "message": "Element",
+    "description": "Runtime interface message ui.select.element"
+  },
   "runtime_ui_select_model": {
     "message": "モデルを選択してください",
     "description": "Runtime interface message ui.select.model"
@@ -3894,6 +5002,10 @@
   "runtime_ui_send": {
     "message": "送信",
     "description": "Runtime interface message ui.send"
+  },
+  "runtime_ui_send_comments": {
+    "message": "Send comments",
+    "description": "Runtime interface message ui.send.comments"
   },
   "runtime_ui_send_it_when_the_current_hermes_run_finishes": {
     "message": "現在の Hermes の実行が終了したら送信します。",
@@ -4030,6 +5142,18 @@
   "runtime_ui_show_hermes_assist_in_writing_fields": {
     "message": "書き込みフィールドに Hermes Assist を表示",
     "description": "Runtime interface message ui.show.hermes.assist.in.writing.fields"
+  },
+  "runtime_ui_show_message_times": {
+    "message": "メッセージの時刻を表示",
+    "description": "Runtime interface message ui.show.message.times"
+  },
+  "runtime_ui_show_message_times_hint": {
+    "message": "ホバーまたはタップしたときにメッセージの時刻を表示します。",
+    "description": "Runtime interface message ui.show.message.times.hint"
+  },
+  "runtime_ui_show_or_hide_status": {
+    "message": "ステータスを表示/非表示",
+    "description": "Runtime interface message ui.show.or.hide.status"
   },
   "runtime_ui_side_panel": {
     "message": "サイドパネル",
@@ -4171,6 +5295,10 @@
     "message": "現在の走行を制御する",
     "description": "Runtime interface message ui.steer.the.current.run"
   },
+  "runtime_ui_steered_label": {
+    "message": "軌道修正",
+    "description": "Runtime interface message ui.steered.label"
+  },
   "runtime_ui_stop": {
     "message": "停止",
     "description": "Runtime interface message ui.stop"
@@ -4198,6 +5326,10 @@
   "runtime_ui_stream": {
     "message": "ストリーム",
     "description": "Runtime interface message ui.stream"
+  },
+  "runtime_ui_subagents": {
+    "message": "サブエージェント",
+    "description": "Runtime interface message ui.subagents"
   },
   "runtime_ui_submit": {
     "message": "提出する",
@@ -4390,6 +5522,10 @@
   "runtime_ui_title": {
     "message": "タイトル",
     "description": "Runtime interface message ui.title"
+  },
+  "runtime_ui_today": {
+    "message": "今日",
+    "description": "Runtime interface message ui.today"
   },
   "runtime_ui_toggle_hey_hermes": {
     "message": "こんにちは Hermes を切り替えます",
@@ -4755,6 +5891,10 @@
     "message": "XL",
     "description": "Runtime interface message ui.xl"
   },
+  "runtime_ui_yesterday": {
+    "message": "昨日",
+    "description": "Runtime interface message ui.yesterday"
+  },
   "runtime_ui_you": {
     "message": "あなた",
     "description": "Runtime interface message ui.you"
@@ -4774,6 +5914,10 @@
   "runtime_ui_zoom_out": {
     "message": "ズームアウト",
     "description": "Runtime interface message ui.zoom.out"
+  },
+  "runtime_update_no_local_checkout": {
+    "message": "このマシンにリポジトリのローカルチェックアウトがありませんか?",
+    "description": "Runtime interface message update.no_local_checkout"
   },
   "runtime_voice_browser_preview": {
     "message": "音声モード: ブラウザ音声フォールバック\n\n{preview}",
@@ -4824,7 +5968,19 @@
     "description": "Runtime interface message wake.turn_off"
   },
   "runtime_wake_turn_on": {
-    "message": "ウェイクワードをオンにする",
+    "message": "Turn on wake word",
     "description": "Runtime interface message wake.turn_on"
+  },
+  "runtime_web_deprecation_banner": {
+    "message": "Hermes Web stays available if you already have this tab open. New buttons no longer open it.",
+    "description": "Runtime interface message web.deprecation_banner"
+  },
+  "runtime_web_deprecation_body": {
+    "message": "This button no longer opens Hermes Web. A new surface is being worked on.",
+    "description": "Runtime interface message web.deprecation_body"
+  },
+  "runtime_web_deprecation_title": {
+    "message": "A new surface is being worked on",
+    "description": "Runtime interface message web.deprecation_title"
   }
 }

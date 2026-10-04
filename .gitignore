@@ -12,6 +12,7 @@ RELEASE-v*.md
 assets/readme/*-ad*
 
 # Local QA/temp work
+web-ext-artifacts/
 tmp/
 .hermes/
 .gitnexus/
@@ -23,9 +24,14 @@ tmp/
 
 # Private backups and local secrets
 backups/
+/dist.pem
 .env
 .env.*
 *.bak
+
+# Licensed signature faces stay on the build machine. Do not publish them.
+extension/assets/fonts/Rules*.woff2
+extension/assets/fonts/google/Smokum-400.woff2
 
 # Logs
 *.log

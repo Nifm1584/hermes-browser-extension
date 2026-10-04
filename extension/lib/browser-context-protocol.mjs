@@ -51,7 +51,6 @@ const RESTRICTED_SCHEMES = new Set([
   'data:',
   'devtools:',
   'edge:',
-  'file:',
   'brave:',
   'opera:',
   'view-source:',
@@ -105,7 +104,20 @@ function restrictedUrlHaystack(parsed) {
   return [...rawParts, ...decodedParts].join(' ');
 }
 
-export function isRestrictedUrl(url = '') {
+export function isLocalDocumentUrl(url = '') {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'file:') return true;
+    const host = parsed.hostname.toLowerCase();
+    if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host) || host.endsWith('.localhost')) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function isRestrictedUrl(url = '', { allowLocalDocuments = false } = {}) {
   if (!url) return true;
   let parsed;
   try {
@@ -113,7 +125,11 @@ export function isRestrictedUrl(url = '') {
   } catch {
     return true;
   }
-  if (RESTRICTED_SCHEMES.has(parsed.protocol) || !['http:', 'https:'].includes(parsed.protocol)) return true;
+  if (RESTRICTED_SCHEMES.has(parsed.protocol)) return true;
+  if (parsed.protocol === 'file:') {
+    return !allowLocalDocuments;
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return true;
   if (hasCredentialBearingUrl(parsed)) return true;
   const haystack = restrictedUrlHaystack(parsed);
   return SENSITIVE_URL_PATTERNS.some((pattern) => pattern.test(haystack));
@@ -136,9 +152,9 @@ export function safeTab(tab = {}) {
   };
 }
 
-export function privacySafeTabForPrompt(tab = {}) {
+export function privacySafeTabForPrompt(tab = {}, { allowLocalDocuments = false } = {}) {
   const safe = safeTab(tab);
-  if (safe.url && isRestrictedUrl(safe.url)) {
+  if (safe.url && isRestrictedUrl(safe.url, { allowLocalDocuments })) {
     return {
       ...safe,
       title: '(restricted tab)',
@@ -355,10 +371,12 @@ export function buildBrowserContextPayload({
   settings = DEFAULT_BROWSER_CONTEXT_PROTOCOL_SETTINGS,
 } = {}) {
   const mergedSettings = protocolSettings(settings);
-  const allTabs = Array.isArray(tabs) ? tabs.map(privacySafeTabForPrompt) : [];
-  const scopedTabs = Array.isArray(selectedTabs) ? selectedTabs.map(privacySafeTabForPrompt) : allTabs;
+  const allowLocal = Boolean(settings?.allowLocalDocuments);
+  const safeTabForPrompt = (tab) => privacySafeTabForPrompt(tab, { allowLocalDocuments: allowLocal });
+  const allTabs = Array.isArray(tabs) ? tabs.map(safeTabForPrompt) : [];
+  const scopedTabs = Array.isArray(selectedTabs) ? selectedTabs.map(safeTabForPrompt) : allTabs;
   const pinnedUrl = String(contextScope?.pinnedUrl || '');
-  const pinnedUrlRestricted = Boolean(pinnedUrl && isRestrictedUrl(pinnedUrl));
+  const pinnedUrlRestricted = Boolean(pinnedUrl && isRestrictedUrl(pinnedUrl, { allowLocalDocuments: allowLocal }));
   return {
     protocol: BROWSER_CONTEXT_PROTOCOL_ID,
     contextScope: {
@@ -376,7 +394,7 @@ export function buildBrowserContextPayload({
       includeSelectedText: Boolean(mergedSettings.includeSelectedText),
       maxTabs: Number(mergedSettings.maxTabs || DEFAULT_BROWSER_CONTEXT_PROTOCOL_SETTINGS.maxTabs),
     },
-    activeTab: privacySafeTabForPrompt(activeTab || {}),
+    activeTab: privacySafeTabForPrompt(activeTab || {}, { allowLocalDocuments: allowLocal }),
     tabs: allTabs,
     selectedTabs: scopedTabs,
     pageContext: normalizeProtocolPageContext(pageContext, mergedSettings),
@@ -510,6 +528,14 @@ function contextScopeLabel(scope = {}) {
   return 'Follow active tab';
 }
 
+// Issue #106: the receipt must name what actually crossed the turn budget.
+// Over the cap it reads "12 of 20"; at or under it reads a plain count.
+function tabsSentReceiptValue(count) {
+  const total = Math.max(0, Number(count) || 0);
+  const budget = BROWSER_CONTEXT_TURN_BUDGETS.maxTabs;
+  return total > budget ? `${budget} of ${total}` : `${total}`;
+}
+
 export function buildBrowserContextReceipt({ context = {}, attachments = [], settings = {}, contextHash = '', contextDelivery = 'full' } = {}) {
   const contextScope = context.contextScope || {};
   if (contextScope.mode === 'chat-only') {
@@ -585,7 +611,7 @@ export function buildBrowserContextReceipt({ context = {}, attachments = [], set
     },
     {
       label: 'Tabs sent to Hermes',
-      value: settings.includeTabs === false ? 'disabled' : `${selectedTabs.length}`,
+      value: settings.includeTabs === false ? 'disabled' : tabsSentReceiptValue(selectedTabs.length),
     },
     {
       label: 'Attachments',
@@ -833,6 +859,32 @@ function browserContextForTurn({ activeTab, tabs, selectedTabs, pageContext, con
   return { delivery: 'full', payload: budgetBrowserPayload(payload, state) };
 }
 
+function browserControlForTurn(value = {}, state) {
+  const available = String(value?.availability || '') === 'available';
+  const common = {
+    route: 'extension-controller',
+    availability: available ? 'available' : 'unavailable',
+    isolated_fallback: 'forbidden',
+  };
+  if (!available) {
+    return {
+      ...common,
+      reason: boundedText(value?.reason || 'controller_unavailable', 80, state, 'browser_control.reason'),
+      message: boundedText(value?.message || 'Hermes control is unavailable for this exact tab.', 240, state, 'browser_control.message'),
+    };
+  }
+  return {
+    ...common,
+    controller_id: boundedText(value?.controllerId || value?.controller_id || '', 160, state, 'browser_control.controller_id'),
+    browser_profile_id: boundedText(value?.browserProfileId || value?.browser_profile_id || '', 160, state, 'browser_control.browser_profile_id'),
+    tab_id: Number(value?.tabId ?? value?.tab_id),
+    frame_id: Math.max(0, Number(value?.frameId ?? value?.frame_id) || 0),
+    document_generation: Math.max(1, Number(value?.documentGeneration ?? value?.document_generation) || 1),
+    url: boundedText(value?.url || '', BROWSER_CONTEXT_TURN_BUDGETS.tabUrlChars, state, 'browser_control.url'),
+    lease_owned: value?.leaseOwned === true || value?.lease_owned === true,
+  };
+}
+
 function reduceEnvelopeToSerializedBudget(envelope, state) {
   const stringify = () => JSON.stringify(envelope);
   const size = () => stringify().length;
@@ -890,20 +942,23 @@ export function buildBrowserTurnEnvelope({
   settings = DEFAULT_BROWSER_CONTEXT_PROTOCOL_SETTINGS,
   contextHash = '',
   contextDelivery = 'full',
+  browserControl = {},
 } = {}) {
-  assertSupportedExternalValue({ humanInput, instructionTransform, activeTab, tabs, selectedTabs, pageContext, contextScope, attachments, settings, contextHash, contextDelivery });
+  assertSupportedExternalValue({ humanInput, instructionTransform, activeTab, tabs, selectedTabs, pageContext, contextScope, attachments, settings, contextHash, contextDelivery, browserControl });
   const truncation = createBudgetState();
   const composerText = boundedText(String(humanInput || '').trim(), BROWSER_CONTEXT_TURN_BUDGETS.humanInputChars, truncation, 'human_input');
   const transformText = instructionTransform?.text == null
     ? ''
     : boundedText(String(instructionTransform.text || '').trim(), BROWSER_CONTEXT_TURN_BUDGETS.instructionTransformChars, truncation, 'instruction_transform');
   const browserContext = browserContextForTurn({ activeTab, tabs, selectedTabs, pageContext, contextScope, settings, contextHash, contextDelivery }, truncation);
+  const browserControlTarget = browserControlForTurn(browserControl, truncation);
   const attachmentContext = buildAttachmentContext(attachments, truncation);
   const envelope = {
     protocol: BROWSER_CONTEXT_TURN_PROTOCOL_ID,
     human_input: { source: 'composer', text: composerText || 'Attachment-only turn.' },
     ...(transformText ? { instruction_transform: { kind: 'slash-command', text: transformText } } : {}),
     browser_context: browserContext,
+    browser_control: browserControlTarget,
     attachment_context: attachmentContext,
     source_receipt: {
       protocol: BROWSER_CONTEXT_TURN_PROTOCOL_ID,

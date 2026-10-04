@@ -100,7 +100,7 @@ test('Hermes Web Marketplace locks duplicate install gestures and keeps polished
 test('Hermes Web composer command pill centers its label without glyph hacks', () => {
   const parity = read('extension/app-parity.css');
   assert.match(parity, /\.composer-topline-actions button\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;/s, 'Web composer command must center its label vertically and horizontally');
-  assert.match(parity, /\.composer-topline-actions button\s*\{[^}]*font:\s*9px\/1 var\(--hermes-font-mono\);/s, 'Web composer command label must use a readable 9px mono with exact line height');
+  assert.match(parity, /\.composer-topline-actions button\s*\{[^}]*font:\s*calc\(9px \* var\(--hermes-text-zoom, 1\)\)\/1 var\(--hermes-font-mono\);/s, 'Web composer command label must use a readable 9px mono with exact line height');
 });
 
 test('Hermes Web delegates all zoom and font behavior to the shared preference module without inline named-size validators', () => {
@@ -160,11 +160,17 @@ test('side panel exposes an explicit full-view handoff', () => {
   assert.match(html, /<button id="openFullViewButton"[^>]*type="button"/);
   assert.match(html, /id="openFullViewButton"[\s\S]*class="web-view-icon"/);
   assert.match(html, /id="newSessionButton"[\s\S]*id="openFullViewButton"[\s\S]*id="settingsButton"[\s\S]*id="connectionPill"/);
+  assert.match(html, /id="webDeprecationDialog"/);
+  assert.match(html, /web\.deprecation_title/);
+  assert.match(js, /showWebDeprecationNotice/);
+  assert.doesNotMatch(js, /openFullViewButton\?\.addEventListener\('click', \(\) => \{\s*openFullView\(/);
   assert.match(js, /buildFullTabHandoffUrl/);
   assert.match(js, /openHermesFullView/);
   assert.match(read('extension/background.js'), /HERMES_OPEN_FULL_VIEW/);
   assert.match(read('extension/background.js'), /browserApi\.tabs\.create/);
-  assert.match(css, /grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto/);
+  assert.match(css, /\.topbar\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*nowrap;/s, 'topbar must lay out as a single-row flex bar');
+  assert.match(css, /\.topbar \.session-menu-button\s*\{\s*flex:\s*1 1 auto;\s*min-width:\s*0;\s*\}/, 'session name must take the remaining topbar space');
+  assert.match(css, /\.topbar \.topbar-status\s*\{\s*flex:\s*0 0 auto;\s*margin-left:\s*auto;\s*\}/, 'status must stay pinned to the trailing topbar edge');
   assert.doesNotMatch(css, /\.session-menu-button\s*\{[^}]*max-width:/s);
   assert.match(js, /newChat:\s*true/);
 });
@@ -216,14 +222,17 @@ test('side panel keeps Browser onboarding, refresh feedback, updates, and messag
   const html = read('extension/sidepanel.html');
   const css = read('extension/sidepanel.css');
   const js = read('extension/sidepanel.js');
+  const updateFlow = read('extension/lib/update-flow.mjs');
   const buildScript = read('scripts/build.mjs');
   const refreshModels = js.match(/async function refreshModelsFromMenu\(\)[\s\S]*?\n\}/)?.[0] || '';
   const refreshSessions = js.match(/async function refreshSessionsFromMenu\(\)[\s\S]*?\n\}/)?.[0] || '';
   const checkUpdates = js.match(/async function checkForUpdates\([^)]*\)[\s\S]*?\n\}/)?.[0] || '';
   const renderEmpty = js.match(/function renderEmptyState\(\)[\s\S]*?\n\}/)?.[0] || '';
 
-  assert.match(css, /\.message\.user\s*\{[^}]*color-mix\([^}]*var\(--hermes-paper\)\s+36%,\s*transparent/s);
-  assert.match(css, /\.message\.assistant\s*\{[^}]*color-mix\([^}]*var\(--hermes-paper\)\s+42%,\s*transparent/s);
+  assert.match(css, /\.message\.user\s*\{[^}]*color-mix\([^}]*var\(--hermes-bubble-user-alpha\),\s*transparent/s);
+  assert.match(css, /\.message\.assistant\s*\{[^}]*color-mix\([^}]*var\(--hermes-bubble-assistant-alpha\),\s*transparent/s);
+  assert.match(css, /--hermes-bubble-user-alpha:\s*100%/);
+  assert.match(css, /--hermes-bubble-assistant-alpha:\s*100%/);
   assert.match(css, /backdrop-filter:\s*blur\(/);
   assert.match(html, /class="release-sidecar"/);
   assert.match(html, /LOCAL SIDECAR \/ CHROME PANEL/);
@@ -241,7 +250,7 @@ test('side panel keeps Browser onboarding, refresh feedback, updates, and messag
   assert.match(css, /\.release-sidecar\s*\{[^}]*background-blend-mode:\s*normal,\s*luminosity,\s*normal/s);
   assert.doesNotMatch(css, /\.release-sidecar::before/);
   assert.match(css, /\.operation-toast\s*\{(?=[^}]*left:\s*50%)(?=[^}]*right:\s*auto)(?=[^}]*transform:\s*translateX\(-50%\))[^}]*\}/s);
-  assert.match(css, /@keyframes operationToastIn\s*\{[\s\S]*translate\(-50%,\s*10px\)[\s\S]*translate\(-50%,\s*0\)/);
+  assert.match(css, /@keyframes operationToastIn\s*\{[\s\S]*translate\(-50%,\s*-10px\)[\s\S]*translate\(-50%,\s*0\)/);
   assert.match(css, /#refreshSessionsButton\.is-refreshing\s+\.session-refresh-icon\s*\{[^}]*animation:/s);
   assert.match(refreshModels, /showOperationToast\(/);
   assert.match(refreshSessions, /showOperationToast\(/);
@@ -262,15 +271,18 @@ test('side panel keeps Browser onboarding, refresh feedback, updates, and messag
   assert.match(js, /review\.emptyMessage/);
   assert.match(js, /maybeLaterButton\.textContent\s*=\s*translateUiText\(review\.available/);
   assert.match(refreshSessions, /sessionsRefreshing\s*=\s*true/);
-  assert.match(js, /function positionOperationToast\(\)[\s\S]*?getBoundingClientRect\(\)/);
+  assert.doesNotMatch(js, /positionOperationToast/);
   assert.match(js, /HERMES_BROWSER_INTRO_SEEN_STORAGE_KEY/);
   assert.match(renderEmpty, /shouldShowBrowserIntro\(/);
   assert.match(js, /await persistBrowserIntroSeen\(\)/);
   assert.match(js, /function launchBrowserUpdateWithHermes/);
   assert.match(js, /function currentHermesBrowserSystemPrompt\(\)/);
   assert.ok((js.match(/currentHermesBrowserSystemPrompt\(\)/g) || []).length >= 6);
-  assert.match(js, /If the checkout has uncommitted changes, stop and report them/);
-  assert.match(js, /npm run build/);
+  // The prepared update prompt lives in lib/update-flow.mjs so the unit tests
+  // assert the exact string the panel hands to the agent.
+  assert.match(js, /buildUpdateAgentPrompt\(\{ review \}\)/);
+  assert.match(updateFlow, /If the checkout has uncommitted changes, stop and report them/);
+  assert.match(updateFlow, /run npm run build/);
   assert.match(js, /els\.composer\.requestSubmit\(\)/);
 });
 
@@ -457,7 +469,7 @@ test('full-tab run steer failures distinguish stale runs from missing gateway su
 
 test('full-tab session creation and controls enforce the upstream runtime truth contract', () => {
   const js = read('extension/app.js');
-  const createSession = js.match(/async function createSession\(\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
+  const createSession = js.match(/async function createSession\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
   const selectModel = js.match(/async function selectModel\(model\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
   const sendWebSteerText = js.match(/async function sendWebSteerText\(text\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
 
@@ -535,7 +547,7 @@ test('full-tab uses extension-style grouped model, attachment, collapsible sessi
   assert.match(css, /\.web-shell\.sessions-hidden/);
   assert.match(html, /class="composer-icon composer-mic"/);
   assert.match(js, /function consumePendingVoiceDraft/);
-  assert.match(voicePage, /await browserApi\.storage\.local\.set\(\{ \[VOICE_DRAFT_STORAGE_KEY\]: payload \}\)/);
+  assert.match(voicePage, /storage\??\.local\??\.set\??\.\(\{ \[VOICE_DRAFT_STORAGE_KEY\]: payload \}\)/);
 });
 
 test('full-tab sessions use canonical source groups and a gateway-backed rename action', () => {
@@ -724,11 +736,11 @@ test('background worker opens only the extension-owned Hermes Web URL', async ()
   }
 });
 
-test('full-tab app adds only the downloads permission required for explicit artifact delivery', () => {
+test('full-tab package declares only justified artifact and Phase 6 controller permissions', () => {
   const manifest = JSON.parse(read('extension/manifest.json'));
   assert.equal(manifest.chrome_url_overrides, undefined);
   assert.equal(manifest.permissions.includes('downloads'), true);
-  assert.equal(manifest.permissions.includes('debugger'), false);
+  assert.equal(manifest.permissions.includes('debugger'), true);
   assert.equal(manifest.permissions.includes('nativeMessaging'), false);
   assert.equal(manifest.permissions.includes('cookies'), false);
 });
@@ -766,8 +778,8 @@ test('composer places its smaller online indicator beside CHAT and keeps model d
   assert.match(html, /class="composer-chat-label"[\s\S]*class="read-only-indicator online"[\s\S]*CHAT/, 'the composer status dot should live beside CHAT');
   assert.doesNotMatch(html, /class="composer-state">\s*<span class="read-only-indicator/, 'the status dot should not compete with the model control');
   assert.match(css, /\.read-only-indicator\s*\{[^}]*width:\s*5px;[^}]*height:\s*5px;/s, 'the relocated dot should be smaller');
-  assert.match(css, /\.composer-runtime-control strong\s*\{[^}]*font:\s*(?:[^;]*\s)?11px\//s, 'the model name should use a readable 11px line');
-  assert.match(css, /\.composer-runtime-control small\s*\{[^}]*font:\s*(?:[^;]*\s)?9px\//s, 'runtime metadata should use a readable 9px line');
+  assert.match(css, /\.composer-runtime-control strong\s*\{[^}]*font:\s*(?:[^;]*\s)?calc\(11px \* var\(--hermes-text-zoom, 1\)\)\//s, 'the model name should use a readable 11px line');
+  assert.match(css, /\.composer-runtime-control small\s*\{[^}]*font:\s*(?:[^;]*\s)?calc\(9px \* var\(--hermes-text-zoom, 1\)\)\//s, 'runtime metadata should use a readable 9px line');
 });
 
 test('Hermes Web keeps status beside the model, preserves light Cyberpunk, and uses theme-safe model search fields', () => {

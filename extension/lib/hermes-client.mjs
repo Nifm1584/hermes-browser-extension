@@ -1,9 +1,17 @@
 const DEFAULT_SESSION_LIMIT = 200;
 const DEFAULT_MAX_PAGES = 10;
 const MAX_ERROR_BODY = 500;
+const AUTH_SCHEME = 'Bearer';
 
 function normalizeBaseUrl(value = '') {
   return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function profileScopedPath(path = '', profile = '') {
+  const normalizedPath = String(path || '').startsWith('/') ? String(path || '') : `/${path}`;
+  const selectedProfile = String(profile || '').trim();
+  if (!selectedProfile || /^\/p\/[^/]+(?:\/|$)/.test(normalizedPath)) return normalizedPath;
+  return `/p/${encodeURIComponent(selectedProfile)}${normalizedPath}`;
 }
 
 function normalizedRows(payload = {}) {
@@ -49,13 +57,17 @@ export function createHermesClient({ fetchImpl = globalThis.fetch, getConnection
     const hasBody = typeof options.body !== 'undefined';
     const headers = {
       ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
-      ...(connection.apiKey ? { Authorization: `Bearer ${connection.apiKey}` } : {}),
+      ...(connection.apiKey ? { Authorization: `${AUTH_SCHEME} ${connection.apiKey}` } : {}),
       ...(connection.activeProfile ? { 'X-Hermes-Profile': connection.activeProfile } : {}),
       ...(options.headers || {}),
     };
-    return fetchImpl(`${base}${String(path || '').startsWith('/') ? path : `/${path}`}`, {
+    // SECURITY BOUNDARY: Trusted Output — gateway fetch policy. Redirects are
+    // always rejected (redirect: 'error' is non-overridable) so a compromised
+    // endpoint can never bounce the extension to an attacker-controlled host.
+    const { redirect: _ignoredRedirect, ...rest } = options;
+    return fetchImpl(`${base}${profileScopedPath(path, connection.activeProfile)}`, {
       redirect: 'error',
-      ...options,
+      ...rest,
       headers,
     });
   }

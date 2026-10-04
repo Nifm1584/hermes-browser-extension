@@ -45,6 +45,7 @@ import {
 import { createVscodeMarketplaceClient } from './lib/vscode-marketplace.mjs';
 import { createThemeMarketplaceController } from './lib/theme-marketplace-controller.mjs';
 import { resolveBrowserApi } from './lib/browser-api.mjs';
+import { installLoopbackCorsRules, handleLoopbackFetchMessage, LOOPBACK_FETCH_MESSAGE } from './lib/loopback-cors.mjs';
 import {
   CONTROLLER_HEARTBEAT_ALARM,
   CONTROLLER_RECONCILE_ALARM,
@@ -54,10 +55,38 @@ import {
   CONTROLLER_WORKER_MESSAGES,
   createControllerServiceWorker,
 } from './lib/controller-service-worker.mjs';
+import { createBrowserControlRuntime } from './lib/browser-control-runtime.mjs';
+import {
+  createBrowserControlArtifactClient,
+  createBrowserControlArtifactHttpTransport,
+} from './lib/browser-control-artifacts.mjs';
 
 const browserApiResolution = resolveBrowserApi();
 const browserApi = browserApiResolution.api;
+const browserProduct = detectBrowserProduct({
+  userAgent: globalThis.navigator?.userAgent || '',
+  brands: globalThis.navigator?.userAgentData?.brands || [],
+  braveApi: globalThis.navigator?.brave || null,
+  extensionUrl: browserApi.runtime.getURL(''),
+});
+const browserControlRuntime = createBrowserControlRuntime({
+  browserApi,
+  product: browserProduct,
+  artifactClientFactory: (settings = {}) => {
+    const baseUrl = String(settings.gatewayUrl || '').trim();
+    const apiKey = String(settings.apiKey || '').trim();
+    if (settings.browserControlArtifactTransport !== true || !baseUrl || !apiKey) return null;
+    return createBrowserControlArtifactClient({
+      transport: createBrowserControlArtifactHttpTransport({
+        fetchImpl: globalThis.fetch?.bind(globalThis),
+        baseUrl,
+        apiKey,
+      }),
+    });
+  },
+});
 let cachedPanelResidencyMode = DEFAULT_PANEL_RESIDENCY_MODE;
+let panelResidencyHydrated = false;
 
 const controllerConnector = createControllerConnector({
   fetchImpl: globalThis.fetch?.bind(globalThis),
@@ -77,11 +106,19 @@ const controllerWorker = typeof browserApi.storage?.local?.set === 'function'
   ? createControllerServiceWorker({
       storageArea: browserApi.storage.local,
       connector: controllerConnector,
-      product: detectBrowserProduct({ extensionUrl: browserApi.runtime.getURL('') }),
+      product: browserProduct,
       extensionOrigin,
       supportsTabGroups: Boolean(browserApi.tabGroups),
+      approvalStore: browserControlRuntime.approvals,
+      getControllerCapabilities: async (settings) => (await browserControlRuntime.status(settings)).capabilities,
+      executeBrowserCommand: (frame, context) => browserControlRuntime.execute(frame, context, context.settings),
+      getTab: (tabId) => browserApi.tabs.get(tabId),
     })
   : null;
+browserControlRuntime.setDebuggerDetachHandler((event) => {
+  controllerWorker?.handleDebuggerDetach(event)
+    .catch((error) => console.warn('[Hermes Browser] Debugger detach reconciliation failed:', error));
+});
 const CONTROLLER_WORKER_MESSAGE_TYPES = new Set(Object.values(CONTROLLER_WORKER_MESSAGES));
 
 function startControllerAlarms() {
@@ -120,7 +157,7 @@ const INLINE_DRAFT_STORAGE_KEY = 'hermesBrowserInlineDraftRequest';
 const INLINE_SESSION_STATE_KEY = 'hermesBrowserInlineSessionState';
 const OPEN_SESSION_STORAGE_KEY = 'hermesBrowserOpenSessionRequest';
 const INLINE_DRAFT_TTL_MS = 5 * 60 * 1000;
-const HERMES_ASSIST_SOURCE = 'hermes_assist';
+const HERMES_ASSIST_SOURCE = 'hermes_browser';
 
 const WAKE_BACKGROUND_MESSAGE_TYPES = new Set([
   WAKE_MESSAGES.claimTurn,
@@ -429,6 +466,8 @@ async function refreshPanelResidencyModeFromStorage() {
   } catch (error) {
     console.warn('[Hermes Browser] Could not read panel residency setting:', error);
     cachedPanelResidencyMode = DEFAULT_PANEL_RESIDENCY_MODE;
+  } finally {
+    panelResidencyHydrated = true;
   }
   return cachedPanelResidencyMode;
 }
@@ -499,7 +538,17 @@ async function configureSidePanel() {
 }
 
 function reapplyPanelResidencyForTab(tabId) {
-  applyPanelResidencyMode(cachedPanelResidencyMode, { tabId })
+  // The worker starts with the tab-attached default. Do not overwrite an
+  // existing global panel while its persisted residency mode is still loading.
+  if (!panelResidencyHydrated) {
+    return refreshPanelResidencyModeFromStorage()
+      .then(() => reapplyPanelResidencyForTab(tabId));
+  }
+  // A global panel has one default path for the window. Reapplying identical
+  // options for every activated tab can recreate that document in Edge, which
+  // restarts the sidepanel startup sequence on every tab switch.
+  if (cachedPanelResidencyMode === PANEL_RESIDENCY_MODES.GLOBAL) return;
+  return applyPanelResidencyMode(cachedPanelResidencyMode, { tabId })
     .catch((error) => console.warn('[Hermes Browser] Could not apply panel residency setting:', error));
 }
 
@@ -693,9 +742,13 @@ function openHermesPanelFromGesture(tab) {
         }
         return true;
       })
-      .catch(() => openHermesPanelFallback(tab, browserId, panelUrl));
-  } catch {
-    return openHermesPanelFallback(tab, browserId, panelUrl);
+      .catch((error) => {
+        console.warn('[Hermes Browser] Native side panel open rejected; preserving the browser-owned side-panel action instead of opening a full tab:', error);
+        return true;
+      });
+  } catch (error) {
+    console.warn('[Hermes Browser] Native side panel open threw; preserving the browser-owned side-panel action instead of opening a full tab:', error);
+    return true;
   }
 }
 
@@ -835,8 +888,19 @@ void initI18n().catch((error) => {
   console.warn('[Hermes Browser] Localization initialization failed:', error);
 });
 
-browserApi.runtime.onInstalled.addListener(configureInstalledSurfaces);
+void installLoopbackCorsRules().catch((error) => {
+  console.warn('[Hermes Browser] Loopback CORS session rule cleanup failed:', error);
+});
+browserApi.runtime.onInstalled.addListener((details) => {
+  void installLoopbackCorsRules().catch((error) => {
+    console.warn('[Hermes Browser] Loopback CORS session rule cleanup failed:', error);
+  });
+  return configureInstalledSurfaces(details);
+});
 browserApi.runtime.onStartup.addListener(async () => {
+  await installLoopbackCorsRules().catch((error) => {
+    console.warn('[Hermes Browser] Loopback CORS session rule cleanup failed:', error);
+  });
   await configureInstalledSurfaces({ controllerReason: 'browser-startup' });
   restoreWakeController();
 });
@@ -863,19 +927,26 @@ browserApi.storage?.onChanged?.addListener?.((changes, areaName) => {
       .catch((error) => console.warn('[Hermes Browser] Controller settings rebind failed:', error));
   }
   let changed = false;
-  if (changes.hermesBrowserSettings?.newValue?.panelResidencyMode) {
-    cachedPanelResidencyMode = normalizePanelResidencyMode(changes.hermesBrowserSettings.newValue.panelResidencyMode);
-    changed = true;
-  } else if (changes.panelResidencyMode?.newValue) {
-    cachedPanelResidencyMode = normalizePanelResidencyMode(changes.panelResidencyMode.newValue);
-    changed = true;
+  if (Object.hasOwn(changes, 'hermesBrowserSettings')) {
+    const previousMode = cachedPanelResidencyMode;
+    cachedPanelResidencyMode = normalizePanelResidencyMode(changes.hermesBrowserSettings?.newValue?.panelResidencyMode);
+    changed = cachedPanelResidencyMode !== previousMode;
+  } else if (Object.hasOwn(changes, 'panelResidencyMode')) {
+    const previousMode = cachedPanelResidencyMode;
+    cachedPanelResidencyMode = normalizePanelResidencyMode(changes.panelResidencyMode?.newValue);
+    changed = cachedPanelResidencyMode !== previousMode;
   }
   if (changed) {
-    activeBrowserTabId()
-      .then((tabId) => reapplyPanelResidencyForTab(tabId));
+    return activeBrowserTabId()
+      .then((tabId) => applyPanelResidencyMode(cachedPanelResidencyMode, { tabId }))
+      .catch((error) => console.warn('[Hermes Browser] Could not apply changed panel residency setting:', error));
   }
 });
 browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // SECURITY BOUNDARY: Untrusted Input — `message` arrives from extension
+  // pages, content scripts, or (via forwarded events) web page code. Never
+  // trust its fields; validate types and treat string payloads as
+  // attacker-controlled until they pass through the sanitizer at render time.
   const action = CONTROLLER_WORKER_MESSAGE_TYPES.has(message?.type)
     ? controllerWorker
       ? controllerWorker.handleMessage(message, sender)
@@ -896,7 +967,9 @@ browserApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ? openHermesFullView(message.url)
           : message?.type === 'HERMES_GET_YOUTUBE_TRANSCRIPT'
             ? getYoutubeTranscript(message)
-            : null;
+            : message?.type === LOOPBACK_FETCH_MESSAGE
+              ? handleLoopbackFetchMessage(message)
+              : null;
   if (!action) return false;
   action
     .then(sendResponse)

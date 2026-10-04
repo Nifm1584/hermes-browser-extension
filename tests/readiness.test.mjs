@@ -51,6 +51,32 @@ test('startup reducer classifies unconfigured and unreachable gateways as setup/
   assert.equal(deriveStartupView(unreachable).title, 'Hermes needs attention');
 });
 
+test('blocked cascade events never clobber the setup-needed phase after an unconfigured gateway', () => {
+  let state = initialStartupReadiness();
+  state = reduceStartupReadiness(state, {
+    type: 'stage',
+    phase: 'gateway',
+    step: 'gateway',
+    status: 'unconfigured',
+    detail: 'Add a Hermes API token or complete pairing to use full Hermes Browser mode.',
+    blockingError: 'gateway: Add a Hermes API token or complete pairing to use full Hermes Browser mode.',
+  });
+  assert.equal(state.phase, 'setup-needed');
+  for (const stage of ['capabilities', 'models', 'selectedModel', 'skills', 'profiles', 'sessions', 'sessionBinding']) {
+    state = reduceStartupReadiness(state, {
+      type: 'stage',
+      phase: stage,
+      step: stage,
+      status: 'blocked',
+      detail: `Blocked by gateway failure.`,
+    });
+  }
+  assert.equal(state.phase, 'setup-needed');
+  const view = deriveStartupView(state);
+  assert.equal(view.title, 'Connect to Hermes');
+  assert.equal(view.detail, 'Add a Hermes API token or complete pairing to use full Hermes Browser mode.');
+});
+
 test('missing capabilities and sparse model data degrade without blocking ready state', () => {
   let state = initialStartupReadiness();
   for (const [step, status] of [
@@ -112,9 +138,11 @@ test('sidepanel startup and conversation chrome use the compact branded shell', 
   assert.match(html, /class="startup-brand-icon"/);
   assert.match(css, /assets\/img\/hermes-browser-extension-icon-ink\.png/);
   assert.match(css, /\.startup-screen\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;[^}]*place-items:\s*center;[^}]*overflow:\s*hidden;/s);
-  assert.match(css, /body\.startup-active\s+\.topbar\s*\{[^}]*top:\s*min\(var\(--startup-settings-top,[^;]+\),\s*calc\(100vh - 84px\)\);[^}]*left:\s*50%;[^}]*justify-content:\s*center;[^}]*transform:\s*translateX\(-50%\);/s);
-  assert.match(js, /function\s+positionStartupSettings[\s\S]*listRect\.bottom\s*\+\s*12/);
-  assert.match(css, /body\.startup-active\s+\.topbar\s+#settingsButton\s*\{[^}]*pointer-events:\s*auto;/s);
+  assert.match(html, /id="startupActions"/);
+  assert.match(css, /body\.startup-active\s+\.topbar\s*\{[^}]*display:\s*none;/s);
+  assert.doesNotMatch(css, /--startup-settings-top/);
+  assert.match(js, /function\s+positionStartupSettings[\s\S]*startupActions/);
+  assert.match(css, /body\.startup-active\s+\.startup-actions\s+#settingsButton\s*\{[^}]*pointer-events:\s*auto;/s);
   assert.match(css, /\.startup-brand-lockup\s*\{[^}]*justify-items:\s*center;/s);
   assert.doesNotMatch(html, /Connecting Browser Extension/i);
   assert.match(css, /\.startup-brand-icon\s*\{[^}]*width:\s*132px;/s);
@@ -136,6 +164,6 @@ test('sidepanel startup and conversation chrome use the compact branded shell', 
   assert.ok(heroIndex >= 0 && messagesIndex > heroIndex, 'hero should remain an intro before messages');
   assert.ok(statusCardIndex > browserBehaviorIndex, 'active-tab status belongs in Browser Behavior settings');
   assert.ok(contextScopeButtonIndex > composerStartIndex && contextScopeButtonIndex < composerEndIndex, 'tab-scope control belongs in the composer header');
-  assert.ok(contextScopeButtonIndex < html.indexOf('id="contextChip"'), 'tab-scope control should render above the context chip');
+  assert.ok(contextScopeButtonIndex > html.indexOf('id="contextChip"'), 'tab-scope control sits right of the context chip');
   assert.doesNotMatch(html.slice(heroIndex, messagesIndex), /<span>ACTIVE TAB<\/span>/);
 });

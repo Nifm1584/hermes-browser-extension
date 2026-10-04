@@ -14,14 +14,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { writeContentExtractorRuntime } from './build-content-runtime.mjs';
 import { MANIFEST_TARGETS, manifestAssumptionsFor } from './manifest-profiles.mjs';
+import { checkSelfContained } from './check-self-contained.mjs';
+import { syncHermesContextWindows } from './sync-hermes-context-windows.mjs';
 
 const root = process.cwd();
 const src = path.join(root, 'extension');
 const dest = path.join(root, 'dist', 'firefox');
 const buildInfoFileName = 'build-info.json';
+const FIREFOX_ADDON_ID = 'hermes-browser-extension@abundantbeing.github.io';
 const firefoxProfile = manifestAssumptionsFor(MANIFEST_TARGETS.FIREFOX);
 
 await writeContentExtractorRuntime({ rootDir: root });
+await syncHermesContextWindows({ root });
+checkSelfContained(src);
 
 function copyDir(from, to) {
   fs.mkdirSync(to, { recursive: true });
@@ -80,16 +85,17 @@ if (sourceManifest.background?.service_worker) {
   };
 }
 
-// audioCapture is Chromium-only. Firefox voice support uses runtime feature detection.
+// Chromium-only optional capabilities are removed from Firefox packages.
 if (Array.isArray(sourceManifest.optional_permissions)) {
-  sourceManifest.optional_permissions = sourceManifest.optional_permissions.filter((permission) => permission !== 'audioCapture');
+  sourceManifest.optional_permissions = sourceManifest.optional_permissions
+    .filter((permission) => !firefoxProfile.removedOptionalPermissions.includes(permission));
   if (!sourceManifest.optional_permissions.length) delete sourceManifest.optional_permissions;
 }
 
 // Add Firefox-specific settings
 sourceManifest.browser_specific_settings = {
   gecko: {
-    id: 'hermes-browser@abundantbeing.github.io',
+    id: FIREFOX_ADDON_ID,
     strict_min_version: '142.0',
     data_collection_permissions: {
       required: ['websiteContent', 'personalCommunications'],

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import * as dashboardBridge from '../extension/lib/dashboard-bridge.mjs';
+
 import {
   dashboardTrustPrompt,
   isTrustedDashboardOrigin,
@@ -16,6 +18,12 @@ import {
   discoverProfilesFromDashboard,
 } from '../extension/lib/dashboard-bridge.mjs';
 
+test('dashboard bridge does not expose loopback tab creation or in-page port scanning helpers', () => {
+  assert.equal(dashboardBridge.findOrOpenLoopbackTab, undefined);
+  assert.equal(dashboardBridge.scanHermesDashboardInPage, undefined);
+  assert.equal(dashboardBridge.discoverRosterViaGatewayTab, undefined);
+});
+
 test('originOf and wsTicketUrl normalize the dashboard base', () => {
   assert.equal(originOf('https://kurokami.example.ts.net/some/path?q=1'), 'https://kurokami.example.ts.net');
   assert.equal(originOf('not a url'), '');
@@ -25,6 +33,13 @@ test('originOf and wsTicketUrl normalize the dashboard base', () => {
   assert.equal(wsTicketUrl('https://host.ts.net/hermes'), 'https://host.ts.net/hermes/api/auth/ws-ticket');
   // Query/hash from a pasted address bar URL must not corrupt the ticket path.
   assert.equal(wsTicketUrl('https://host.ts.net/hermes?x=1#y'), 'https://host.ts.net/hermes/api/auth/ws-ticket');
+});
+
+test('dashboard trust accepts loopback HTTP without allowing remote plaintext origins', () => {
+  assert.equal(originOf('http://127.0.0.1:9119/dashboard'), 'http://127.0.0.1:9119');
+  assert.equal(originOf('http://localhost:9119/dashboard'), 'http://localhost:9119');
+  assert.equal(originOf('http://host.ts.net'), '');
+  assert.equal(isTrustedDashboardOrigin('http://127.0.0.1:9119', 'http://127.0.0.1:9119/'), true);
 });
 
 test('dashboard trust is bound to one canonical HTTPS origin', () => {
@@ -250,6 +265,28 @@ test('mintWsTicket injects the mint into the dashboard tab with the ticket URL',
   assert.deepEqual(injected.args, ['https://host.ts.net/api/auth/ws-ticket']);
 });
 
+test('mintWsTicket reuses the signed-in local Dashboard tab', async () => {
+  const dashboardTab = {
+    id: 11,
+    url: 'http://127.0.0.1:9119/',
+    status: 'complete',
+    discarded: false,
+  };
+  const result = await mintWsTicket({
+    tabsApi: {
+      query: async () => [dashboardTab],
+      get: async () => ({ ...dashboardTab }),
+    },
+    scriptingApi: {
+      executeScript: async () => [{ result: { ok: true, ticket: 'LOCAL', ttlSeconds: 30 } }],
+    },
+    baseUrl: 'http://127.0.0.1:9119',
+    mintFn: () => {},
+  });
+
+  assert.deepEqual(result, { ok: true, ticket: 'LOCAL', ttlSeconds: 30 });
+});
+
 test('mintWsTicket discards a ticket when the selected dashboard tab navigates', async () => {
   const result = await mintWsTicket({
     tabsApi: {
@@ -385,7 +422,7 @@ test('discoverProfilesInPage survives chrome.scripting serialization (no module 
   const serialized = discoverProfilesInPage.toString();
   assert.doesNotMatch(serialized, /dashboardProfilesUrl/);
   assert.match(serialized, /profilesUrlFor/);
-  const runner = new Function(`return (${serialized})`)();
+  const runner = new Function(`return (${serialized})`)(); // eslint-disable-line no-new-func -- test-only serialization probe, mirrors chrome.scripting.executeScript; no dynamic user input
   const original = globalThis.fetch;
   globalThis.fetch = async (url) => {
     if (String(url).endsWith('/api/profiles')) {

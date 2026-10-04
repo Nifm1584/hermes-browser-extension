@@ -3,7 +3,7 @@
   "default_locale": "en",
   "name": "__MSG_extensionName__",
   "short_name": "__MSG_extensionShortName__",
-  "version": "0.2.0",
+  "version": "0.3.4",
   "description": "__MSG_extensionDescription__",
   "minimum_chrome_version": "116",
   "icons": {
@@ -16,18 +16,21 @@
     "activeTab",
     "alarms",
     "contextMenus",
+    "debugger",
     "downloads",
     "offscreen",
     "scripting",
     "sidePanel",
     "storage",
+    "unlimitedStorage",
     "tabs"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "file:///*"
   ],
   "action": {
       "default_title": "__MSG_openExtension__",
@@ -75,7 +78,8 @@
     {
       "matches": [
         "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "file:///*"
       ],
       "js": [
         "extension/lib/browser-api-global.js",
@@ -95,7 +99,8 @@
       ],
       "matches": [
         "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "file:///*"
       ]
     }
   ],

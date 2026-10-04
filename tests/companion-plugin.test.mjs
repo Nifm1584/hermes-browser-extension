@@ -32,6 +32,7 @@ const files = [
   'companion-plugin/context_store.py',
   'companion-plugin/events.py',
   'companion-plugin/policy.py',
+  'companion-plugin/journal.py',
   'companion-plugin/tools.py',
   'companion-plugin/text_utilities.py',
   'companion-plugin/hooks.py',
@@ -51,18 +52,21 @@ test('plugin.yaml uses standard Hermes plugin format', () => {
   assert.match(manifest, /kind:\s*standalone/);
   assert.match(manifest, /provides_tools:/);
   assert.match(manifest, /provides_hooks:/);
-  assert.match(manifest, /provides_skills:/);
+  assert.doesNotMatch(manifest, /provides_skills:/);
   // Tools are listed
   assert.match(manifest, /browser_context_status/);
   assert.match(manifest, /browser_get_context/);
   assert.match(manifest, /browser_clear_context/);
   assert.match(manifest, /browser_event_log/);
+  assert.match(manifest, /browser_control_status/);
   assert.match(manifest, /browser_text_utility/);
   // Hooks
   assert.match(manifest, /pre_llm_call/);
   assert.match(manifest, /post_tool_call/);
   // No dangerous capabilities
-  assert.doesNotMatch(manifest, /api_server_route|browser_control|nativeMessaging|debugger/i);
+  assert.match(manifest, /manifest_version:\s*2/);
+  assert.match(manifest, /config_schema:/);
+  assert.doesNotMatch(manifest, /api_server_route|nativeMessaging|debugger/i);
 });
 
 test('__init__.py registers tools, hooks and bundled skill', () => {
@@ -76,7 +80,10 @@ test('__init__.py registers tools, hooks and bundled skill', () => {
   assert.ok(init.includes('browser_get_context'));
   assert.ok(init.includes('browser_clear_context'));
   assert.ok(init.includes('browser_event_log'));
+  assert.ok(init.includes('browser_control_status'));
   assert.ok(init.includes('browser_text_utility'));
+  assert.match(init, /ctx\.get_config\(/);
+  assert.match(init, /ctx\.state/);
   // Hooks
   assert.ok(init.includes('pre_llm_call'));
   assert.ok(init.includes('post_tool_call'));
@@ -104,12 +111,25 @@ class FakeCtx:
         self.tools = []
         self.hooks = []
         self.skills = []
+        self.config_reads = []
+        self.state = FakeState()
+    def get_config(self, key, default=None):
+        self.config_reads.append((key, default))
+        return default
     def register_tool(self, **kwargs):
         self.tools.append(kwargs)
     def register_hook(self, name, callback):
         self.hooks.append((name, callback))
     def register_skill(self, name, path):
         self.skills.append((name, str(path)))
+
+class FakeState:
+    def __init__(self):
+        self.values = {}
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+    def set(self, key, value):
+        self.values[key] = value
 
 ctx = FakeCtx()
 module.register(ctx)
@@ -118,6 +138,8 @@ assert [tool["name"] for tool in ctx.tools] == [
     "browser_get_context",
     "browser_clear_context",
     "browser_event_log",
+    "browser_control_status",
+    "browser_context_journal",
     "browser_text_utility",
 ]
 for tool in ctx.tools:
@@ -127,6 +149,7 @@ for tool in ctx.tools:
     assert schema["parameters"]["type"] == "object"
 assert [name for name, _callback in ctx.hooks] == ["pre_llm_call", "pre_tool_call", "post_tool_call"]
 assert ctx.skills and ctx.skills[0][0] == "hermes-browser"
+assert ctx.config_reads == [("durable_receipts", True), ("receipt_limit", 8)]
 `;
   runPluginPython(script);
 });
@@ -140,6 +163,8 @@ schema_map = {
     "browser_get_context": schemas.SCHEMA_GET_CONTEXT,
     "browser_clear_context": schemas.SCHEMA_CLEAR_CONTEXT,
     "browser_event_log": schemas.SCHEMA_EVENT_LOG,
+    "browser_control_status": schemas.SCHEMA_CONTROL_STATUS,
+    "browser_context_journal": schemas.SCHEMA_JOURNAL,
     "browser_text_utility": schemas.SCHEMA_TEXT_UTILITY,
 }
 for name, schema in schema_map.items():
@@ -161,6 +186,8 @@ test('tools return JSON responses — status, get, clear, event_log', () => {
   assert.match(tools, /def browser_get_context/);
   assert.match(tools, /def browser_clear_context/);
   assert.match(tools, /def browser_event_log/);
+  assert.match(tools, /def browser_control_status/);
+  assert.match(tools, /def browser_context_journal/);
   assert.match(tools, /def browser_text_utility/);
   // Handlers consume ContextVar leases; they may not query global/latest state.
   assert.match(tools, /ContextVar/);
@@ -285,6 +312,144 @@ assert parse_bcp_v2_turn("x" * 64001) is None
   runPluginPython(script);
 });
 
+test('Phase 6B companion preserves historical control truth and only durable redacted receipts', () => {
+  const script = `${pluginImportHarness}
+import json
+from companion_plugin.context_store import BrowserContextStore, owner_from_hook_kwargs
+from companion_plugin import hooks, tools
+
+FORBIDDEN = "PAGE_TEXT_TYPED_SECRET_URL"
+
+class FakeState:
+    def __init__(self, values=None, error=None):
+        self.values = dict(values or {})
+        self.error = error
+    def get(self, key, default=None):
+        if self.error:
+            raise RuntimeError(self.error)
+        return self.values.get(key, default)
+    def set(self, key, value):
+        if self.error:
+            raise RuntimeError(self.error)
+        self.values[key] = value
+
+def owner(session="session-a", turn="turn-a", task="task-a"):
+    return owner_from_hook_kwargs({"session_id": session, "turn_id": turn, "task_id": task})
+
+def envelope(control=None, *, include_control=True):
+    value = {
+        "protocol": "hermes.browser.turn.v2",
+        "human_input": {"source": "composer", "text": "inspect this tab"},
+        "browser_context": {"delivery": "full", "payload": {
+            "protocol": "hermes.browser.context.v1",
+            "contextScope": {"mode": "follow-active"}, "settings": {},
+            "activeTab": {"id": 41, "url": "https://example.test/private"},
+            "tabs": [], "selectedTabs": [],
+            "pageContext": {"text": FORBIDDEN},
+        }},
+        "attachment_context": {"items": []},
+        "source_receipt": {"protocol": "hermes.browser.turn.v2", "version": 2, "delivery": "full", "context_hash": "a1b2c3d4e5f60789"},
+    }
+    if include_control:
+        value["browser_control"] = control if control is not None else {
+            "route": "extension-controller",
+            "availability": "available",
+            "isolated_fallback": "forbidden",
+            "controller_id": "controller-owner-a",
+            "browser_profile_id": "profile-owner-a",
+            "tab_id": 41,
+            "frame_id": 0,
+            "document_generation": 7,
+            "lease_owned": True,
+            "url": "https://example.test/private?secret=" + FORBIDDEN,
+            "typed_value": FORBIDDEN,
+            "arguments": {"text": FORBIDDEN},
+        }
+    return json.dumps(value)
+
+now = [100.0]
+state = FakeState()
+store = BrowserContextStore(ttl_seconds=5, clock=lambda: now[0])
+store.configure_durable_state(state, enabled=True, receipt_limit=8)
+status = store.put_bcp_v2(envelope(), owner())
+assert status["available"] is True
+control = store.control_status_for_owner(owner())
+assert control == {
+    "context_id": status["context_id"],
+    "observed_at": 100.0,
+    "age_ms": 0,
+    "live": False,
+    "control": {
+        "availability": "available",
+        "lease_owned": True,
+        "controller_id": "controller-owner-a",
+        "browser_profile_id": "profile-owner-a",
+        "tab_id": 41,
+        "frame_id": 0,
+        "document_generation": 7,
+    },
+}
+assert FORBIDDEN not in json.dumps(control)
+assert store.control_status_for_owner(owner(session="session-b"))["available"] is False
+
+# Missing and malformed control metadata degrade to historical unknown, never authority.
+missing = store.put_bcp_v2(envelope(include_control=False), owner(turn="turn-missing"))
+assert store.control_status_for_owner(owner(turn="turn-missing"))["control"]["availability"] == "unknown"
+malformed = store.put_bcp_v2(envelope({"availability": "available", "tab_id": "41", "controller_id": FORBIDDEN}), owner(turn="turn-malformed"))
+assert store.control_status_for_owner(owner(turn="turn-malformed"))["control"]["availability"] == "unknown"
+
+# The tool is owner-authorized and explicitly historical-only.
+hooks.set_store(store)
+tools.set_store(store)
+assert hooks.pre_tool_call(tool_name="browser_control_status", args={}, session_id="session-a", turn_id="turn-a", task_id="task-a") is None
+tool_status = json.loads(tools.browser_control_status({}))
+assert tool_status["live"] is False
+assert tool_status["control"]["controller_id"] == "controller-owner-a"
+assert "broker" not in json.dumps(tool_status).lower()
+
+# Post-tool persistence stores only the allowed metadata receipt tuple.
+for index in range(10):
+    now[0] = 100.0 + index
+    store.record_tool_receipt(
+        owner(),
+        tool_name=f"tool-{index}",
+        ok=index % 2 == 0,
+        duration_ms=index,
+        forbidden={"args": FORBIDDEN, "result": FORBIDDEN, "url": FORBIDDEN},
+    )
+rows = state.values["receipts_v1"]
+assert len(rows) == 8
+blob = json.dumps(rows)
+assert FORBIDDEN not in blob
+assert "args" not in blob and "result" not in blob and "url" not in blob
+assert set(rows[-1]) == {"owner", "receipt"}
+assert set(rows[-1]["receipt"]) == {"tool_name", "ok", "duration_ms", "controller_id", "tab_id", "document_generation", "observed_at"}
+
+# A fresh process can read owner-scoped receipt metadata but never gains live context/control.
+restarted = BrowserContextStore(clock=lambda: now[0])
+restarted.configure_durable_state(state, enabled=True, receipt_limit=8)
+assert restarted.control_status_for_owner(owner())["available"] is False
+receipts = restarted.receipts_for_owner(owner(), 20)
+assert len(receipts) == 8
+assert receipts[-1]["tool_name"] == "tool-9"
+assert restarted.receipts_for_owner(owner(session="session-b"), 20) == []
+
+# Malformed durable state is visible and preserved instead of becoming fresh context.
+bad_state = FakeState({"receipts_v1": {"controller_id": "forged"}})
+try:
+    BrowserContextStore().configure_durable_state(bad_state, enabled=True, receipt_limit=8)
+except RuntimeError as error:
+    assert "Malformed durable companion receipt state" in str(error)
+else:
+    raise AssertionError("malformed durable state must fail visibly")
+assert bad_state.values == {"receipts_v1": {"controller_id": "forged"}}
+
+now[0] = 106.0
+assert store.control_status_for_owner(owner())["available"] is False
+`;
+  runPluginPython(script);
+});
+
 test('browser_event_log clamps invalid limits without crashing', () => {
   const script = `${pluginImportHarness}
 from companion_plugin import tools
@@ -307,6 +472,16 @@ test('events module defines canonical names', () => {
   assert.match(events, /BROWSER_CONTEXT_UPDATED/);
   assert.match(events, /BROWSER_CONTEXT_CLEARED/);
   assert.match(events, /normalize_event_name/);
+
+  const script = `${pluginImportHarness}
+from companion_plugin.events import normalize_event_name
+assert normalize_event_name("hermes.browser.control.available") == "browser.control.available"
+assert normalize_event_name("hermes.browser.control.unavailable") == "browser.control.unavailable"
+assert normalize_event_name("hermes.browser.control.approval_requested") == "browser.control.approval_requested"
+assert normalize_event_name("hermes.browser.control.detached") == "browser.control.detached"
+assert normalize_event_name("hermes.browser.control.future") == "runtime.unknown"
+`;
+  runPluginPython(script);
 });
 
 test('policy prohibits browser control', () => {
@@ -326,6 +501,10 @@ test('companion skill preserves browser context trust boundaries', () => {
   assert.match(skill, /browser_get_context/);
   assert.match(skill, /browser_clear_context/);
   assert.match(skill, /browser_event_log/);
+  assert.match(skill, /browser_control_status/);
+  assert.match(skill, /browser_context_journal/);
+  assert.match(skill, /historical/i);
+  assert.match(skill, /side panel|broker supervision/i);
 });
 
 function listFilesRecursive(dir) {
@@ -347,7 +526,8 @@ test('no network, route, or browser-control capability in companion plugin files
 test('install.md documents the plugin correctly', () => {
   const install = readFileSync('companion-plugin/install.md', 'utf8');
   assert.match(install, /hermes plugins enable hermes-browser-companion/);
-  assert.match(install, /v0\.1\.10/);
+  assert.match(install, /v0\.3\.0/);
+  assert.doesNotMatch(install, /v0\.1\.10/);
   assert.match(install, /fail-soft/i);
   assert.ok(install.length > 400);
 });
@@ -482,6 +662,147 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
     outcomes = list(executor.map(lambda _index: consume_once(), range(2)))
 assert sum(item.get("available") is True for item in outcomes) == 1
 assert sum(item.get("action") == "block" for item in outcomes) == 1
+`;
+  runPluginPython(script);
+});
+
+test('Phase 8 journal is metadata-only, owner-scoped, bounded, and never authorizes context', () => {
+  const script = `${pluginImportHarness}
+import json
+import os
+import stat
+import tempfile
+
+from companion_plugin.context_store import BrowserContextStore
+from companion_plugin.journal import (
+    BrowserContextJournal,
+    JOURNAL_FILE_MODE,
+    JOURNAL_ROW_KEYS,
+    MAX_JOURNAL_ROWS,
+    validate_journal_row,
+)
+from companion_plugin import hooks, tools
+
+PAGE_SENTINEL = "JOURNAL_PAGE_TEXT_SENTINEL_DO_NOT_LEAK"
+
+def envelope(page_text=PAGE_SENTINEL, delivery="full"):
+    return {
+        "protocol": "hermes.browser.turn.v2",
+        "human_input": {"source": "composer", "text": "Summarize this page."},
+        "browser_context": {
+            "delivery": delivery,
+            "payload": {
+                "protocol": "hermes.browser.context.v1",
+                "contextScope": {"mode": "follow-active"},
+                "settings": {"contextDepth": "normal", "includeTabs": False, "includePageText": True, "includeSelectedText": True, "maxTabs": 12},
+                "activeTab": {"id": 1, "active": True, "title": "Docs", "url": "https://example.com/docs", "favIconUrl": ""},
+                "tabs": [],
+                "selectedTabs": [],
+                "pageContext": {"restricted": False, "reason": "", "selectedText": "", "text": page_text, "youtubeTranscript": "", "extraction": None, "siteAdapter": None, "meta": {"description": "", "language": "", "headings": []}, "pickedElement": None},
+            },
+        },
+        "attachment_context": {"items": []},
+        "source_receipt": {"protocol": "hermes.browser.turn.v2", "version": 2, "context_hash": "j00000000000000000000000000000000000", "delivery": delivery},
+    }
+
+def owner(**overrides):
+    class _Owner:
+        principal_id = "session:session-j"
+        session_id = "session-j"
+        turn_id = "turn-j"
+        task_id = "task-j"
+
+    values = {field: getattr(_Owner, field) for field in ("principal_id", "session_id", "turn_id", "task_id")}
+    values.update(overrides)
+    return type("Owner", (), values)()
+
+OWNER_OBJECT = owner()
+
+# Exact row-key contract: no page/payload/URL field can ever enter a row.
+assert set(JOURNAL_ROW_KEYS) == {
+    "ts", "context_id", "payload_hash", "scope", "controller_id",
+    "browser_profile_id", "tab_id", "lease_owned", "delivery",
+}
+try:
+    validate_journal_row({"ts": 1, "page": PAGE_SENTINEL})
+    raise AssertionError("row with page field must be refused")
+except Exception:
+    pass
+
+# Memory-only journal: bounded, owner-scoped, deterministic rotation.
+journal = BrowserContextJournal(max_rows=500)
+for index in range(520):
+    journal.record(
+        owner(),
+        {"ts": float(index), "context_id": f"ctx-{index}", "payload_hash": "h", "scope": "follow-active",
+         "controller_id": "c", "browser_profile_id": "p", "tab_id": index, "lease_owned": True, "delivery": "full"},
+    )
+assert journal.row_count == 500
+rows = journal.rows_for_owner(owner(), limit=500)
+assert len(rows) == 500
+assert rows[0]["context_id"] == "ctx-20"      # oldest dropped deterministically
+assert rows[-1]["context_id"] == "ctx-519"     # newest retained
+assert rows[-1]["ts"] == 519.0
+assert PAGE_SENTINEL not in json.dumps(rows)
+assert journal.rows_for_owner(owner(session_id="other"), limit=500) == []
+
+# Durable journal: mode 0600 where supported and reload from disk.
+with tempfile.TemporaryDirectory() as tmp:
+    durable = BrowserContextJournal(max_rows=500, data_dir=tmp)
+    durable.record(owner(), {"ts": 1.0, "context_id": "durable-1", "payload_hash": "h", "scope": "follow-active",
+                             "controller_id": "c", "browser_profile_id": "p", "tab_id": 1, "lease_owned": False, "delivery": "full"})
+    path = os.path.join(tmp, "journal.jsonl")
+    assert os.path.exists(path)
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(path).st_mode) == JOURNAL_FILE_MODE
+    reloaded = BrowserContextJournal(max_rows=500, data_dir=tmp)
+    assert len(reloaded.rows_for_owner(owner(), limit=500)) == 1
+
+# Store wiring: journaling records metadata rows on put_bcp_v2 but the
+# journal tool never authorizes browser_get_context.
+store = BrowserContextStore()
+store.configure_journal(None)
+hooks.set_store(store)
+tools.set_store(store)
+hook_kwargs = {"session_id": "session-j", "turn_id": "turn-j", "task_id": "task-j"}
+notice = hooks.pre_llm_call(user_message=json.dumps(envelope()), **hook_kwargs)
+assert notice is not None
+journal_view = store.journal_for_owner(owner(), limit=50)
+assert journal_view["available"] is True
+blob = json.dumps(journal_view)
+assert PAGE_SENTINEL not in blob
+assert "https://example.com" not in blob
+assert "https://example.com/docs" not in blob
+
+# The journal tool itself cannot retrieve page text: no lease, no payload.
+direct = json.loads(tools.browser_context_journal({}))
+assert direct == {"available": False, "reason": "Browser context unavailable."}
+assert hooks.pre_tool_call(tool_name="browser_context_journal", args={"limit": 10}, **hook_kwargs) is None
+view = json.loads(tools.browser_context_journal({"limit": 10}))
+assert view["available"] is True
+assert PAGE_SENTINEL not in json.dumps(view)
+
+# Journaling never authorizes browser_get_context. A fresh store with the
+# same durable journal loaded has journal rows but no live in-memory record,
+# so the get handler must block even though the journal knows the id.
+with tempfile.TemporaryDirectory() as tmp:
+    source = BrowserContextStore()
+    source.configure_journal(tmp)
+    hooks.set_store(source)
+    tools.set_store(source)
+    assert hooks.pre_llm_call(user_message=json.dumps(envelope()), **hook_kwargs) is not None
+    source_view = source.journal_for_owner(owner(), limit=10)
+    journal_id = source_view["rows"][0]["context_id"]
+    assert len(journal_id) == 32
+
+    revived = BrowserContextStore()
+    revived.configure_journal(tmp)
+    hooks.set_store(revived)
+    tools.set_store(revived)
+    assert revived.journal_for_owner(owner(), limit=10)["available"] is True
+    blocked = hooks.pre_tool_call(tool_name="browser_get_context", args={"context_id": journal_id}, **hook_kwargs)
+    assert blocked == {"action": "block", "message": "Browser context unavailable."}
+    assert json.loads(tools.browser_get_context({"context_id": journal_id}))["available"] is False
 `;
   runPluginPython(script);
 });
