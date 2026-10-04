@@ -102,7 +102,7 @@ test('Phase 6 approval reason remains fully readable in narrow Browser panels', 
 });
 
 test('local document approval does not leak attach failures as uncaught rejections', () => {
-  const handler = source.match(/localDocumentApproveButton\?\.addEventListener\('click', async \(\) => \{[\s\S]*?\n  \}\);/)?.[0] || '';
+  const handler = source.match(/localDocumentApproveButton\?\.addEventListener\('click', async \(\) => \{[\s\S]*?\n {2}\}\);/)?.[0] || '';
   assert.match(handler, /try \{/);
   assert.match(handler, /attachBrowserControlToCurrentTab\(\)/);
   assert.match(handler, /catch \(error\)/);
