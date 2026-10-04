@@ -10,6 +10,10 @@
 - The composer's DOM preview and Attached-tab controls share one row, and a slim handle on the composer border hides or shows them. The choice is remembered, the DOM preview always reopens closed, and hovering DOM explains what it is.
 - The chat intro banner now matches the Settings banner's spacing and keeps white text on blue in Nous Light.
 
+### Fixed
+
+- Choosing Pin current tab or Follow active tab on a remote connection that has not approved page context sharing now explains why and offers an Open Settings button that goes straight to the approval switch, instead of silently staying on Chat only. Approval is never granted automatically. Thanks to @jdot-dev (#92, #93).
+
 ## [0.3.4] - 2026-10-03
 
 ### Added
